@@ -1,0 +1,198 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+@import "../styles/tokens.css";
+
+@custom-variant dark (&:is(.dark *));
+
+/* ─────────────────────────────────────────────
+   THEME — Skylize brand surfaces, type & motion.
+   All neutrals are derived from the two brand
+   neutrals (ink + paper) so the palette never
+   leaves: #08090A · #F7F8F8 · #0047FF
+───────────────────────────────────────────── */
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  /* Brand primitives — usable as text-ink / bg-paper / text-blue */
+  --color-ink: #08090a;
+  --color-paper: #f7f8f8;
+  --color-blue: #0047ff;
+
+  /* Type */
+  --font-sans: var(--font-inter);
+  --font-display: var(--font-inter-tight);
+  --font-heading: var(--font-inter-tight);
+  --font-mono: var(--font-geist-mono);
+
+  /* Motion — Precision Ascent */
+  --ease-altitude: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-altitude-in: cubic-bezier(0.7, 0, 0.84, 0);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+:root {
+  /* Skylize is a single, dark-first identity — no theme toggle. */
+  --background: #08090a;
+  --foreground: #f7f8f8;
+
+  --card: color-mix(in srgb, #f7f8f8 3%, #08090a);
+  --card-foreground: #f7f8f8;
+  --popover: color-mix(in srgb, #f7f8f8 4%, #08090a);
+  --popover-foreground: #f7f8f8;
+
+  --primary: #0047ff;
+  --primary-foreground: #f7f8f8;
+  --secondary: color-mix(in srgb, #f7f8f8 6%, #08090a);
+  --secondary-foreground: #f7f8f8;
+
+  --muted: color-mix(in srgb, #f7f8f8 4%, #08090a);
+  --muted-foreground: color-mix(in srgb, #f7f8f8 52%, #08090a);
+  --accent: color-mix(in srgb, #f7f8f8 7%, #08090a);
+  --accent-foreground: #f7f8f8;
+  --destructive: #0047ff;
+
+  /* The Altitude Line lives here: a hairline of paper over ink. */
+  --border: color-mix(in srgb, #f7f8f8 9%, transparent);
+  --border-strong: color-mix(in srgb, #f7f8f8 16%, transparent);
+  --input: color-mix(in srgb, #f7f8f8 14%, transparent);
+  --ring: #0047ff;
+
+  --radius: 0.5rem;
+
+  color-scheme: dark;
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  html {
+    @apply font-sans antialiased;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    scroll-behavior: smooth;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-feature-settings: "cv11", "ss01";
+    font-variation-settings: "opsz" 32;
+  }
+
+  ::selection {
+    background-color: color-mix(in srgb, var(--color-blue) 32%, transparent);
+    color: var(--color-paper);
+  }
+
+  /* Display headings carry the design — tight, optical, precise. */
+  h1, h2, h3, h4 {
+    @apply font-display tracking-tight;
+    font-feature-settings: "ss01", "cv01";
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: var(--background);
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--border-strong);
+    border-radius: 9999px;
+    border: 3px solid var(--background);
+  }
+}
+
+@layer utilities {
+  /* The Altitude Line — the signature 0.5px horizontal rule.
+     Rendered as a gradient so it can fade at the edges. */
+  .altitude-rule {
+    height: 0.5px;
+    width: 100%;
+    background: linear-gradient(
+      90deg,
+      transparent,
+      var(--border-strong) 12%,
+      var(--border-strong) 88%,
+      transparent
+    );
+  }
+
+  .altitude-grid {
+    background-image:
+      linear-gradient(to right, var(--border) 1px, transparent 1px),
+      linear-gradient(to bottom, var(--border) 1px, transparent 1px);
+    background-size: 64px 64px;
+  }
+
+  /* Subtle radial vignette to lift content off pure ink — no glow, just depth. */
+  .altitude-vignette {
+    background:
+      radial-gradient(
+        120% 80% at 50% 0%,
+        color-mix(in srgb, #f7f8f8 4%, transparent),
+        transparent 60%
+      );
+  }
+
+  .text-balance {
+    text-wrap: balance;
+  }
+
+  .animate-marquee {
+    animation: marquee var(--duration, 40s) linear infinite;
+  }
+  .animate-marquee-vertical {
+    animation: marquee-vertical var(--duration, 40s) linear infinite;
+  }
+}
+
+@keyframes marquee {
+  from { transform: translateX(0); }
+  to   { transform: translateX(calc(-100% - var(--gap, 1rem))); }
+}
+
+@keyframes marquee-vertical {
+  from { transform: translateY(0); }
+  to   { transform: translateY(calc(-100% - var(--gap, 1rem))); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

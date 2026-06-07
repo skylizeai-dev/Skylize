@@ -1,0 +1,155 @@
+filepath,agent_name,authority_level,parent_agent_id,escalation_path,notes
+docs/03_agents/01_executive_board/CFO/Finance/director_capital_allocation.md,director_capital_allocation,director,vp_finance,vp_finance > cfo > human_owner,
+docs/03_agents/01_executive_board/CFO/Finance/director_fpanda.md,director_fpanda,director,vp_finance,vp_finance > cfo > human_owner,
+docs/03_agents/01_executive_board/CFO/Finance/director_risk.md,director_risk,director,vp_finance,vp_finance > cfo > human_owner,
+docs/03_agents/01_executive_board/CFO/Finance/director_treasury.md,director_treasury,director,vp_finance,vp_finance > cfo > human_owner,
+docs/03_agents/01_executive_board/CFO/Finance/managers/manager_budgeting.md,manager_budgeting,manager,vp_finance,director_capital_allocation > vp_finance > cfo > human_owner,
+docs/03_agents/01_executive_board/CFO/Finance/managers/manager_profitability.md,manager_profitability,manager,vp_finance,director_capital_allocation > vp_finance > cfo > human_owner,
+docs/03_agents/01_executive_board/CFO/Finance/vp_finance.md,vp_finance,vp,cfo,cfo > human_owner,
+docs/03_agents/01_executive_board/CFO/cfo.md,cfo,executive,human_owner,human_owner,
+docs/03_agents/01_executive_board/CHRO/People/chro.md,chro,executive,human_owner,human_owner,
+docs/03_agents/01_executive_board/CHRO/People/director_performance.md,director_performance,director,chro,chro > human_owner,
+docs/03_agents/01_executive_board/CHRO/People/director_talent.md,director_talent,director,chro,chro > human_owner,
+docs/03_agents/01_executive_board/CHRO/People/director_training.md,director_training,director,chro,chro > human_owner,
+docs/03_agents/01_executive_board/CLO/Legal/chief_legal_officer.md,chief_legal_officer,executive,human_owner,human_owner,
+docs/03_agents/01_executive_board/CLO/Legal/director_compliance.md,director_compliance,director,chief_legal_officer,chief_legal_officer > human_owner,DUPLICATE name x2; STRAY-TEXT FILE (21b) - clean before generation
+docs/03_agents/01_executive_board/CLO/Legal/director_contracts.md,director_contracts,director,chief_legal_officer,chief_legal_officer > human_owner,
+docs/03_agents/01_executive_board/CLO/Legal/director_privacy.md,director_privacy,director,chief_legal_officer,chief_legal_officer > human_owner,
+docs/03_agents/01_executive_board/CMO/Marketing/Social_Media/director_social_media.md,director_social_media,director,vp_marketing,vp_marketing > cmo > human_owner,
+docs/03_agents/01_executive_board/CMO/Marketing/Social_Media/vp_creative/art_team/art_director.md,art_director,director,vp_creative,vp_creative > cmo > human_owner,
+docs/03_agents/01_executive_board/CMO/Marketing/Social_Media/vp_creative/art_team/workers/image_generation_agent.md,image_generation_agent,worker,art_director,art_director > vp_creative > cmo > human_owner,
+docs/03_agents/01_executive_board/CMO/Marketing/Social_Media/vp_creative/art_team/workers/motion_designer_agent.md,motion_designer_agent,worker,art_director,art_director > vp_creative > cmo > human_owner,
+docs/03_agents/01_executive_board/CMO/Marketing/Social_Media/vp_creative/art_team/workers/style_guardian_agent.md,style_guardian_agent,worker,art_director,art_director > vp_creative > cmo > human_owner,
+docs/03_agents/01_executive_board/CMO/Marketing/Social_Media/vp_creative/art_team/workers/thumbnail_specialist_agent.md,thumbnail_specialist_agent,worker,art_director,art_director > vp_creative > cmo > human_owner,
+docs/03_agents/01_executive_board/CMO/Marketing/Social_Media/vp_creative/art_team/workers/visual_consistency_agent.md,visual_consistency_agent,worker,art_director,art_director > vp_creative > cmo > human_owner,
+docs/03_agents/01_executive_board/CMO/Marketing/Social_Media/vp_creative/art_team/workers/visual_qc_agent.md,visual_qc_agent,worker,art_director,art_director > vp_creative > cmo > human_owner,
+docs/03_agents/01_executive_board/CMO/Marketing/Social_Media/vp_creative/brand_team/brand_director.md,brand_director,director,vp_creative,vp_creative > cmo > human_owner,
+docs/03_agents/01_executive_board/CMO/Marketing/Social_Media/vp_creative/brand_team/workers/brand_consistency_agent.md,brand_consistency_agent,worker,brand_director,brand_director > vp_creative > cmo > human_owner,
+docs/03_agents/01_executive_board/CMO/Marketing/Social_Media/vp_creative/brand_team/workers/brand_guardian_agent.md,brand_guardian_agent,worker,brand_director,brand_director > vp_creative > cmo > human_owner,
+docs/03_agents/01_executive_board/CMO/Marketing/Social_Media/vp_creative/brand_team/workers/messaging_agent.md,messaging_agent,worker,brand_director,brand_director > vp_creative > cmo > human_owner,
+docs/03_agents/01_executive_board/CMO/Marketing/Social_Media/vp_creative/brand_team/workers/positioning_agent.md,positioning_agent,worker,brand_director,brand_director > vp_creative > cmo > human_owner,
+docs/03_agents/01_executive_board/CMO/Marketing/Social_Media/vp_creative/brand_team/workers/tone_of_voice_agent.md,tone_of_voice_agent,worker,brand_director,brand_director > vp_creative > cmo > human_owner,
+docs/03_agents/01_executive_board/CMO/Marketing/Social_Media/vp_creative/copy_team/copy_director.md,copy_director,director,vp_creative,vp_creative > cmo > human_owner,
+docs/03_agents/01_executive_board/CMO/Marketing/Social_Media/vp_creative/copy_team/workers/ad_copy_agent.md,ad_copy_agent,worker,copy_director,copy_director > vp_creative > cmo > human_owner,
+docs/03_agents/01_executive_board/CMO/Marketing/Social_Media/vp_creative/copy_team/workers/caption_writer_agent.md,caption_writer_agent,worker,copy_director,copy_director > vp_creative > cmo > human_owner,
+docs/03_agents/01_executive_board/CMO/Marketing/Social_Media/vp_creative/copy_team/workers/cta_optimizer_agent.md,cta_optimizer_agent,worker,copy_director,copy_director > vp_creative > cmo > human_owner,
+docs/03_agents/01_executive_board/CMO/Marketing/Social_Media/vp_creative/copy_team/workers/hook_generator_agent.md,hook_generator_agent,worker,copy_director,copy_director > vp_creative > cmo > human_owner,
+docs/03_agents/01_executive_board/CMO/Marketing/Social_Media/vp_creative/copy_team/workers/offer_positioning_agent.md,offer_positioning_agent,worker,copy_director,copy_director > vp_creative > cmo > human_owner,
+docs/03_agents/01_executive_board/CMO/Marketing/Social_Media/vp_creative/copy_team/workers/script_writer_agent.md,script_writer_agent,worker,copy_director,copy_director > vp_creative > cmo > human_owner,
+docs/03_agents/01_executive_board/CMO/Marketing/Social_Media/vp_creative/copy_team/workers/story_writer_agent.md,story_writer_agent,worker,copy_director,copy_director > vp_creative > cmo > human_owner,
+docs/03_agents/01_executive_board/CMO/Marketing/Social_Media/vp_creative/creative_operations_departmant/creative_operations_manager.md,creative_operations_manager,manager,vp_creative,director_social_media > vp_creative > cmo > human_owner,TYPO in path: 'departmant'
+docs/03_agents/01_executive_board/CMO/Marketing/Social_Media/vp_creative/creative_operations_departmant/workers/approval_manager_agent.md,approval_manager_agent,worker,creative_operations_manager,creative_operations_manager > director_social_media > vp_creative > cmo > human_owner,TYPO in path: 'departmant'
+docs/03_agents/01_executive_board/CMO/Marketing/Social_Media/vp_creative/creative_operations_departmant/workers/asset_library_agent.md,asset_library_agent,worker,creative_operations_manager,creative_operations_manager > director_social_media > vp_creative > cmo > human_owner,TYPO in path: 'departmant'
+docs/03_agents/01_executive_board/CMO/Marketing/Social_Media/vp_creative/creative_operations_departmant/workers/deadline_manager_agent.md,deadline_manager_agent,worker,creative_operations_manager,creative_operations_manager > director_social_media > vp_creative > cmo > human_owner,TYPO in path: 'departmant'
+docs/03_agents/01_executive_board/CMO/Marketing/Social_Media/vp_creative/creative_operations_departmant/workers/task_router_agent.md,task_router_agent,worker,creative_operations_manager,creative_operations_manager > director_social_media > vp_creative > cmo > human_owner,TYPO in path: 'departmant'; STRAY-TEXT FILE (20b) - clean before generation
+docs/03_agents/01_executive_board/CMO/Marketing/Social_Media/vp_creative/creative_operations_departmant/workers/workflow_manager_agent.md,workflow_manager_agent,worker,creative_operations_manager,creative_operations_manager > director_social_media > vp_creative > cmo > human_owner,TYPO in path: 'departmant'
+docs/03_agents/01_executive_board/CMO/Marketing/Social_Media/vp_creative/creative_team/creative_director.md,creative_director,director,vp_creative,vp_creative > cmo > human_owner,
+docs/03_agents/01_executive_board/CMO/Marketing/Social_Media/vp_creative/creative_team/workers/competitor_creative_agent.md,competitor_creative_agent,worker,creative_director,creative_director > vp_creative > cmo > human_owner,
+docs/03_agents/01_executive_board/CMO/Marketing/Social_Media/vp_creative/creative_team/workers/creative_analysis_agent.md,creative_analysis_agent,worker,creative_director,creative_director > vp_creative > cmo > human_owner,
+docs/03_agents/01_executive_board/CMO/Marketing/Social_Media/vp_creative/creative_team/workers/creative_intelligence_agent.md,creative_intelligence_agent,worker,creative_director,creative_director > vp_creative > cmo > human_owner,
+docs/03_agents/01_executive_board/CMO/Marketing/Social_Media/vp_creative/creative_team/workers/creative_score_agent.md,creative_score_agent,worker,creative_director,creative_director > vp_creative > cmo > human_owner,
+docs/03_agents/01_executive_board/CMO/Marketing/Social_Media/vp_creative/creative_team/workers/quality_control_agent.md,quality_control_agent,worker,creative_director,creative_director > vp_creative > cmo > human_owner,
+docs/03_agents/01_executive_board/CMO/Marketing/Social_Media/vp_creative/creative_team/workers/viral_research_agent.md,viral_research_agent,worker,creative_director,creative_director > vp_creative > cmo > human_owner,
+docs/03_agents/01_executive_board/CMO/Marketing/Social_Media/vp_creative/video_team/video_director.md,video_director,director,vp_creative,vp_creative > cmo > human_owner,
+docs/03_agents/01_executive_board/CMO/Marketing/Social_Media/vp_creative/video_team/workers/competitor_reels_agent.md,competitor_reels_agent,worker,video_director,video_director > vp_creative > cmo > human_owner,
+docs/03_agents/01_executive_board/CMO/Marketing/Social_Media/vp_creative/video_team/workers/pacing_agent.md,pacing_agent,worker,video_director,video_director > vp_creative > cmo > human_owner,
+docs/03_agents/01_executive_board/CMO/Marketing/Social_Media/vp_creative/video_team/workers/reel_structure_agent.md,reel_structure_agent,worker,video_director,video_director > vp_creative > cmo > human_owner,
+docs/03_agents/01_executive_board/CMO/Marketing/Social_Media/vp_creative/video_team/workers/retention_optimizer_agent.md,retention_optimizer_agent,worker,video_director,video_director > vp_creative > cmo > human_owner,
+docs/03_agents/01_executive_board/CMO/Marketing/Social_Media/vp_creative/video_team/workers/video_editor_agent.md,video_editor_agent,worker,video_director,video_director > vp_creative > cmo > human_owner,
+docs/03_agents/01_executive_board/CMO/Marketing/Social_Media/vp_creative/video_team/workers/voiceover_agent.md,voiceover_agent,worker,video_director,video_director > vp_creative > cmo > human_owner,STRAY-TEXT FILE (20b) - clean before generation
+docs/03_agents/01_executive_board/CMO/Marketing/Social_Media/vp_creative/vp_creative.md,vp_creative,vp,cmo,cmo > human_owner,
+docs/03_agents/01_executive_board/CMO/Marketing/director_brand.md,director_brand,director,vp_marketing,vp_marketing > cmo > human_owner,
+docs/03_agents/01_executive_board/CMO/Marketing/director_email_marketing.md,director_email_marketing,director,vp_marketing,vp_marketing > cmo > human_owner,
+docs/03_agents/01_executive_board/CMO/Marketing/director_growth.md,director_growth,director,vp_marketing,vp_marketing > cmo > human_owner,
+docs/03_agents/01_executive_board/CMO/Marketing/director_performance_marketing.md,director_performance_marketing,director,vp_marketing,vp_marketing > cmo > human_owner,
+docs/03_agents/01_executive_board/CMO/Marketing/director_seo.md,director_seo,director,vp_marketing,vp_marketing > cmo > human_owner,
+docs/03_agents/01_executive_board/CMO/Marketing/vp_marketing.md,vp_marketing,vp,cmo,cmo > human_owner,
+docs/03_agents/01_executive_board/CMO/cmo.md,cmo,executive,human_owner,human_owner,
+docs/03_agents/01_executive_board/COO/Operations/director_logistics.md,director_logistics,director,vp_operations,vp_operations > coo > human_owner,
+docs/03_agents/01_executive_board/COO/Operations/director_store_operations.md,director_store_operations,director,vp_operations,vp_operations > coo > human_owner,
+docs/03_agents/01_executive_board/COO/Operations/director_supply_chain.md,director_supply_chain,director,vp_operations,vp_operations > coo > human_owner,
+docs/03_agents/01_executive_board/COO/Operations/director_vendor_management.md,director_vendor_management,director,vp_operations,vp_operations > coo > human_owner,DUPLICATE name x2
+docs/03_agents/01_executive_board/COO/Operations/vp_operations.md,vp_operations,vp,coo,coo > human_owner,
+docs/03_agents/01_executive_board/COO/Procurement/director_contract_procurement.md,director_contract_procurement,director,vc_procurement,vc_procurement > coo > human_owner,
+docs/03_agents/01_executive_board/COO/Procurement/director_sourcing.md,director_sourcing,director,vc_procurement,vc_procurement > coo > human_owner,
+docs/03_agents/01_executive_board/COO/Procurement/director_vendor_management.md,director_vendor_management,director,vc_procurement,vc_procurement > coo > human_owner,DUPLICATE name x2
+docs/03_agents/01_executive_board/COO/Procurement/managers/manager_procurement_operations.md,manager_procurement_operations,manager,vc_procurement,director_contract_procurement > vc_procurement > coo > human_owner,
+docs/03_agents/01_executive_board/COO/Procurement/managers/manager_vendor_relations.md,manager_vendor_relations,manager,vc_procurement,director_contract_procurement > vc_procurement > coo > human_owner,
+docs/03_agents/01_executive_board/COO/Procurement/managers/workers/contract_review_agent.md,contract_review_agent,worker,manager_procurement_operations,manager_procurement_operations > director_contract_procurement > vc_procurement > coo > human_owner,PATH: worker under Procurement/managers/workers/
+docs/03_agents/01_executive_board/COO/Procurement/managers/workers/cost_reduction_agent.md,cost_reduction_agent,worker,manager_procurement_operations,manager_procurement_operations > director_contract_procurement > vc_procurement > coo > human_owner,PATH: worker under Procurement/managers/workers/
+docs/03_agents/01_executive_board/COO/Procurement/managers/workers/pricing_negotiation_agent.md,pricing_negotiation_agent,worker,manager_procurement_operations,manager_procurement_operations > director_contract_procurement > vc_procurement > coo > human_owner,PATH: worker under Procurement/managers/workers/
+docs/03_agents/01_executive_board/COO/Procurement/managers/workers/procurement_optimizer_agent.md,procurement_optimizer_agent,worker,manager_procurement_operations,manager_procurement_operations > director_contract_procurement > vc_procurement > coo > human_owner,PATH: worker under Procurement/managers/workers/
+docs/03_agents/01_executive_board/COO/Procurement/managers/workers/supplier_score_agent.md,supplier_score_agent,worker,manager_procurement_operations,manager_procurement_operations > director_contract_procurement > vc_procurement > coo > human_owner,PATH: worker under Procurement/managers/workers/
+docs/03_agents/01_executive_board/COO/Procurement/managers/workers/vendor_discovery_agent.md,vendor_discovery_agent,worker,manager_procurement_operations,manager_procurement_operations > director_contract_procurement > vc_procurement > coo > human_owner,PATH: worker under Procurement/managers/workers/
+docs/03_agents/01_executive_board/COO/Procurement/managers/workers/vendor_evaluation_agent.md,vendor_evaluation_agent,worker,manager_procurement_operations,manager_procurement_operations > director_contract_procurement > vc_procurement > coo > human_owner,PATH: worker under Procurement/managers/workers/
+docs/03_agents/01_executive_board/COO/Procurement/managers/workers/vendor_risk_agent.md,vendor_risk_agent,worker,manager_procurement_operations,manager_procurement_operations > director_contract_procurement > vc_procurement > coo > human_owner,PATH: worker under Procurement/managers/workers/
+docs/03_agents/01_executive_board/COO/Procurement/vc_procurement.md,vc_procurement,vp,coo,coo > human_owner,RENAME->vp_procurement (vc typo)
+docs/03_agents/01_executive_board/COO/coo.md,coo,executive,human_owner,human_owner,
+docs/03_agents/01_executive_board/CPO/Product/cpo.md,cpo,executive,human_owner,human_owner,DUP CPO role
+docs/03_agents/01_executive_board/CPO/Product/director_experimentation.md,director_experimentation,director,cpo,vp_product > cpo > human_owner,STRAY-TEXT FILE (28b) - clean before generation
+docs/03_agents/01_executive_board/CPO/Product/director_product_strategy.md,director_product_strategy,director,cpo,vp_product > cpo > human_owner,
+docs/03_agents/01_executive_board/CPO/Product/director_user_research.md,director_user_research,director,cpo,vp_product > cpo > human_owner,
+docs/03_agents/01_executive_board/CPO/Product/vp_product.md,vp_product,vp,cpo,cpo > human_owner,
+docs/03_agents/01_executive_board/CPO/chief_product_officer.md,chief_product_officer,executive,human_owner,human_owner,DUP CPO role
+docs/03_agents/01_executive_board/CRO/Customer_Success/director_lifecycle.md,director_lifecycle,director,vp_customer_success,vp_customer_success > cro > human_owner,
+docs/03_agents/01_executive_board/CRO/Customer_Success/director_retention.md,director_retention,director,vp_customer_success,vp_customer_success > cro > human_owner,
+docs/03_agents/01_executive_board/CRO/Customer_Success/director_support.md,director_support,director,vp_customer_success,vp_customer_success > cro > human_owner,
+docs/03_agents/01_executive_board/CRO/Customer_Success/vp_customer_success.md,vp_customer_success,vp,cro,cro > human_owner,
+docs/03_agents/01_executive_board/CRO/Sales/director_account_management.md,director_account_management,director,vp_sales,vp_sales > cro > human_owner,
+docs/03_agents/01_executive_board/CRO/Sales/director_affiliates.md,director_affiliates,director,vp_sales,vp_sales > cro > human_owner,
+docs/03_agents/01_executive_board/CRO/Sales/director_b2b_sales.md,director_b2b_sales,director,vp_sales,vp_sales > cro > human_owner,
+docs/03_agents/01_executive_board/CRO/Sales/director_partnerships.md,director_partnerships,director,vp_sales,vp_sales > cro > human_owner,
+docs/03_agents/01_executive_board/CRO/Sales/vp_sales.md,vp_sales,vp,cro,cro > human_owner,
+docs/03_agents/01_executive_board/CRO/cro.md,cro,executive,human_owner,human_owner,
+docs/03_agents/01_executive_board/CSO/Special_Projects/managers/director_m_and_a.md,director_m_and_a,director,vp_special_projects,vp_special_projects > cso > human_owner,M&A naming variant; DEPTH CONTRADICTION: director inside managers/ dir
+docs/03_agents/01_executive_board/CSO/Special_Projects/managers/director_new_ventures.md,director_new_ventures,director,vp_special_projects,vp_special_projects > cso > human_owner,DEPTH CONTRADICTION: director inside managers/ dir
+docs/03_agents/01_executive_board/CSO/Special_Projects/managers/director_r_and_d.md,director_r_and_d,director,vp_special_projects,vp_special_projects > cso > human_owner,DEPTH CONTRADICTION: director inside managers/ dir
+docs/03_agents/01_executive_board/CSO/Special_Projects/managers/director_skunkworks.md,director_skunkworks,director,vp_special_projects,vp_special_projects > cso > human_owner,DEPTH CONTRADICTION: director inside managers/ dir
+docs/03_agents/01_executive_board/CSO/Special_Projects/managers/workers/acquisition_target_agent.md,acquisition_target_agent,worker,director_m_and_a,director_m_and_a > vp_special_projects > cso > human_owner,
+docs/03_agents/01_executive_board/CSO/Special_Projects/managers/workers/competitive_threat_agent.md,competitive_threat_agent,worker,director_m_and_a,director_m_and_a > vp_special_projects > cso > human_owner,
+docs/03_agents/01_executive_board/CSO/Special_Projects/managers/workers/innovation_scout_agent.md,innovation_scout_agent,worker,director_m_and_a,director_m_and_a > vp_special_projects > cso > human_owner,
+docs/03_agents/01_executive_board/CSO/Special_Projects/managers/workers/market_opportunity_agent.md,market_opportunity_agent,worker,director_m_and_a,director_m_and_a > vp_special_projects > cso > human_owner,
+docs/03_agents/01_executive_board/CSO/Special_Projects/managers/workers/moonshot_research_agent.md,moonshot_research_agent,worker,director_m_and_a,director_m_and_a > vp_special_projects > cso > human_owner,
+docs/03_agents/01_executive_board/CSO/Special_Projects/managers/workers/partnership_discovery_agent.md,partnership_discovery_agent,worker,director_m_and_a,director_m_and_a > vp_special_projects > cso > human_owner,
+docs/03_agents/01_executive_board/CSO/Special_Projects/managers/workers/startup_analysis_agent.md,startup_analysis_agent,worker,director_m_and_a,director_m_and_a > vp_special_projects > cso > human_owner,
+docs/03_agents/01_executive_board/CSO/Special_Projects/managers/workers/strategic_experiment_agent.md,strategic_experiment_agent,worker,director_m_and_a,director_m_and_a > vp_special_projects > cso > human_owner,
+docs/03_agents/01_executive_board/CSO/Special_Projects/managers/workers/venture_builder_agent.md,venture_builder_agent,worker,director_m_and_a,director_m_and_a > vp_special_projects > cso > human_owner,
+docs/03_agents/01_executive_board/CSO/Special_Projects/vp_special_projects.md,vp_special_projects,vp,cso,cso > human_owner,
+docs/03_agents/01_executive_board/CSO/Strategy/director_competitive_intelligence.md,director_competitive_intelligence,director,vp_strategy,vp_strategy > cso > human_owner,
+docs/03_agents/01_executive_board/CSO/Strategy/director_expansion.md,director_expansion,director,vp_strategy,vp_strategy > cso > human_owner,
+docs/03_agents/01_executive_board/CSO/Strategy/director_market_intelligence.md,director_market_intelligence,director,vp_strategy,vp_strategy > cso > human_owner,
+docs/03_agents/01_executive_board/CSO/Strategy/director_mna.md,director_mna,director,vp_strategy,vp_strategy > cso > human_owner,M&A naming variant
+docs/03_agents/01_executive_board/CSO/Strategy/vp_strategy.md,vp_strategy,vp,cso,cso > human_owner,
+docs/03_agents/01_executive_board/CSO/cso.md,cso,executive,human_owner,human_owner,
+docs/03_agents/01_executive_board/CSO_Security/chief_security_officer.md,chief_security_officer,executive,human_owner,human_owner,
+docs/03_agents/01_executive_board/CSO_Security/managers/director_ai_safety.md,director_ai_safety,director,chief_security_officer,chief_security_officer > human_owner,DEPTH CONTRADICTION: director inside managers/ dir
+docs/03_agents/01_executive_board/CSO_Security/managers/director_compliance.md,director_compliance,director,chief_security_officer,chief_security_officer > human_owner,DUPLICATE name x2; DEPTH CONTRADICTION: director inside managers/ dir
+docs/03_agents/01_executive_board/CSO_Security/managers/director_cybersecurity.md,director_cybersecurity,director,chief_security_officer,chief_security_officer > human_owner,DEPTH CONTRADICTION: director inside managers/ dir
+docs/03_agents/01_executive_board/CSO_Security/managers/director_identity_access.md,director_identity_access,director,chief_security_officer,chief_security_officer > human_owner,DEPTH CONTRADICTION: director inside managers/ dir
+docs/03_agents/01_executive_board/CSO_Security/managers/manager_incident_response.md,manager_incident_response,manager,director_ai_safety,director_ai_safety > chief_security_officer > human_owner,
+docs/03_agents/01_executive_board/CSO_Security/managers/manager_security_operations.md,manager_security_operations,manager,director_ai_safety,director_ai_safety > chief_security_officer > human_owner,
+docs/03_agents/01_executive_board/CSO_Security/managers/workers/access_control_agent.md,access_control_agent,worker,director_ai_safety,manager_incident_response > director_ai_safety > chief_security_officer > human_owner,PATH: worker under managers/workers/ (expected workers/)
+docs/03_agents/01_executive_board/CSO_Security/managers/workers/compliance_monitor_agent.md,compliance_monitor_agent,worker,director_ai_safety,manager_incident_response > director_ai_safety > chief_security_officer > human_owner,PATH: worker under managers/workers/ (expected workers/); STRAY-TEXT FILE (27b) - clean before generation
+docs/03_agents/01_executive_board/CSO_Security/managers/workers/financial_risk_agent.md,financial_risk_agent,worker,director_ai_safety,manager_incident_response > director_ai_safety > chief_security_officer > human_owner,PATH: worker under managers/workers/ (expected workers/)
+docs/03_agents/01_executive_board/CSO_Security/managers/workers/fraud_detection_agent.md,fraud_detection_agent,worker,director_ai_safety,manager_incident_response > director_ai_safety > chief_security_officer > human_owner,PATH: worker under managers/workers/ (expected workers/)
+docs/03_agents/01_executive_board/CSO_Security/managers/workers/incident_detection_agent.md,incident_detection_agent,worker,director_ai_safety,manager_incident_response > director_ai_safety > chief_security_officer > human_owner,PATH: worker under managers/workers/ (expected workers/)
+docs/03_agents/01_executive_board/CSO_Security/managers/workers/llm_safety_agent.md,llm_safety_agent,worker,director_ai_safety,manager_incident_response > director_ai_safety > chief_security_officer > human_owner,PATH: worker under managers/workers/ (expected workers/)
+docs/03_agents/01_executive_board/CSO_Security/managers/workers/penetration_testing_agent.md,penetration_testing_agent,worker,director_ai_safety,manager_incident_response > director_ai_safety > chief_security_officer > human_owner,PATH: worker under managers/workers/ (expected workers/)
+docs/03_agents/01_executive_board/CSO_Security/managers/workers/prompt_injection_agent.md,prompt_injection_agent,worker,director_ai_safety,manager_incident_response > director_ai_safety > chief_security_officer > human_owner,PATH: worker under managers/workers/ (expected workers/)
+docs/03_agents/01_executive_board/CSO_Security/managers/workers/secrets_management_agent.md,secrets_management_agent,worker,director_ai_safety,manager_incident_response > director_ai_safety > chief_security_officer > human_owner,PATH: worker under managers/workers/ (expected workers/)
+docs/03_agents/01_executive_board/CSO_Security/managers/workers/security_audit_agent.md,security_audit_agent,worker,director_ai_safety,manager_incident_response > director_ai_safety > chief_security_officer > human_owner,PATH: worker under managers/workers/ (expected workers/)
+docs/03_agents/01_executive_board/CSO_Security/managers/workers/security_score_agent.md,security_score_agent,worker,director_ai_safety,manager_incident_response > director_ai_safety > chief_security_officer > human_owner,PATH: worker under managers/workers/ (expected workers/)
+docs/03_agents/01_executive_board/CTO/Data_and_AI/chief_data_officer.md,chief_data_officer,executive,human_owner,human_owner,
+docs/03_agents/01_executive_board/CTO/Data_and_AI/director_analytics.md,director_analytics,director,chief_data_officer,chief_data_officer > human_owner,
+docs/03_agents/01_executive_board/CTO/Data_and_AI/director_business_intelligence.md,director_business_intelligence,director,chief_data_officer,chief_data_officer > human_owner,
+docs/03_agents/01_executive_board/CTO/Data_and_AI/director_memory_systems.md,director_memory_systems,director,chief_data_officer,chief_data_officer > human_owner,
+docs/03_agents/01_executive_board/CTO/Data_and_AI/director_ml.md,director_ml,director,chief_data_officer,chief_data_officer > human_owner,
+docs/03_agents/01_executive_board/CTO/Engineering/director_agent_infrastructure.md,director_agent_infrastructure,director,vp_engineering,vp_engineering > cto > human_owner,
+docs/03_agents/01_executive_board/CTO/Engineering/director_backend.md,director_backend,director,vp_engineering,vp_engineering > cto > human_owner,
+docs/03_agents/01_executive_board/CTO/Engineering/director_devops.md,director_devops,director,vp_engineering,vp_engineering > cto > human_owner,STRAY-TEXT FILE (20b) - clean before generation
+docs/03_agents/01_executive_board/CTO/Engineering/director_frontend.md,director_frontend,director,vp_engineering,vp_engineering > cto > human_owner,
+docs/03_agents/01_executive_board/CTO/Engineering/director_platform.md,director_platform,director,vp_engineering,vp_engineering > cto > human_owner,
+docs/03_agents/01_executive_board/CTO/Engineering/vp_engineering.md,vp_engineering,vp,cto,cto > human_owner,
+docs/03_agents/01_executive_board/CTO/cto.md,cto,executive,human_owner,human_owner,
+docs/03_agents/01_executive_board/ceo.md,ceo,executive,human_owner,human_owner,
+docs/03_agents/01_executive_board/chief_ai_advisor.md,chief_ai_advisor,executive,human_owner,human_owner,

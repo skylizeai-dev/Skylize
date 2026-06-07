@@ -1,0 +1,143 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "skylize"
+version = "0.1.0"
+description = "Skylize multi-agent platform"
+requires-python = ">=3.12"
+
+# Sprint 1 foundation + Sprint 2 backend core.
+# LLM providers (anthropic, openai), CrewAI intra-team patterns, vector store
+# (qdrant-client), observability (opentelemetry, langfuse) and object storage
+# (aioboto3) are added in the sprints that first import them.
+dependencies = [
+    # Crypto — CB-1 RESOLVED: governance tokens are ECDSA P-384 (see ecc_service.py)
+    "cryptography>=42.0",
+
+    # Validation & settings — the contract language across the whole spine
+    "pydantic>=2.7,<3",
+    "pydantic-settings>=2.3",
+
+    # Edge / API gateway
+    "fastapi>=0.111",
+    "uvicorn[standard]>=0.29",
+    "httpx>=0.27",
+    "python-jose[cryptography]>=3.3",   # OIDC JWT verification
+
+    # System of record
+    "asyncpg>=0.29",
+    "alembic>=1.13",
+    "sqlalchemy>=2.0",          # Alembic plumbing only; runtime queries use raw asyncpg
+
+    # Event bus + cache + queue
+    "redis[hiredis]>=5.0",
+
+    # Agent orchestration control plane
+    "langgraph>=0.2",
+
+    # Structured logging
+    "structlog>=24.1",
+
+    # Time-sortable IDs for partition keys
+    "python-ulid>=2.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "pytest-benchmark",
+    "import-linter>=2.0",
+    "ruff>=0.4",
+    "mypy>=1.10",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+# Tests live under tests/ only. Keeping src/ out of testpaths prevents a stray
+# test_*.py inside the package from breaking collection for the whole suite
+# (the Sprint-1 CI failure: a bare `import ecc_service` in src aborted pytest).
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+asyncio_mode = "auto"
+markers = [
+    "integration: requires real Postgres/Redis (SKYLIZE_TEST_DB_URL / SKYLIZE_TEST_REDIS_URL); skipped otherwise",
+]
+
+# ----------------------------------------------------------------------------
+# Boundary enforcement (repository_structure.md §4): agents/ may import only
+# schemas/.  The import-linter contract gate fails the build on any violation.
+# ----------------------------------------------------------------------------
+[tool.importlinter]
+root_package = "skylize"
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "Agents may only import schemas"
+type = "forbidden"
+source_modules = ["skylize.agents"]
+forbidden_modules = [
+    "skylize.adapters",
+    "skylize.dal",
+    "skylize.app",
+    "skylize.runtime",
+    "skylize.events",
+    "skylize.memory",
+]
+
+[[tool.importlinter.contracts]]
+name = "Schemas are leaf packages"
+type = "forbidden"
+source_modules = ["skylize.schemas"]
+forbidden_modules = [
+    "skylize.adapters",
+    "skylize.dal",
+    "skylize.app",
+    "skylize.events",
+    "skylize.memory",
+    "skylize.contracts",
+]
+
+# SQL/driver lives only in dal/ (and the composition root that wires concretes).
+# The genuinely pure inner layers must never reach a database driver; the
+# Application Boundary depends on dal *ports*, not on asyncpg. `bootstrap` (the
+# composition root) and `edge` (the process entrypoint) are allowed to construct
+# concrete adapters at startup.
+[[tool.importlinter.contracts]]
+name = "Pure inner layers hold no database driver"
+type = "forbidden"
+source_modules = [
+    "skylize.agents",
+    "skylize.schemas",
+    "skylize.contracts",
+    "skylize.runtime",
+    "skylize.memory",
+]
+forbidden_modules = ["asyncpg"]
+
+[[tool.importlinter.contracts]]
+name = "Application logic contains no SQL (depends on dal ports only)"
+type = "forbidden"
+source_modules = ["skylize.app"]
+forbidden_modules = ["skylize.dal.repositories", "skylize.dal.connection", "asyncpg"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["pydantic.mypy"]
+
+# Third-party libraries that ship no type information (no py.typed / stubs).
+# We keep `strict` for our own code; these get import-level leniency only.
+[[tool.mypy.overrides]]
+module = ["asyncpg.*", "redis.*", "jose.*", "langgraph.*"]
+ignore_missing_imports = true

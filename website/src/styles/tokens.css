@@ -1,0 +1,40 @@
+/**
+ * Skylize Design Tokens — supplemental
+ *
+ * Brand color, surface, type and easing tokens live in globals.css
+ * (so they flow into Tailwind's @theme). This file holds the values
+ * Tailwind doesn't need to own: motion timing, z-index, and the
+ * Precision Ascent distance scale.
+ *
+ * Imported by globals.css — do not use @layer here.
+ */
+
+:root {
+  /* ── Motion — Precision Ascent ──────────────────────────
+     Everything rises. Nothing bounces. Nothing falls. */
+  --ease-altitude:     cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-altitude-in:  cubic-bezier(0.7, 0, 0.84, 0);
+
+  --duration-fast:    0.18s;
+  --duration-normal:  0.32s;
+  --duration-slow:    0.6s;
+  --duration-ascent:  0.8s;
+
+  /* Distance a block travels as it ascends into view */
+  --ascent-sm: 12px;
+  --ascent-md: 20px;
+  --ascent-lg: 32px;
+
+  /* ── Layout rhythm ──────────────────────────────────────── */
+  --container-max:    1200px;
+  --container-gutter:  1.5rem;
+  --section-pad-y:     clamp(5rem, 12vh, 9rem);
+
+  /* ── Z-index scale ──────────────────────────────────────── */
+  --z-base:      0;
+  --z-raised:    10;
+  --z-sticky:    40;
+  --z-nav:       50;
+  --z-overlay:   60;
+  --z-modal:     70;
+}

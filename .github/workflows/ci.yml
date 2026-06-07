@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Fast gate: lint, boundaries, types, and the in-process test suite.
+  # No external services — runs the `memory` backend. Must be green on every PR.
+  # ---------------------------------------------------------------------------
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: pip install -e ".[dev]"
+      - name: Ruff
+        run: ruff check src tests
+      - name: Import boundaries (import-linter)
+        run: lint-imports
+      - name: Types (mypy strict)
+        run: mypy src
+      - name: Tests (no exclusions)
+        run: pytest -q
+
+  # ---------------------------------------------------------------------------
+  # Integration gate: real Postgres + Redis (Sprint-2 Tasks 4/5).
+  # The integration tests skip themselves if SKYLIZE_TEST_DB_URL /
+  # SKYLIZE_TEST_REDIS_URL are unset, so this job is what actually exercises
+  # them — "no mocks, real services".
+  # ---------------------------------------------------------------------------
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: skylize
+          POSTGRES_USER: skylize
+          POSTGRES_PASSWORD: localdev
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U skylize"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    env:
+      # Admin DSN (superuser) — migrations only.
+      SKYLIZE_TEST_DB_URL: postgresql://skylize:localdev@localhost:5432/skylize
+      # App DSN — the non-superuser, RLS-subject role the isolation tests use to
+      # prove tenant isolation actually holds (Sprint-2 RLS fix).
+      SKYLIZE_TEST_APP_DB_URL: postgresql://skylize_app:appdev@localhost:5432/skylize
+      SKYLIZE_APP_DB_PASSWORD: appdev
+      SKYLIZE_TEST_REDIS_URL: redis://localhost:6379
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: pip install -e ".[dev]"
+      - name: Apply migrations (admin role; migration 0003 creates skylize_app)
+        run: alembic upgrade head
+        env:
+          SKYLIZE_DB_URL: postgresql://skylize:localdev@localhost:5432/skylize
+          SKYLIZE_APP_DB_PASSWORD: appdev
+      - name: Integration tests (real PG + Redis)
+        run: pytest -q -m integration -rA

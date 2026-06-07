@@ -1,0 +1,512 @@
+- generic [active] [ref=e1]:
+  - banner [ref=e2]:
+    - navigation [ref=e4]:
+      - link "Skylize — home" [ref=e5] [cursor=pointer]:
+        - /url: "#top"
+        - generic [ref=e6]:
+          - img [ref=e7]
+          - generic [ref=e11]: Skylize
+      - list [ref=e12]:
+        - listitem [ref=e13]:
+          - link "Platform" [ref=e14] [cursor=pointer]:
+            - /url: "#solution"
+        - listitem [ref=e15]:
+          - link "How it works" [ref=e16] [cursor=pointer]:
+            - /url: "#how-it-works"
+        - listitem [ref=e17]:
+          - link "Agents" [ref=e18] [cursor=pointer]:
+            - /url: "#agents"
+        - listitem [ref=e19]:
+          - link "Results" [ref=e20] [cursor=pointer]:
+            - /url: "#roi"
+        - listitem [ref=e21]:
+          - link "FAQ" [ref=e22] [cursor=pointer]:
+            - /url: "#faq"
+      - generic [ref=e23]:
+        - link "Sign in" [ref=e24] [cursor=pointer]:
+          - /url: "#"
+        - link "Book Strategy Call" [ref=e25] [cursor=pointer]:
+          - /url: "#contact"
+          - text: Book Strategy Call
+          - img [ref=e26]
+  - main [ref=e29]:
+    - generic [ref=e31]:
+      - generic [ref=e32]:
+        - link "Operational infrastructure, not another tool" [ref=e33] [cursor=pointer]:
+          - /url: "#agents"
+          - text: Operational infrastructure, not another tool
+        - heading "Less manual work. More revenue. More scale." [level=1] [ref=e35]:
+          - generic [ref=e36]: Less manual work.
+          - generic [ref=e37]: More revenue.
+          - generic [ref=e38]: More scale.
+        - paragraph [ref=e39]: AI systems and operational infrastructure that eliminate repetitive work and unlock growth.
+        - generic [ref=e40]:
+          - link "Book Strategy Call" [ref=e41] [cursor=pointer]:
+            - /url: "#contact"
+            - text: Book Strategy Call
+            - img [ref=e42]
+          - link "See How It Works" [ref=e45] [cursor=pointer]:
+            - /url: "#how-it-works"
+        - generic [ref=e46]:
+          - generic [ref=e47]: SOC 2 Type II
+          - generic [ref=e49]: No rip-and-replace
+          - generic [ref=e51]: Live in weeks
+      - generic [ref=e53]:
+        - generic [ref=e54]:
+          - generic [ref=e60]: Operational Altitude
+          - generic [ref=e61]:
+            - generic [ref=e62]: 12 agents
+            - generic [ref=e63]: autonomous
+        - separator [ref=e64]
+        - generic [ref=e65]:
+          - generic [ref=e66]:
+            - generic [ref=e67]:
+              - generic [ref=e68]: Throughput / week
+              - generic [ref=e69]: +218%
+            - generic [ref=e70]:
+              - generic:
+                - generic: 10k
+                - generic: 7.5k
+                - generic: 5k
+                - generic: 2.5k
+                - generic: "0"
+              - img [ref=e71]
+          - generic [ref=e75]:
+            - generic [ref=e76]:
+              - generic [ref=e77]: Systems
+              - generic [ref=e78]: live
+            - list [ref=e79]:
+              - listitem [ref=e80]:
+                - generic [ref=e82]: Revenue Ops
+                - generic [ref=e84]: "82"
+              - listitem [ref=e85]:
+                - generic [ref=e87]: Lead Routing
+                - generic [ref=e89]: "64"
+              - listitem [ref=e90]:
+                - generic [ref=e92]: Support Triage
+                - generic [ref=e94]: "41"
+              - listitem [ref=e95]:
+                - generic [ref=e97]: Data Sync
+                - generic [ref=e99]: "93"
+              - listitem [ref=e100]:
+                - generic [ref=e102]: Reporting
+                - generic [ref=e104]: "27"
+        - separator [ref=e105]
+        - generic [ref=e106]:
+          - generic [ref=e107]:
+            - generic [ref=e108]: 1,284
+            - generic [ref=e109]: tasks / day
+          - generic [ref=e110]:
+            - generic [ref=e111]: 37ms
+            - generic [ref=e112]: p50 latency
+          - generic [ref=e113]:
+            - generic [ref=e114]: 99.98%
+            - generic [ref=e115]: uptime
+    - generic [ref=e116]:
+      - paragraph [ref=e118]: Operating systems behind teams scaling past manual work
+      - generic [ref=e120]:
+        - generic [ref=e121]:
+          - generic [ref=e122]: NORTHWIND
+          - generic [ref=e123]: MERIDIAN
+          - generic [ref=e124]: APEX LABS
+          - generic [ref=e125]: VANTAGE
+          - generic [ref=e126]: HELIX
+          - generic [ref=e127]: ORBITAL
+          - generic [ref=e128]: LUMEN
+          - generic [ref=e129]: COBALT
+        - generic [ref=e130]:
+          - generic [ref=e131]: NORTHWIND
+          - generic [ref=e132]: MERIDIAN
+          - generic [ref=e133]: APEX LABS
+          - generic [ref=e134]: VANTAGE
+          - generic [ref=e135]: HELIX
+          - generic [ref=e136]: ORBITAL
+          - generic [ref=e137]: LUMEN
+          - generic [ref=e138]: COBALT
+        - generic [ref=e139]:
+          - generic [ref=e140]: NORTHWIND
+          - generic [ref=e141]: MERIDIAN
+          - generic [ref=e142]: APEX LABS
+          - generic [ref=e143]: VANTAGE
+          - generic [ref=e144]: HELIX
+          - generic [ref=e145]: ORBITAL
+          - generic [ref=e146]: LUMEN
+          - generic [ref=e147]: COBALT
+        - generic [ref=e148]:
+          - generic [ref=e149]: NORTHWIND
+          - generic [ref=e150]: MERIDIAN
+          - generic [ref=e151]: APEX LABS
+          - generic [ref=e152]: VANTAGE
+          - generic [ref=e153]: HELIX
+          - generic [ref=e154]: ORBITAL
+          - generic [ref=e155]: LUMEN
+          - generic [ref=e156]: COBALT
+    - generic [ref=e158]:
+      - generic [ref=e159]:
+        - generic [ref=e160]:
+          - generic [ref=e161]:
+            - generic [ref=e163]: "01"
+            - generic [ref=e164]: The problem
+          - heading "Manual work is the tax on every growing company." [level=2] [ref=e165]
+        - paragraph [ref=e167]: As you scale, the work multiplies faster than the team. More tools, more handoffs, more places for things to break. Skylize exists to remove that ceiling — permanently.
+      - generic [ref=e168]:
+        - generic [ref=e170]:
+          - generic [ref=e171]: "01"
+          - generic [ref=e172]:
+            - heading "Work scattered across tools" [level=3] [ref=e173]
+            - paragraph [ref=e174]: Teams stitch together a dozen systems and still move data by hand. The seams are where time and margin disappear.
+        - generic [ref=e176]:
+          - generic [ref=e177]: "02"
+          - generic [ref=e178]:
+            - heading "Headcount scales with volume" [level=3] [ref=e179]
+            - paragraph [ref=e180]: Every new customer adds manual load instead of leverage. Growth costs more than it returns.
+        - generic [ref=e182]:
+          - generic [ref=e183]: "03"
+          - generic [ref=e184]:
+            - heading "Insight trapped in operations" [level=3] [ref=e185]
+            - paragraph [ref=e186]: Decisions wait on reports nobody has time to build. The numbers exist — the attention does not.
+        - generic [ref=e188]:
+          - generic [ref=e189]: "04"
+          - generic [ref=e190]:
+            - heading "The compounding work never ships" [level=3] [ref=e191]
+            - paragraph [ref=e192]: Operators spend their day clearing the queue. The projects that change the trajectory stay parked.
+    - generic [ref=e194]:
+      - generic [ref=e195]:
+        - generic [ref=e196]:
+          - generic [ref=e198]: "02"
+          - generic [ref=e199]: The solution
+        - heading "One operating layer for your entire operation." [level=2] [ref=e200]
+        - paragraph [ref=e201]: Skylize is the infrastructure beneath the work — a system of agents and operational logic that runs the repetitive, so your team runs the company.
+      - generic [ref=e202]:
+        - generic [ref=e203]:
+          - generic [ref=e204]:
+            - img [ref=e206]
+            - generic [ref=e210]: agents
+          - separator [ref=e211]
+          - heading "Autonomous agents" [level=3] [ref=e212]
+          - paragraph [ref=e213]: Agents own a workflow end-to-end — research, decide, execute, report. Supervised when you want it, autonomous when you trust it.
+        - generic [ref=e214]:
+          - generic [ref=e215]:
+            - img [ref=e217]
+            - generic [ref=e222]: integration
+          - separator [ref=e223]
+          - heading "Sits on your stack" [level=3] [ref=e224]
+          - paragraph [ref=e225]: Connects to the tools you already run — CRM, billing, support, data — with no rip-and-replace and no migration project.
+        - generic [ref=e226]:
+          - generic [ref=e227]:
+            - img [ref=e229]
+            - generic [ref=e231]: control
+          - separator [ref=e232]
+          - heading "Operational visibility" [level=3] [ref=e233]
+          - paragraph [ref=e234]: Every action, cost, and outcome is observable in real time. Decisions stop waiting on a report that nobody has time to build.
+        - generic [ref=e235]:
+          - generic [ref=e236]:
+            - img [ref=e238]
+            - generic [ref=e241]: scale
+          - separator [ref=e242]
+          - heading "Compounding leverage" [level=3] [ref=e243]
+          - paragraph [ref=e244]: Each workflow you hand off frees the team to build the next. Capacity grows without growing headcount.
+    - generic [ref=e246]:
+      - generic [ref=e247]:
+        - generic [ref=e248]:
+          - generic [ref=e250]: "03"
+          - generic [ref=e251]: How it works
+        - heading "From manual operation to autonomous system in three moves." [level=2] [ref=e252]
+      - generic [ref=e254]:
+        - generic [ref=e255]:
+          - generic [ref=e258]: "01"
+          - heading "Map the operation" [level=3] [ref=e259]
+          - paragraph [ref=e260]: We trace how work actually moves through your business — every handoff, queue, and decision — and find where the leverage is.
+        - generic [ref=e261]:
+          - generic [ref=e264]: "02"
+          - heading "Deploy the agents" [level=3] [ref=e265]
+          - paragraph [ref=e266]: Agents stand up on your existing stack, scoped to real workflows, with guardrails and human approval exactly where it matters.
+        - generic [ref=e267]:
+          - generic [ref=e270]: "03"
+          - heading "Scale what works" [level=3] [ref=e271]
+          - paragraph [ref=e272]: Proven workflows go fully autonomous. Coverage expands as trust compounds — capacity grows without new headcount.
+    - generic [ref=e274]:
+      - generic [ref=e275]:
+        - generic [ref=e276]:
+          - generic [ref=e278]: "04"
+          - generic [ref=e279]: AI agents
+        - heading "A workforce of agents, each accountable for an outcome." [level=2] [ref=e280]
+        - paragraph [ref=e281]: Not a single chatbot. A coordinated system of specialists — scoped, measured, and supervised — that runs the operation alongside your team.
+      - generic [ref=e283]:
+        - list [ref=e284]:
+          - listitem [ref=e285]:
+            - button "Revenue Agent" [pressed] [ref=e286]:
+              - img [ref=e288]
+              - generic [ref=e292]: Revenue Agent
+          - listitem [ref=e294]:
+            - button "Support Agent" [ref=e295]:
+              - img [ref=e297]
+              - generic [ref=e305]: Support Agent
+          - listitem [ref=e306]:
+            - button "Operations Agent" [ref=e307]:
+              - img [ref=e309]
+              - generic [ref=e321]: Operations Agent
+          - listitem [ref=e322]:
+            - button "Finance Agent" [ref=e323]:
+              - img [ref=e325]
+              - generic [ref=e329]: Finance Agent
+        - generic [ref=e331]:
+          - generic [ref=e332]:
+            - img [ref=e334]
+            - generic [ref=e337]: autonomous · supervised
+          - heading "Revenue Agent" [level=3] [ref=e338]
+          - paragraph [ref=e339]: Owns pipeline hygiene, routing, and follow-up — so no opportunity ever goes cold.
+          - separator [ref=e340]
+          - generic [ref=e341]:
+            - generic [ref=e344]: Lead scoring & routing
+            - generic [ref=e347]: Follow-up sequencing
+            - generic [ref=e350]: CRM enrichment
+            - generic [ref=e353]: Forecast updates
+          - generic [ref=e354]:
+            - generic [ref=e355]:
+              - generic [ref=e356]: −71%
+              - generic [ref=e357]: lead response time
+            - generic [ref=e358]:
+              - generic [ref=e359]: +24%
+              - generic [ref=e360]: pipeline coverage
+    - generic [ref=e362]:
+      - generic [ref=e363]:
+        - generic [ref=e364]:
+          - generic [ref=e365]:
+            - generic [ref=e367]: "05"
+            - generic [ref=e368]: The return
+          - heading "The math is not subtle." [level=2] [ref=e369]
+          - paragraph [ref=e370]: Automation that removes real cost and returns real hours. These are the medians we see across deployments in the first year.
+        - link "Model your ROI" [ref=e372] [cursor=pointer]:
+          - /url: "#contact"
+          - text: Model your ROI
+          - img [ref=e373]
+      - generic [ref=e377]:
+        - generic [ref=e378]:
+          - generic [ref=e379]: 0 hrs
+          - paragraph [ref=e381]: reclaimed / person / week
+        - generic [ref=e382]:
+          - generic [ref=e383]: 0.0×
+          - paragraph [ref=e385]: return in year one
+        - generic [ref=e386]:
+          - generic [ref=e387]: −0%
+          - paragraph [ref=e389]: cost per operation
+        - generic [ref=e390]:
+          - generic [ref=e391]: 0 wks
+          - paragraph [ref=e393]: average payback period
+    - generic [ref=e395]:
+      - generic [ref=e396]:
+        - generic [ref=e397]:
+          - generic [ref=e399]: "06"
+          - generic [ref=e400]: Case studies
+        - heading "Operators who took the work off the team." [level=2] [ref=e401]
+      - link "Freight operations Cut order processing by 73% and absorbed 2× volume — with the same team. Skylize agents took over intake, validation, and routing across four disconnected systems. What took an analyst nine minutes now resolves in under two, untouched. Meridian Logistics −73% processing time 2.1× volume absorbed 0 added headcount" [ref=e403] [cursor=pointer]:
+        - /url: "#"
+        - generic [ref=e404]:
+          - generic [ref=e405]:
+            - generic [ref=e406]:
+              - generic [ref=e407]: Freight operations
+              - img [ref=e408]
+            - heading "Cut order processing by 73% and absorbed 2× volume — with the same team." [level=3] [ref=e411]
+            - paragraph [ref=e412]: Skylize agents took over intake, validation, and routing across four disconnected systems. What took an analyst nine minutes now resolves in under two, untouched.
+            - generic [ref=e413]: Meridian Logistics
+          - generic [ref=e414]:
+            - generic [ref=e415]:
+              - generic [ref=e416]: −73%
+              - generic [ref=e417]: processing time
+            - generic [ref=e418]:
+              - generic [ref=e419]: 2.1×
+              - generic [ref=e420]: volume absorbed
+            - generic [ref=e421]:
+              - generic [ref=e422]: "0"
+              - generic [ref=e423]: added headcount
+      - generic [ref=e424]:
+        - link "B2B SaaS Support deflection reached 61% while CSAT held at 98. Northwind 61% deflection 98 CSAT" [ref=e426] [cursor=pointer]:
+          - /url: "#"
+          - generic [ref=e427]:
+            - generic [ref=e428]: B2B SaaS
+            - img [ref=e429]
+          - paragraph [ref=e432]: Support deflection reached 61% while CSAT held at 98.
+          - separator [ref=e433]
+          - generic [ref=e434]:
+            - generic [ref=e435]: Northwind
+            - generic [ref=e436]:
+              - generic [ref=e437]:
+                - generic [ref=e438]: 61%
+                - generic [ref=e439]: deflection
+              - generic [ref=e440]:
+                - generic [ref=e441]: "98"
+                - generic [ref=e442]: CSAT
+        - link "Financial services Month-end close compressed from twelve days to three. Vantage Capital −9d time to close 100% reconciled" [ref=e444] [cursor=pointer]:
+          - /url: "#"
+          - generic [ref=e445]:
+            - generic [ref=e446]: Financial services
+            - img [ref=e447]
+          - paragraph [ref=e450]: Month-end close compressed from twelve days to three.
+          - separator [ref=e451]
+          - generic [ref=e452]:
+            - generic [ref=e453]: Vantage Capital
+            - generic [ref=e454]:
+              - generic [ref=e455]:
+                - generic [ref=e456]: −9d
+                - generic [ref=e457]: time to close
+              - generic [ref=e458]:
+                - generic [ref=e459]: 100%
+                - generic [ref=e460]: reconciled
+    - generic [ref=e462]:
+      - generic [ref=e464]:
+        - generic [ref=e466]: "07"
+        - generic [ref=e467]: Testimonials
+      - generic [ref=e468]:
+        - blockquote [ref=e470]: “We didn't add an AI tool. We added operational capacity. Skylize now runs the parts of the business that used to run us.”
+        - generic [ref=e471]:
+          - generic [ref=e472]: DO
+          - generic [ref=e473]:
+            - generic [ref=e474]: Dana Okafor
+            - generic [ref=e475]: Chief Operating Officer, Meridian Logistics
+      - generic [ref=e476]:
+        - generic [ref=e477]:
+          - paragraph [ref=e478]: “The first workflow paid for the entire engagement inside a quarter.”
+          - separator [ref=e479]
+          - generic [ref=e480]:
+            - generic [ref=e481]: Marcus Rehn
+            - generic [ref=e482]: VP Operations, Northwind
+        - generic [ref=e483]:
+          - paragraph [ref=e484]: “Our team finally works on the roadmap instead of the queue.”
+          - separator [ref=e485]
+          - generic [ref=e486]:
+            - generic [ref=e487]: Priya Nair
+            - generic [ref=e488]: Head of Support, Helix
+        - generic [ref=e489]:
+          - paragraph [ref=e490]: “Visibility we never had — every action and every cost, in real time.”
+          - separator [ref=e491]
+          - generic [ref=e492]:
+            - generic [ref=e493]: Tom Vasquez
+            - generic [ref=e494]: CFO, Vantage Capital
+    - generic [ref=e497]:
+      - generic [ref=e498]:
+        - generic [ref=e499]:
+          - generic [ref=e501]: "08"
+          - generic [ref=e502]: FAQ
+        - heading "Questions, answered." [level=2] [ref=e503]
+        - paragraph [ref=e504]:
+          - text: Still deciding?
+          - link "Book a strategy call" [ref=e505] [cursor=pointer]:
+            - /url: "#contact"
+          - text: and we'll walk through your operation.
+      - region [ref=e507]:
+        - heading "How is this different from buying another AI tool?" [level=3] [ref=e509]:
+          - button "How is this different from buying another AI tool?" [ref=e510]:
+            - text: How is this different from buying another AI tool?
+            - img
+        - heading "Do we have to replace our existing systems?" [level=3] [ref=e512]:
+          - button "Do we have to replace our existing systems?" [ref=e513]:
+            - text: Do we have to replace our existing systems?
+            - img
+        - heading "How do you keep agents safe and in control?" [level=3] [ref=e515]:
+          - button "How do you keep agents safe and in control?" [ref=e516]:
+            - text: How do you keep agents safe and in control?
+            - img
+        - heading "How long until we see results?" [level=3] [ref=e518]:
+          - button "How long until we see results?" [ref=e519]:
+            - text: How long until we see results?
+            - img
+        - heading "What about security and compliance?" [level=3] [ref=e521]:
+          - button "What about security and compliance?" [ref=e522]:
+            - text: What about security and compliance?
+            - img
+        - heading "How is pricing structured?" [level=3] [ref=e524]:
+          - button "How is pricing structured?" [ref=e525]:
+            - text: How is pricing structured?
+            - img
+    - generic [ref=e526]:
+      - separator [ref=e527]
+      - generic [ref=e529]:
+        - heading "Find your operational altitude." [level=2] [ref=e530]
+        - paragraph [ref=e531]: Book a strategy call and we'll map where Skylize takes the most work off your team — and what it returns. No deck, just your operation.
+        - generic [ref=e532]:
+          - generic [ref=e533]:
+            - textbox "Work email" [ref=e534]:
+              - /placeholder: you@company.com
+            - button "Book Strategy Call" [ref=e535]:
+              - text: Book Strategy Call
+              - img [ref=e536]
+          - paragraph [ref=e539]: SOC 2 Type II · Your data stays yours
+  - contentinfo [ref=e540]:
+    - generic [ref=e541]:
+      - generic [ref=e542]:
+        - generic [ref=e543]:
+          - generic [ref=e544]:
+            - img [ref=e545]
+            - generic [ref=e549]: Skylize
+          - paragraph [ref=e550]: Operational infrastructure that takes the manual work off your team — so the company can climb.
+        - navigation "Product" [ref=e551]:
+          - heading "Product" [level=3] [ref=e552]
+          - list [ref=e553]:
+            - listitem [ref=e554]:
+              - link "Platform" [ref=e555] [cursor=pointer]:
+                - /url: "#"
+            - listitem [ref=e556]:
+              - link "AI Agents" [ref=e557] [cursor=pointer]:
+                - /url: "#"
+            - listitem [ref=e558]:
+              - link "Integrations" [ref=e559] [cursor=pointer]:
+                - /url: "#"
+            - listitem [ref=e560]:
+              - link "Security" [ref=e561] [cursor=pointer]:
+                - /url: "#"
+        - navigation "Company" [ref=e562]:
+          - heading "Company" [level=3] [ref=e563]
+          - list [ref=e564]:
+            - listitem [ref=e565]:
+              - link "About" [ref=e566] [cursor=pointer]:
+                - /url: "#"
+            - listitem [ref=e567]:
+              - link "Customers" [ref=e568] [cursor=pointer]:
+                - /url: "#"
+            - listitem [ref=e569]:
+              - link "Careers" [ref=e570] [cursor=pointer]:
+                - /url: "#"
+            - listitem [ref=e571]:
+              - link "Contact" [ref=e572] [cursor=pointer]:
+                - /url: "#"
+        - navigation "Resources" [ref=e573]:
+          - heading "Resources" [level=3] [ref=e574]
+          - list [ref=e575]:
+            - listitem [ref=e576]:
+              - link "Documentation" [ref=e577] [cursor=pointer]:
+                - /url: "#"
+            - listitem [ref=e578]:
+              - link "Changelog" [ref=e579] [cursor=pointer]:
+                - /url: "#"
+            - listitem [ref=e580]:
+              - link "Blog" [ref=e581] [cursor=pointer]:
+                - /url: "#"
+            - listitem [ref=e582]:
+              - link "Status" [ref=e583] [cursor=pointer]:
+                - /url: "#"
+        - navigation "Legal" [ref=e584]:
+          - heading "Legal" [level=3] [ref=e585]
+          - list [ref=e586]:
+            - listitem [ref=e587]:
+              - link "Privacy" [ref=e588] [cursor=pointer]:
+                - /url: "#"
+            - listitem [ref=e589]:
+              - link "Terms" [ref=e590] [cursor=pointer]:
+                - /url: "#"
+            - listitem [ref=e591]:
+              - link "DPA" [ref=e592] [cursor=pointer]:
+                - /url: "#"
+      - separator [ref=e593]
+      - generic [ref=e594]:
+        - paragraph [ref=e595]: © 2026 Skylize, Inc.
+        - generic [ref=e596]: All systems operational
+        - generic [ref=e598]:
+          - link "X" [ref=e599] [cursor=pointer]:
+            - /url: "#"
+          - link "LinkedIn" [ref=e600] [cursor=pointer]:
+            - /url: "#"
+          - link "GitHub" [ref=e601] [cursor=pointer]:
+            - /url: "#"
+    - generic:
+      - generic: Skylize

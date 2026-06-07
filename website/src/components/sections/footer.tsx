@@ -1,0 +1,89 @@
+import { Container, AltitudeLine, Logo } from "@/components/skylize";
+
+const columns = [
+  {
+    title: "Product",
+    links: ["Platform", "AI Agents", "Integrations", "Security"],
+  },
+  {
+    title: "Company",
+    links: ["About", "Customers", "Careers", "Contact"],
+  },
+  {
+    title: "Resources",
+    links: ["Documentation", "Changelog", "Blog", "Status"],
+  },
+  {
+    title: "Legal",
+    links: ["Privacy", "Terms", "DPA"],
+  },
+];
+
+export function Footer() {
+  return (
+    <footer className="relative border-t border-border">
+      <Container>
+        <div className="grid grid-cols-2 gap-10 py-16 sm:grid-cols-3 lg:grid-cols-[2fr_repeat(4,1fr)]">
+          <div className="col-span-2 sm:col-span-3 lg:col-span-1">
+            <Logo />
+            <p className="mt-5 max-w-xs text-sm leading-relaxed text-muted-foreground">
+              Operational infrastructure that takes the manual work off your
+              team — so the company can climb.
+            </p>
+          </div>
+
+          {columns.map((col) => (
+            <nav key={col.title} aria-label={col.title}>
+              <h3 className="font-mono text-[11px] tracking-[0.16em] text-muted-foreground/70 uppercase">
+                {col.title}
+              </h3>
+              <ul className="mt-4 flex flex-col gap-3">
+                {col.links.map((link) => (
+                  <li key={link}>
+                    <a
+                      href="#"
+                      className="text-sm text-foreground/80 transition-colors duration-200 hover:text-foreground"
+                    >
+                      {link}
+                    </a>
+                  </li>
+                ))}
+              </ul>
+            </nav>
+          ))}
+        </div>
+
+        <AltitudeLine variant="solid" />
+
+        <div className="flex flex-col items-start justify-between gap-4 py-7 sm:flex-row sm:items-center">
+          <p className="font-mono text-[11px] tracking-[0.08em] text-muted-foreground">
+            © {new Date().getFullYear()} Skylize, Inc.
+          </p>
+
+          <div className="flex items-center gap-2 font-mono text-[11px] tracking-[0.08em] text-muted-foreground">
+            <span className="size-1.5 rounded-full" style={{ background: "var(--color-blue)" }} />
+            All systems operational
+          </div>
+
+          <div className="flex items-center gap-5 text-sm text-muted-foreground">
+            {["X", "LinkedIn", "GitHub"].map((s) => (
+              <a key={s} href="#" className="transition-colors duration-200 hover:text-foreground">
+                {s}
+              </a>
+            ))}
+          </div>
+        </div>
+      </Container>
+
+      {/* Oversized watermark — brand presence, clipped at the baseline */}
+      <div
+        aria-hidden
+        className="pointer-events-none flex justify-center overflow-hidden select-none"
+      >
+        <span className="-mb-[0.18em] translate-y-[0.22em] font-display text-[18vw] leading-none font-semibold tracking-[-0.04em] text-foreground/[0.04]">
+          Skylize
+        </span>
+      </div>
+    </footer>
+  );
+}

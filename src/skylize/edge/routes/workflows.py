@@ -1,0 +1,54 @@
+"""Workflow trigger routes — the worked creative path."""
+
+from __future__ import annotations
+
+from uuid import UUID, uuid4
+
+from fastapi import APIRouter, Depends
+from pydantic import BaseModel, ConfigDict, Field
+
+from ...bootstrap import Container
+from ...schemas.base import RequestContext
+from ..deps import enforce_rate_limit, get_container
+
+router = APIRouter(prefix="/api/v1/workflows", tags=["workflows"])
+
+
+class CreativeRunRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    brief_id: UUID | None = None
+    product: str
+    audience: str
+    count: int = Field(default=3, ge=1, le=10)
+
+
+class WorkflowResponse(BaseModel):
+    status: str
+    agent_id: str
+    correlation_id: UUID
+    token_id: UUID | None = None
+    event_type: str | None = None
+    output: dict[str, object] | None = None
+    reason: str | None = None
+
+
+@router.post("/creative", response_model=WorkflowResponse)
+async def run_creative(
+    body: CreativeRunRequest,
+    ctx: RequestContext = Depends(enforce_rate_limit),
+    container: Container = Depends(get_container),
+) -> WorkflowResponse:
+    payload = {
+        "brief_id": body.brief_id or uuid4(),
+        "product": body.product,
+        "audience": body.audience,
+        "count": body.count,
+    }
+    result = await container.orchestrator.invoke(
+        "hook_generator_agent", payload, org_id=ctx.org_id
+    )
+    return WorkflowResponse(
+        status=result.status, agent_id=result.agent_id,
+        correlation_id=result.correlation_id, token_id=result.token_id,
+        event_type=result.event_type, output=result.output, reason=result.reason,
+    )

@@ -1,0 +1,68 @@
+# Local Skylize backend core. `docker compose up` brings up the backing services
+# and the gateway (postgres backend). Run from the repo root:
+#   docker compose -f infra/docker-compose.yml up --build
+services:
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: skylize
+      POSTGRES_USER: skylize
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-localdev}
+    ports: ["5432:5432"]
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U skylize"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes --appendfsync everysec
+    ports: ["6379:6379"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Runs migrations as the ADMIN/superuser role. Migration 0003 creates the
+  # non-superuser `skylize_app` role the gateway then connects as.
+  migrate:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      SKYLIZE_DB_URL: postgresql://skylize:${POSTGRES_PASSWORD:-localdev}@postgres:5432/skylize
+      # Password for the app role created by migration 0003.
+      SKYLIZE_APP_DB_PASSWORD: ${SKYLIZE_APP_DB_PASSWORD:-appdev}
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  gateway:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile
+    environment:
+      SKYLIZE_BACKEND: postgres
+      # Admin DSN is present for completeness, but the RUNTIME uses the app DSN
+      # below (non-superuser, RLS-subject).
+      SKYLIZE_DB_URL: postgresql://skylize:${POSTGRES_PASSWORD:-localdev}@postgres:5432/skylize
+      SKYLIZE_DB_APP_URL: postgresql://skylize_app:${SKYLIZE_APP_DB_PASSWORD:-appdev}@postgres:5432/skylize
+      SKYLIZE_REDIS_URL: redis://redis:6379
+      SKYLIZE_DEV_AUTH: "true"
+    ports: ["8000:8000"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
+
+volumes:
+  postgres_data:
+  redis_data:
