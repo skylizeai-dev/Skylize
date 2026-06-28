@@ -7,12 +7,13 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# Install dependencies first for layer caching.
+# Copy pyproject.toml AND src/ together — setuptools needs src/ to build the wheel
 COPY pyproject.toml ./
+COPY src ./src
+
 RUN pip install --upgrade pip && pip install .
 
-# Copy source, migrations, and infra.
-COPY src ./src
+# Copy remaining files
 COPY migrations ./migrations
 COPY alembic.ini ./alembic.ini
 COPY infra ./infra
@@ -22,5 +23,4 @@ ENV PYTHONPATH=/app/src \
 
 EXPOSE 8000
 
-# Entrypoint runs migrations then starts the gateway (overridable per service).
 CMD ["sh", "-c", "alembic upgrade head && uvicorn skylize.edge.gateway:app --host 0.0.0.0 --port 8000"]
