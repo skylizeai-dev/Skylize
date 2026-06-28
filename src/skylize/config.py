@@ -55,6 +55,44 @@ class Settings(BaseSettings):
     # Event bus tuning
     dlq_after_retries: int = 5
 
+    # Decision Engine: org_ids to auto-subscribe its consumers to at startup.
+    # Empty (default) leaves the engine wired but idle; tenants are subscribed
+    # as they are provisioned. From env, set a JSON array:
+    # `SKYLIZE_DECISION_ENGINE_ORG_IDS='["org_a","org_b"]'`.
+    decision_engine_org_ids: list[str] = []
+
+    # n8n → Skylize bridge key (X-Skylize-API-Key header on agent-prompts endpoint)
+    n8n_api_key: str = ""
+
+    # HMAC-SHA256 secrets for inbound webhook verification; empty = check disabled.
+    knowledge_webhook_secret: str = ""    # X-Hub-Signature-256 from n8n knowledge ingest
+    agent_prompts_hmac_secret: str = ""  # X-Skylize-Signature on agent-prompts endpoint
+
+    # LLM provider keys
+    anthropic_api_key: str = ""
+    langfuse_public_key: str = ""
+    langfuse_secret_key: str = ""
+
+    # Memory backends
+    mem0_api_key: str = ""  # Mem0 cloud API key; empty = Mem0 adapter disabled
+
+    # Knowledge ingestion pipeline (Qdrant + OpenAI embeddings)
+    qdrant_url: str = "http://localhost:6333"
+    qdrant_api_key: str = ""
+
+    # Logical model name → Anthropic model ID
+    llm_model_default: str = "claude-sonnet-4-6"
+    llm_model_fast: str = "claude-haiku-4-5-20251001"
+    llm_model_reasoning: str = "claude-opus-4-6"
+
+    # Pricing per 1M tokens in USD (configurable so ops can update without redeploy)
+    llm_price_sonnet_in: float = 3.0
+    llm_price_sonnet_out: float = 15.0
+    llm_price_haiku_in: float = 0.80
+    llm_price_haiku_out: float = 4.0
+    llm_price_opus_in: float = 15.0
+    llm_price_opus_out: float = 75.0
+
 
 _settings: Settings | None = None
 
