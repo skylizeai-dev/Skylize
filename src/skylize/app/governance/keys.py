@@ -38,7 +38,7 @@ def load_signing_key(settings: Settings) -> ECKeyPair:
       2. (production only) error — no key, no start.
       3. (memory backend only) generate an ephemeral P-384 key.
     """
-    pem = settings.governance_signing_key_pem.strip()
+    pem = settings.governance_signing_key_pem.replace("\\n", "\n").strip()
     if pem:
         try:
             pair = ECCService.load_private_key_pem(
