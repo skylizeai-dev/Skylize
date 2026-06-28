@@ -61,6 +61,16 @@ class GovernanceScopeViolation(BaseEvent):
 
 
 class GovernanceCircuitBreakerTripped(BaseEvent):
+    """Breaker trip across any trip condition in agent_governance.md §7.
+
+    ``trip_reason`` is free-text and identifies the condition: scope-violation
+    threshold (the originating violation reason), or ``"convergence: ..."`` when an
+    agent repeats the same action twice consecutively within a workflow (runaway
+    loop — see ``app/governance/authority.record_action``). No new event type is
+    needed for convergence; it reuses this event with a ``convergence`` reason,
+    keeping the event taxonomy closed (event_driven_architecture.md §5).
+    """
+
     category: Literal[EventCategory.GOVERNANCE] = EventCategory.GOVERNANCE
     type: Literal["governance.circuit_breaker_tripped"] = "governance.circuit_breaker_tripped"
     schema_version: Literal["1.0"] = "1.0"
@@ -68,7 +78,7 @@ class GovernanceCircuitBreakerTripped(BaseEvent):
     class Payload(BaseModel):
         model_config = ConfigDict(extra="forbid")
         agent_id: str
-        trip_reason: str
+        trip_reason: str  # e.g. a scope-violation reason, or "convergence: <detail>"
         trip_count: int
 
     payload: Payload
