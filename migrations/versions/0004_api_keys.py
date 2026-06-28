@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+import sqlalchemy as sa
 from alembic import op
 
 revision: str = "0004"
@@ -33,27 +34,29 @@ _APP_ROLE = "skylize_app"
 
 
 def upgrade() -> None:
-    op.execute(
-        """
-    CREATE TABLE api_keys (
-        key_id            UUID PRIMARY KEY,
-        org_id            TEXT NOT NULL REFERENCES tenants(org_id),
-        prefix            TEXT NOT NULL UNIQUE,
-        key_hash          TEXT NOT NULL,
-        name              TEXT NOT NULL,
-        scopes            TEXT[] NOT NULL DEFAULT '{}',
-        created_by        TEXT NOT NULL,
-        created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
-        expires_at        TIMESTAMPTZ,
-        last_used_at      TIMESTAMPTZ,
-        revoked_at        TIMESTAMPTZ,
-        revocation_reason TEXT
-    );
-    CREATE INDEX idx_api_keys_org ON api_keys (org_id);
-    -- Auth-path lookup is by prefix and only ever wants live keys.
-    CREATE INDEX idx_api_keys_active ON api_keys (prefix) WHERE revoked_at IS NULL;
-    """
-    )
+    op.execute(sa.text("""
+        CREATE TABLE api_keys (
+            key_id            UUID PRIMARY KEY,
+            org_id            TEXT NOT NULL REFERENCES tenants(org_id),
+            prefix            TEXT NOT NULL UNIQUE,
+            key_hash          TEXT NOT NULL,
+            name              TEXT NOT NULL,
+            scopes            TEXT[] NOT NULL DEFAULT '{}',
+            created_by        TEXT NOT NULL,
+            created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+            expires_at        TIMESTAMPTZ,
+            last_used_at      TIMESTAMPTZ,
+            revoked_at        TIMESTAMPTZ,
+            revocation_reason TEXT
+        )
+    """))
+    op.execute(sa.text(
+        "CREATE INDEX idx_api_keys_org ON api_keys (org_id)"
+    ))
+    # Auth-path lookup is by prefix and only ever wants live keys.
+    op.execute(sa.text(
+        "CREATE INDEX idx_api_keys_active ON api_keys (prefix) WHERE revoked_at IS NULL"
+    ))
 
     # No RLS (see module docstring): the auth-time lookup is cross-tenant by
     # necessity. Grant the runtime app role the DML it needs to resolve and
