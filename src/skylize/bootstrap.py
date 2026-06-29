@@ -27,6 +27,7 @@ from .config import Settings, get_settings
 from .contracts.registry import MVP_REGISTRY
 from .dal.ports import ApiKeyRepository, AuditRepository, GovernanceRepository, TenantRepository
 from .events.bus import EventBus
+from .memory.knowledge_ingestion import KnowledgeIngestionService
 
 
 @dataclass
@@ -38,6 +39,7 @@ class Container:
     orchestrator: Orchestrator
     tenants: TenantService
     api_keys: ApiKeyService
+    knowledge_ingestion: KnowledgeIngestionService | None
     _closers: list[Callable[[], Awaitable[None]]]
 
     async def aclose(self) -> None:
@@ -132,7 +134,17 @@ async def build_container(settings: Settings | None = None) -> Container:
         registry=registry, authority=authority, audit=audit, bus=bus, runner=StubAgentRunner()
     )
 
+    knowledge_ingestion: KnowledgeIngestionService | None = None
+    if settings.qdrant_url and settings.openai_api_key:
+        from .memory.embedding_service import EmbeddingService
+        from .memory.qdrant_adapter import QdrantAdapter
+        knowledge_ingestion = KnowledgeIngestionService(
+            qdrant=QdrantAdapter(settings.qdrant_url, settings.qdrant_api_key),
+            embedding_service=EmbeddingService(settings.openai_api_key),
+        )
+
     return Container(
         settings=settings, bus=bus, audit=audit, authority=authority,
-        orchestrator=orchestrator, tenants=tenants, api_keys=api_keys, _closers=closers,
+        orchestrator=orchestrator, tenants=tenants, api_keys=api_keys,
+        knowledge_ingestion=knowledge_ingestion, _closers=closers,
     )

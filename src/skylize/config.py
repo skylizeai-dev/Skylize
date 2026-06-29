@@ -70,6 +70,7 @@ class Settings(BaseSettings):
 
     # LLM provider keys
     anthropic_api_key: str = ""
+    openai_api_key: str = ""
     langfuse_public_key: str = ""
     langfuse_secret_key: str = ""
 
