@@ -42,6 +42,13 @@ dependencies = [
 
     # Time-sortable IDs for partition keys
     "python-ulid>=2.2",
+
+    # Context compression proxy (Model Context Engine, T-D). tiktoken cl100k_base
+    # is the ground-truth tokenizer for budget accounting; markdownify does the
+    # L1 HTML→Markdown prune. The MiniLM embedder (sentence-transformers) is NOT
+    # added here — it lands with the Sprint-2 memory embedding service.
+    "tiktoken>=0.7.0",
+    "markdownify>=0.13.0",
 ]
 
 [project.optional-dependencies]
