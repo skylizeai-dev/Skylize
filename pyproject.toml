@@ -49,6 +49,10 @@ dependencies = [
     # added here — it lands with the Sprint-2 memory embedding service.
     "tiktoken>=0.7.0",
     "markdownify>=0.13.0",
+
+    # Knowledge ingestion pipeline (Sprint-2 memory work)
+    "qdrant-client>=1.9",
+    "openai>=1.0",
 ]
 
 [project.optional-dependencies]
@@ -146,5 +150,5 @@ plugins = ["pydantic.mypy"]
 # Third-party libraries that ship no type information (no py.typed / stubs).
 # We keep `strict` for our own code; these get import-level leniency only.
 [[tool.mypy.overrides]]
-module = ["asyncpg.*", "redis.*", "jose.*", "langgraph.*"]
+module = ["asyncpg.*", "redis.*", "jose.*", "langgraph.*", "qdrant_client.*", "openai.*"]
 ignore_missing_imports = true

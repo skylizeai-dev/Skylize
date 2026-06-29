@@ -19,7 +19,7 @@ from fastapi import FastAPI
 from ..bootstrap import build_container
 from ..config import get_settings
 from .rate_limit import RateLimiter
-from .routes import api_keys, kill_switch, tenants, workflows
+from .routes import api_keys, kill_switch, knowledge, tenants, workflows
 
 
 @asynccontextmanager
@@ -44,6 +44,7 @@ def create_app() -> FastAPI:
     app.include_router(api_keys.router)
     app.include_router(workflows.router)
     app.include_router(kill_switch.router)
+    app.include_router(knowledge.router)
     return app
 
 
