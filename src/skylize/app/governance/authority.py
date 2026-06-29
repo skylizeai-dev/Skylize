@@ -13,7 +13,11 @@ proxy / orchestrator call `token.validate_tool_call` with the public key and the
 
 from __future__ import annotations
 
+import hashlib
+import json
+from collections import deque
 from datetime import datetime, timedelta, timezone
+from typing import Any
 from uuid import UUID, uuid4
 
 from cryptography.hazmat.primitives.asymmetric.ec import EllipticCurvePublicKey
@@ -45,6 +49,71 @@ from .keys import load_signing_key
 from .snapshot import GovernanceSnapshot
 
 CIRCUIT_BREAKER_THRESHOLD = 3  # scope violations within an agent before suspend
+
+# Convergence breaker: an agent repeating the *same* action back-to-back inside a
+# workflow is the "runaway loop" trip condition in agent_governance.md §7. We trip
+# as soon as an action_hash recurs immediately (twice consecutively); the ring
+# buffer keeps the last few hashes per agent per workflow purely for observability
+# (so the trip reason can show the repeated tail).
+CONVERGENCE_RING_SIZE = 3
+CONVERGENCE_TRIP_REASON = "convergence"  # GovernanceCircuitBreakerTripped.trip_reason
+
+
+def compute_action_hash(*, agent_id: str, action_type: str, action_args: Any) -> str:
+    """SHA-256 hex of ``{agent_id, action_type, action_args}`` (canonical JSON).
+
+    Same canonical-JSON discipline as the audit trail and the tool-exec
+    fingerprint: ``sort_keys`` + tight separators + ``default=str`` so two
+    semantically-identical actions hash identically regardless of key ordering.
+    """
+    body = json.dumps(
+        {"agent_id": agent_id, "action_type": action_type, "action_args": action_args},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        default=str,
+    )
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+class ConvergenceTracker:
+    """Per-(workflow, agent) ring buffer of recent action hashes.
+
+    Keyed by ``(correlation_id, agent_id)`` — a workflow is one ``correlation_id``
+    (event_driven_architecture.md §8), so this is scoped per agent per workflow as
+    required. In-process only: convergence is a hot-path heuristic evaluated where
+    the action originates, mirroring how ``GovernanceSnapshot`` keeps live state in
+    memory rather than reaching for the DAL.
+    """
+
+    def __init__(self, ring_size: int = CONVERGENCE_RING_SIZE) -> None:
+        self._ring_size = ring_size
+        self._rings: dict[tuple[UUID, str], deque[str]] = {}
+
+    def record(self, correlation_id: UUID, agent_id: str, action_hash: str) -> bool:
+        """Append an action hash; return True iff it repeats the previous one.
+
+        "Same action_hash twice consecutively" is the trip signal. The hash is
+        appended either way so the buffer reflects the true recent tail.
+        """
+        key = (correlation_id, agent_id)
+        ring = self._rings.get(key)
+        if ring is None:
+            ring = deque(maxlen=self._ring_size)
+            self._rings[key] = ring
+        is_consecutive_repeat = bool(ring) and ring[-1] == action_hash
+        ring.append(action_hash)
+        return is_consecutive_repeat
+
+    def recent(self, correlation_id: UUID, agent_id: str) -> list[str]:
+        """Snapshot of the current ring tail (oldest→newest), for diagnostics."""
+        ring = self._rings.get((correlation_id, agent_id))
+        return list(ring) if ring is not None else []
+
+    def reset(self, correlation_id: UUID, agent_id: str) -> None:
+        """Drop the buffer for a (workflow, agent) — called once a trip fires so a
+        third identical action does not re-trip / re-escalate (idempotency)."""
+        self._rings.pop((correlation_id, agent_id), None)
 
 
 class GovernanceDenied(Exception):
@@ -83,6 +152,7 @@ class GovernanceAuthority:
         self._registry = registry
         self._settings = settings
         self._snapshot = GovernanceSnapshot()
+        self._convergence = ConvergenceTracker()
         # Cross-process propagation. Defaults to in-process fan-out so a single
         # Authority (tests / memory backend) still works with no broadcast wired.
         self._broadcast: GovernanceBroadcast = broadcast or InMemoryGovernanceBroadcast()
@@ -247,9 +317,95 @@ class GovernanceAuthority:
         trips = await self._repo.increment_circuit_breaker(agent_id, org_id)
         if trips < CIRCUIT_BREAKER_THRESHOLD:
             return False
-        # Trip: suspend + emit breaker/suspension events.
+        await self._suspend_and_emit(
+            agent_id=agent_id, org_id=org_id, correlation_id=correlation_id,
+            trip_reason=reason, trip_count=trips, suspend_reason=reason,
+            audit_action_type="governance.circuit_breaker_tripped",
+        )
+        return True
+
+    async def record_action(
+        self,
+        *,
+        agent_id: str,
+        org_id: str,
+        correlation_id: UUID,
+        action_type: str,
+        action_args: Any,
+    ) -> bool:
+        """Track one agent action within a workflow; trip on convergence.
+
+        Convergence = the agent emitting the *same* ``action_hash`` twice
+        consecutively within the workflow (`correlation_id`), i.e. a runaway loop
+        (agent_governance.md §7). On trip the agent is suspended (same machinery as
+        the scope-violation breaker, so suspension state stays single-source), a
+        ``governance.circuit_breaker_tripped`` event is emitted with
+        ``trip_reason="convergence"``, and the failure is escalated along the
+        agent's ``escalation_path`` — recorded as a ``governance.convergence_failure``
+        audit action.
+
+        Returns True iff this action tripped the convergence breaker. Tripping is
+        idempotent per (workflow, agent): the ring buffer is cleared on trip and a
+        suspended agent is not re-tripped, so a third identical action neither
+        re-suspends nor re-escalates.
+        """
+        # Already stopped (suspended/killed/tenant-or-platform kill)? Do not
+        # re-trip or re-escalate — keeps "escalation emitted exactly once".
+        if self._snapshot.reason_for(None, agent_id, org_id) is not None:
+            return False
+
+        action_hash = compute_action_hash(
+            agent_id=agent_id, action_type=action_type, action_args=action_args
+        )
+        if not self._convergence.record(correlation_id, agent_id, action_hash):
+            return False
+
+        # Trip. Capture the repeated tail for the trip reason, then reset so the
+        # next identical action cannot re-trip this (workflow, agent).
+        recent = self._convergence.recent(correlation_id, agent_id)
+        self._convergence.reset(correlation_id, agent_id)
+        trip_reason = f"{CONVERGENCE_TRIP_REASON}: repeated action {action_hash} in {action_type}"
+        escalation_path = self._escalation_path_for(agent_id)
+        await self._suspend_and_emit(
+            agent_id=agent_id, org_id=org_id, correlation_id=correlation_id,
+            trip_reason=trip_reason, trip_count=len(recent), suspend_reason=trip_reason,
+            audit_action_type="governance.convergence_failure",
+            audit_result_reason=f"escalation_path={escalation_path}",
+        )
+        return True
+
+    def _escalation_path_for(self, agent_id: str) -> list[str]:
+        """The agent's ordered escalation chain, or an empty list if unregistered.
+
+        Escalation today routes via the contract's ``escalation_path`` recorded in
+        the audit trail; the dedicated ``governance.human_escalation_raised`` event
+        is the Decision Engine's to emit in its sprint (not yet in the registry).
+        """
+        try:
+            return list(self._registry.resolve(agent_id).escalation_path)
+        except Exception:
+            return []
+
+    async def _suspend_and_emit(
+        self,
+        *,
+        agent_id: str,
+        org_id: str,
+        correlation_id: UUID,
+        trip_reason: str,
+        trip_count: int,
+        suspend_reason: str,
+        audit_action_type: str,
+        audit_result_reason: str | None = None,
+    ) -> None:
+        """Suspend an agent and emit the breaker/suspension events + audit.
+
+        Shared by the scope-violation breaker and the convergence breaker so both
+        mutate the snapshot, persist, broadcast, and emit identically — one
+        suspension code path, one source of truth.
+        """
         self._snapshot.set_agent_state(agent_id, org_id, "suspended")
-        await self._repo.set_agent_state(agent_id, org_id, "suspended", reason)
+        await self._repo.set_agent_state(agent_id, org_id, "suspended", suspend_reason)
         await self._broadcast.publish(
             GovernanceInvalidation(
                 kind=InvalidationKind.AGENT_STATE,
@@ -261,7 +417,7 @@ class GovernanceAuthority:
                 tenant_id=org_id, partition_key=f"agent:{agent_id}", department="governance",
                 source_agent_id=agent_id, correlation_id=correlation_id,
                 payload=GovernanceCircuitBreakerTripped.Payload(
-                    agent_id=agent_id, trip_reason=reason, trip_count=trips
+                    agent_id=agent_id, trip_reason=trip_reason, trip_count=trip_count
                 ),
             )
         )
@@ -269,15 +425,17 @@ class GovernanceAuthority:
             GovernanceAgentSuspended(
                 tenant_id=org_id, partition_key=f"agent:{agent_id}", department="governance",
                 source_agent_id=agent_id, correlation_id=correlation_id,
-                payload=GovernanceAgentSuspended.Payload(agent_id=agent_id, reason=reason),
+                payload=GovernanceAgentSuspended.Payload(
+                    agent_id=agent_id, reason=suspend_reason
+                ),
             )
         )
         await self._audit.record(
             org_id=org_id, correlation_id=correlation_id,
-            action_type="governance.circuit_breaker_tripped", result="escalated",
-            source_agent_id=agent_id, result_reason=reason,
+            action_type=audit_action_type, result="escalated",
+            source_agent_id=agent_id,
+            result_reason=audit_result_reason if audit_result_reason is not None else suspend_reason,
         )
-        return True
 
     async def reinstate(
         self, *, agent_id: str, org_id: str, reinstated_by: str, correlation_id: UUID
