@@ -30,10 +30,15 @@ CONTRACT NOTES for Sprint 2 implementers:
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, TypeVar, runtime_checkable
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
+
+if TYPE_CHECKING:
+    from .structured import StructuredRequest
+
+_TModel = TypeVar("_TModel", bound=BaseModel)
 
 
 class TokenBudgetExceeded(Exception):
@@ -92,4 +97,23 @@ class LLMGateway(Protocol):
 
     def generate_sync(self, request: LLMGenerateRequest) -> LLMGenerateResponse:
         """Blocking variant for execution inside a thread-pool executor."""
+        ...
+
+    async def generate_structured(
+        self,
+        request: StructuredRequest,
+        schema: type[_TModel],
+        *,
+        correlation_id: UUID,
+    ) -> _TModel:
+        """Generate output constrained to a Pydantic v2 model via provider-native
+        structured output (OpenAI json_schema · Anthropic tool-use · Gemini
+        responseSchema), returning a validated instance.
+
+        Enforces the run's `max_token_budget` exactly as `generate` does (the
+        structured path routes through the same budget-checked egress), and never
+        leaks a malformed-JSON exception: a non-conforming response triggers a
+        single validate-then-retry fallback before raising
+        `StructuredValidationError`. See `structured.generate_structured`.
+        """
         ...
