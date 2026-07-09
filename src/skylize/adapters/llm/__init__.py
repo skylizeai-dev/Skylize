@@ -9,6 +9,17 @@ from .gateway import (
     LLMUsage,
     TokenBudgetExceeded,
 )
+from .structured import (
+    STRUCTURED_FALLBACK_ACTION,
+    StructuredCapability,
+    StructuredRequest,
+    StructuredValidationError,
+    build_provider_payload,
+    generate_structured,
+    translate_anthropic,
+    translate_gemini,
+    translate_openai,
+)
 
 __all__ = [
     "LLMGateway",
@@ -16,4 +27,13 @@ __all__ = [
     "LLMGenerateResponse",
     "LLMUsage",
     "TokenBudgetExceeded",
+    "STRUCTURED_FALLBACK_ACTION",
+    "StructuredCapability",
+    "StructuredRequest",
+    "StructuredValidationError",
+    "build_provider_payload",
+    "generate_structured",
+    "translate_anthropic",
+    "translate_gemini",
+    "translate_openai",
 ]

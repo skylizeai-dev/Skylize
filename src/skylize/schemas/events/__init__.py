@@ -45,6 +45,8 @@ from .governance import (
 from .memory import (
     MemoryCommitted,
     MemoryEmbeddingIndexed,
+    MemoryFactRecorded,
+    MemoryFactReinforced,
     MemoryInvalidated,
     MemoryRecallServed,
     MemoryWriteRequested,
@@ -83,6 +85,8 @@ EVENT_REGISTRY: dict[str, type[BaseEvent]] = {
         MemoryEmbeddingIndexed,
         MemoryRecallServed,
         MemoryInvalidated,
+        MemoryFactRecorded,
+        MemoryFactReinforced,
         # decision
         DecisionEvaluated,
         DecisionApproved,

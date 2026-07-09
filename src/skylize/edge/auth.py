@@ -37,10 +37,17 @@ async def build_request_context(request: Request, settings: Settings) -> Request
     ttl = settings.request_context_ttl_seconds
 
     if settings.dev_auth:
-        org_id = request.headers.get("X-Dev-Org", "org_dev")
-        user_id = request.headers.get("X-Dev-User", "user_dev")
-        roles = [r.strip() for r in request.headers.get("X-Dev-Roles", "owner").split(",") if r.strip()]
-        return _ctx(org_id, user_id, roles, ttl)
+        # Dev auth trusts X-Dev-* headers. Fail closed when NONE is presented, so
+        # a fully unauthenticated request is denied (401) rather than silently
+        # granted a default owner context; sensible defaults still fill any
+        # individual header omitted once at least one is present.
+        dev_org = request.headers.get("X-Dev-Org")
+        dev_user = request.headers.get("X-Dev-User")
+        dev_roles = request.headers.get("X-Dev-Roles")
+        if dev_org is None and dev_user is None and dev_roles is None:
+            raise AuthError("missing authentication")
+        roles = [r.strip() for r in (dev_roles or "owner").split(",") if r.strip()]
+        return _ctx(dev_org or "org_dev", dev_user or "user_dev", roles, ttl)
 
     # Production: verify the OIDC JWT.
     auth = request.headers.get("Authorization", "")

@@ -82,3 +82,40 @@ class MemoryInvalidated(BaseEvent):
         superseded_by: UUID | None = None
 
     payload: Payload
+
+
+class MemoryFactRecorded(BaseEvent):
+    """A new fact was committed (ON CONFLICT created a fresh record)."""
+
+    category: Literal[EventCategory.MEMORY] = EventCategory.MEMORY
+    type: Literal["memory.fact_recorded"] = "memory.fact_recorded"
+    schema_version: Literal["1.0"] = "1.0"
+
+    class Payload(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        fact_id: UUID
+        fact_hash: str
+        namespace: str
+        tier: str
+        agent_id: str
+
+    payload: Payload
+
+
+class MemoryFactReinforced(BaseEvent):
+    """An existing fact was re-observed: provenance appended, importance bumped."""
+
+    category: Literal[EventCategory.MEMORY] = EventCategory.MEMORY
+    type: Literal["memory.fact_reinforced"] = "memory.fact_reinforced"
+    schema_version: Literal["1.0"] = "1.0"
+
+    class Payload(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        fact_id: UUID
+        fact_hash: str
+        namespace: str
+        provenance_count: int
+        new_importance_score: float
+        agent_id: str
+
+    payload: Payload

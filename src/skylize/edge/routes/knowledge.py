@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict
 
+from ...bootstrap import Container
 from ...memory.knowledge_ingestion import KnowledgeIngestionService
 from ..deps import get_container
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/knowledge", tags=["knowledge"])
 
@@ -32,14 +36,27 @@ def _verify_hmac(body: bytes, signature_header: str | None, secret: str) -> bool
 async def ingest_knowledge(
     request: Request,
     body: IngestRequest,
-    container=Depends(get_container),
+    container: Container = Depends(get_container),
 ) -> dict[str, str]:
+    # Fail closed: an unconfigured secret must NOT wave callbacks through
+    # unverified (n8n.md §4 — inbound callbacks are signature-verified). Mirrors
+    # the agent-prompts endpoint's 503-when-unconfigured stance.
     secret: str = getattr(container.settings, "knowledge_webhook_secret", "")
-    if secret:
-        raw = await request.body()
-        sig = request.headers.get("X-Hub-Signature-256")
-        if not _verify_hmac(raw, sig, secret):
-            raise HTTPException(status_code=403, detail="invalid HMAC signature")
+    if not secret:
+        raise HTTPException(
+            status_code=503,
+            detail="knowledge webhook not configured (missing SKYLIZE_KNOWLEDGE_WEBHOOK_SECRET)",
+        )
+    raw = await request.body()
+    sig = request.headers.get("X-Hub-Signature-256")
+    if not _verify_hmac(raw, sig, secret):
+        # TODO: also emit governance.integration_bad_signature via the event bus
+        # (n8n.md §7) — deferred; needs the bus, out of this route's scope.
+        logger.warning(
+            "integration_bad_signature knowledge remote=%s",
+            request.client.host if request.client else "unknown",
+        )
+        raise HTTPException(status_code=401, detail="invalid HMAC signature")
 
     svc: KnowledgeIngestionService | None = container.knowledge_ingestion
     if svc is None:

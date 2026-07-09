@@ -20,7 +20,7 @@ from enum import Enum
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # Canonical authority levels — IDENTICAL to agent_governance.md §2.
 AuthorityLevel = Literal["executive", "vp", "director", "manager", "worker"]
@@ -78,6 +78,19 @@ class AgentContract(BaseModel):
     # Capability declaration (the tool manifest)
     allowed_tools: list[ToolGrant]
 
+    # Subset of `allowed_tools` tool_ids the agent may invoke through the LLM
+    # tool-use loop (AgentExecutionService multi-turn path). Empty by default —
+    # an agent with no `invocable_tools` runs the single-shot (prompt in,
+    # text out) path unchanged, so adding this field is backward compatible
+    # with every existing contract. Not every ToolGrant is meant to be
+    # LLM-invocable (e.g. "orchestrator.delegate" is a workflow capability,
+    # not something offered to the model as a callable tool).
+    invocable_tools: list[str] = Field(default_factory=list)
+
+    # Hard cap on tool-use loop iterations (agent_runtime.md). Exceeding this
+    # is a governance escalation, not a silent truncation.
+    max_tool_iterations: int = 5
+
     # Budgets — also become ceilings in the governance token
     max_token_budget: int
     max_execution_time_seconds: int
@@ -94,6 +107,17 @@ class AgentContract(BaseModel):
     # Governance
     governance_token_required: bool = True
     human_in_loop_triggers: list[HumanInLoopTrigger] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _invocable_tools_subset_of_allowed(self) -> "AgentContract":
+        allowed_ids = {grant.tool_id for grant in self.allowed_tools}
+        unknown = set(self.invocable_tools) - allowed_ids
+        if unknown:
+            raise ValueError(
+                f"invocable_tools {sorted(unknown)} not declared in allowed_tools"
+                f" for agent_id={self.agent_id!r}"
+            )
+        return self
 
 
 class GovernanceToken(BaseModel):

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, ConfigDict, Field
@@ -15,10 +15,19 @@ router = APIRouter(prefix="/api/v1/workflows", tags=["workflows"])
 
 
 class CreativeRunRequest(BaseModel):
+    """Public request shape — kept stable for the console BFF.
+
+    `brief_id` is accepted for back-compat but the operator-execute contract
+    (HookGeneratorExecuteIn) is briefless; the run's correlation_id serves as
+    the brief surrogate downstream.
+    """
+
     model_config = ConfigDict(extra="forbid")
     brief_id: UUID | None = None
+    brand_name: str | None = None
     product: str
     audience: str
+    tone: str | None = None
     count: int = Field(default=3, ge=1, le=10)
 
 
@@ -39,9 +48,10 @@ async def run_creative(
     container: Container = Depends(get_container),
 ) -> WorkflowResponse:
     payload = {
-        "brief_id": body.brief_id or uuid4(),
-        "product": body.product,
-        "audience": body.audience,
+        "brand_name": body.brand_name or body.product,
+        "product_description": body.product,
+        "target_audience": body.audience,
+        "tone": body.tone,
         "count": body.count,
     }
     result = await container.orchestrator.invoke(
