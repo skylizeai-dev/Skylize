@@ -1,0 +1,35 @@
+# Byte-compiled / optimized / cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local secrets / config (never commit real keys)
+.env
+.env.local
+
+# Test / coverage artifacts
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Playwright MCP scratch
+.playwright-mcp/
+
+# Build artifacts / sync caches (never track)
+.next/
+console/
+.ds-sync/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+
+.claude/skills/
+ui-ux-pro-max-skill-main/
