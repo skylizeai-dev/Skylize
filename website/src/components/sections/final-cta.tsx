@@ -1,14 +1,51 @@
 "use client";
 
-import { useState } from "react";
+import { useState, type FormEvent } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Check } from "lucide-react";
 import { Container, AltitudeLine, CtaButton } from "@/components/skylize";
 import { EASE_ALTITUDE } from "@/lib/motion";
 
+type SubmitStatus = "idle" | "pending" | "sent" | "error";
+
 export function FinalCta() {
   const [email, setEmail] = useState("");
-  const [sent, setSent] = useState(false);
+  const [status, setStatus] = useState<SubmitStatus>("idle");
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  async function submit(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    const trimmed = email.trim();
+    if (!trimmed || status === "pending") return;
+    setStatus("pending");
+    setErrorMessage(null);
+    try {
+      const res = await fetch("/api/contact", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: trimmed,
+          email: trimmed,
+          message: "Strategy call request from the landing-page contact form.",
+        }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      const data = (await res.json().catch(() => null)) as { error?: string } | null;
+      if (!res.ok) {
+        throw new Error(data?.error ?? "Something went wrong. Please try again.");
+      }
+      setStatus("sent");
+    } catch (err) {
+      setStatus("error");
+      setErrorMessage(
+        err instanceof Error && err.name === "TimeoutError"
+          ? "The request timed out. Please try again."
+          : err instanceof Error && err.message
+            ? err.message
+            : "Something went wrong. Please try again.",
+      );
+    }
+  }
 
   return (
     <section id="contact" className="relative scroll-mt-24 overflow-hidden">
@@ -37,9 +74,10 @@ export function FinalCta() {
 
           <div className="mt-10 w-full max-w-md">
             <AnimatePresence mode="wait">
-              {sent ? (
+              {status === "sent" ? (
                 <motion.div
                   key="sent"
+                  role="status"
                   initial={{ opacity: 0, y: 12 }}
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ duration: 0.5, ease: EASE_ALTITUDE }}
@@ -58,10 +96,7 @@ export function FinalCta() {
                   initial={{ opacity: 0 }}
                   animate={{ opacity: 1 }}
                   exit={{ opacity: 0 }}
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    if (email.trim()) setSent(true);
-                  }}
+                  onSubmit={submit}
                   className="flex flex-col gap-3 sm:flex-row"
                 >
                   <input
@@ -73,12 +108,23 @@ export function FinalCta() {
                     aria-label="Work email"
                     className="h-12 flex-1 rounded-md border border-border-strong bg-transparent px-4 text-sm text-foreground outline-none transition-colors duration-200 placeholder:text-muted-foreground/70 focus:border-blue focus:ring-2 focus:ring-blue/30"
                   />
-                  <CtaButton size="lg" arrow type="submit" className="sm:shrink-0">
-                    Book Strategy Call
+                  <CtaButton
+                    size="lg"
+                    arrow
+                    type="submit"
+                    disabled={status === "pending"}
+                    className="sm:shrink-0"
+                  >
+                    {status === "pending" ? "Sending…" : "Book Strategy Call"}
                   </CtaButton>
                 </motion.form>
               )}
             </AnimatePresence>
+            {status === "error" && errorMessage ? (
+              <p role="alert" className="mt-3 text-sm text-destructive">
+                {errorMessage}
+              </p>
+            ) : null}
             <p className="mt-4 font-mono text-[11px] tracking-[0.1em] text-muted-foreground/70 uppercase">
               SOC 2 Type II · Your data stays yours
             </p>

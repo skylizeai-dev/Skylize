@@ -39,3 +39,9 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# the repo-root .gitignore's unanchored "console/" rule (aimed at the
+# top-level console/ artifacts dir) also matches these source dirs;
+# re-include them so new files here don't need git add -f
+!src/app/console/
+!src/components/console/

@@ -11,4 +11,3 @@ export { Testimonials } from "./testimonials";
 export { Faq } from "./faq";
 export { FinalCta } from "./final-cta";
 export { Footer } from "./footer";
-export { AltitudeDashboard } from "./altitude-dashboard";

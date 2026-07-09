@@ -1,5 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { Inter, Inter_Tight, Geist_Mono } from "next/font/google";
+import { MotionProvider } from "@/components/skylize/motion-provider";
+import { SITE_URL } from "@/lib/site";
 import "./globals.css";
 
 const inter = Inter({
@@ -19,8 +21,6 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
   display: "swap",
 });
-
-const SITE_URL = "https://skylize.com";
 
 export const metadata: Metadata = {
   metadataBase: new URL(SITE_URL),
@@ -79,7 +79,7 @@ export default function RootLayout({
       className={`${inter.variable} ${interTight.variable} ${geistMono.variable} h-full`}
     >
       <body className="min-h-full bg-background text-foreground antialiased">
-        {children}
+        <MotionProvider>{children}</MotionProvider>
       </body>
     </html>
   );
