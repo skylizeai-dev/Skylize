@@ -152,8 +152,20 @@ async def build_container(settings: Settings | None = None) -> Container:
     # Human-user auth (register/login/refresh + /me).
     user_auth = UserAuthService(user_repo, settings)
 
-    # Agent-produced deliverables (versioned, human-approvable).
-    deliverables = DeliverableService(deliverable_repo)
+    # Knowledge vector store (tenant-isolated). None when the vector backend is
+    # unconfigured; every consumer degrades gracefully.
+    knowledge_ingestion: KnowledgeIngestionService | None = None
+    if settings.qdrant_url and settings.openai_api_key:
+        from .memory.embedding_service import EmbeddingService
+        from .memory.qdrant_adapter import QdrantAdapter
+        knowledge_ingestion = KnowledgeIngestionService(
+            qdrant=QdrantAdapter(settings.qdrant_url, settings.qdrant_api_key),
+            embedding_service=EmbeddingService(settings.openai_api_key),
+        )
+
+    # Agent-produced deliverables (versioned, human-approvable). Approved
+    # deliverables embed back into the tenant's knowledge memory (closed loop).
+    deliverables = DeliverableService(deliverable_repo, knowledge_ingestion)
 
     # Credential vault (at-rest Fernet encryption). With no configured key the
     # memory backend mints an ephemeral one — fine for dev/tests; production sets
@@ -210,15 +222,6 @@ async def build_container(settings: Settings | None = None) -> Container:
     agent_execution = AgentExecutionService(
         registry, llm, deliverables, tools=tool_proxy, authority=authority, audit=audit
     )
-
-    knowledge_ingestion: KnowledgeIngestionService | None = None
-    if settings.qdrant_url and settings.openai_api_key:
-        from .memory.embedding_service import EmbeddingService
-        from .memory.qdrant_adapter import QdrantAdapter
-        knowledge_ingestion = KnowledgeIngestionService(
-            qdrant=QdrantAdapter(settings.qdrant_url, settings.qdrant_api_key),
-            embedding_service=EmbeddingService(settings.openai_api_key),
-        )
 
     return Container(
         settings=settings, bus=bus, audit=audit, authority=authority,

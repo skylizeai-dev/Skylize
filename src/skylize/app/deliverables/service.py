@@ -13,9 +13,17 @@ Status lifecycle: ``draft`` → ``review`` → ``approved`` (terminal-happy);
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
+import structlog
+
 from ...dal.ports import DeliverableRepository, DeliverableRow
+
+if TYPE_CHECKING:
+    from ...memory.knowledge_ingestion import KnowledgeIngestionService
+
+log = structlog.get_logger(__name__)
 
 
 class DeliverableError(Exception):
@@ -31,8 +39,16 @@ def _now() -> datetime:
 
 
 class DeliverableService:
-    def __init__(self, repo: DeliverableRepository) -> None:
+    def __init__(
+        self,
+        repo: DeliverableRepository,
+        knowledge_ingestion: KnowledgeIngestionService | None = None,
+    ) -> None:
         self._repo = repo
+        # Closed loop: approved deliverables are embedded back into the tenant's
+        # knowledge memory. Optional — approval must never fail on a missing or
+        # broken vector backend.
+        self._knowledge_ingestion = knowledge_ingestion
 
     async def create_deliverable(
         self,
@@ -97,10 +113,33 @@ class DeliverableService:
         self, org_id: str, id: UUID, approved_by: str
     ) -> DeliverableRow:
         current = await self.get_deliverable(org_id, id)
-        if current.status == "archived":
-            raise DeliverableError("cannot approve an archived deliverable")
+        if current.status in ("archived", "approved"):
+            raise DeliverableError(
+                f"cannot approve a deliverable with status '{current.status}'"
+            )
         await self._repo.update_approved(id, org_id, approved_by, _now())
-        return await self.get_deliverable(org_id, id)
+        approved = await self.get_deliverable(org_id, id)
+        if self._knowledge_ingestion is not None:
+            try:
+                await self._knowledge_ingestion.ingest(
+                    doc_id=f"deliverable:{approved.id}",
+                    content=approved.content_markdown,
+                    source_path=f"deliverables/{approved.deliverable_type}/{approved.title}",
+                    org_id=org_id,
+                )
+            except Exception:
+                log.warning(
+                    "deliverable.embed_failed",
+                    deliverable_id=str(approved.id),
+                    exc_info=True,
+                )
+        else:
+            log.warning(
+                "deliverable.embed_skipped",
+                deliverable_id=str(approved.id),
+                reason="knowledge_ingestion_not_configured",
+            )
+        return approved
 
     async def revise_deliverable(
         self, org_id: str, id: UUID, content_markdown: str, summary: str
