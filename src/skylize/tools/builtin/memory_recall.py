@@ -78,7 +78,7 @@ class QdrantMemoryRecallPort:
         results = await self._qdrant.search(vector, top_k, filters)
         return [
             MemoryHit(
-                content=str(item.get("content", "")),
+                content=str(item.get("content_text") or item.get("content") or ""),
                 score=float(item["score"]),
                 source=str(item.get("source_path") or item.get("doc_id") or ""),
             )
