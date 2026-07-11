@@ -14,6 +14,7 @@ never pollutes a shared database, and tears it down afterwards.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import uuid
 from collections.abc import AsyncIterator
@@ -33,6 +34,18 @@ requires_app_role = pytest.mark.skipif(
 requires_redis = pytest.mark.skipif(not REDIS_URL, reason="SKYLIZE_TEST_REDIS_URL not set")
 
 
+def _upgrade_head(cfg) -> None:
+    """Run Alembic's upgrade in a worker thread.
+
+    migrations/env.py calls asyncio.run() internally, which raises if invoked
+    from a thread that already has a running event loop — as pytest-asyncio's
+    async fixtures do. asyncio.to_thread() gives it a plain thread with none.
+    """
+    from alembic import command
+
+    command.upgrade(cfg, "head")
+
+
 @pytest_asyncio.fixture()
 async def pg_schema() -> AsyncIterator[str]:
     """Create a throwaway schema, run migrations into it, drop it after.
@@ -44,7 +57,6 @@ async def pg_schema() -> AsyncIterator[str]:
         pytest.skip("SKYLIZE_TEST_DB_URL not set")
 
     import asyncpg
-    from alembic import command
     from alembic.config import Config
 
     schema = f"test_{uuid.uuid4().hex[:12]}"
@@ -58,7 +70,7 @@ async def pg_schema() -> AsyncIterator[str]:
     cfg.set_main_option("version_table_schema", schema)
     os.environ["SKYLIZE_TEST_SCHEMA"] = schema
     try:
-        command.upgrade(cfg, "head")
+        await asyncio.to_thread(_upgrade_head, cfg)
         yield schema
     finally:
         conn = await asyncpg.connect(DB_URL)
@@ -78,12 +90,11 @@ async def migrated_public() -> AsyncIterator[None]:
     if not DB_URL:
         pytest.skip("SKYLIZE_TEST_DB_URL not set")
 
-    from alembic import command
     from alembic.config import Config
 
     cfg = Config("alembic.ini")
     cfg.set_main_option("sqlalchemy.url", DB_URL)
-    command.upgrade(cfg, "head")
+    await asyncio.to_thread(_upgrade_head, cfg)
     yield
 
 
