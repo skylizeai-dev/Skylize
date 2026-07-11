@@ -10,11 +10,20 @@ from __future__ import annotations
 
 from typing import Literal
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="SKYLIZE_", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="SKYLIZE_",
+        extra="ignore",
+        # Load a local .env (gitignored) so secrets like SKYLIZE_ANTHROPIC_API_KEY
+        # can be set without exporting them into the shell. Real process env vars
+        # still win over .env values.
+        env_file=".env",
+        env_file_encoding="utf-8",
+    )
 
     backend: Literal["memory", "postgres"] = "memory"
 
@@ -49,8 +58,31 @@ class Settings(BaseSettings):
     oidc_audience: str = ""
     request_context_ttl_seconds: int = 300
 
+    # CORS allow-list for browser origins. Empty (default) = middleware not
+    # installed: the gateway is a pure BFF today, so no cross-origin browser
+    # calls exist. Never set "*" here — the gateway sends credentialed
+    # responses, and a wildcard origin with credentials is a token leak.
+    # From env, set a JSON array:
+    # `SKYLIZE_CORS_ORIGINS='["https://console.skylize.com"]'`.
+    cors_origins: list[str] = []
+
+    # Human user auth (HS256 JWT access/refresh pair). Empty by default like the
+    # other SKYLIZE_* secrets (knowledge_webhook_secret, n8n_api_key); the boot
+    # check below fails closed when dev_auth is off and no secret is set, so
+    # production never signs tokens with a missing/placeholder key.
+    jwt_secret: str = ""
+    jwt_access_token_ttl_minutes: int = 30
+    jwt_refresh_token_ttl_days: int = 14
+
+    # Credential vault at-rest encryption (Fernet key: urlsafe base64, 32 bytes).
+    # Empty → the composition root mints an ephemeral dev key (memory backend);
+    # in production set this so stored credentials survive a restart.
+    credential_encryption_key: str = ""
+
     # Rate limiting (per org, per window).
     rate_limit_per_minute: int = 120
+    # Tighter dedicated budget for the sensitive GET /credentials/resolve path.
+    credential_resolve_rate_per_minute: int = 10
 
     # Event bus tuning
     dlq_after_retries: int = 5
@@ -63,6 +95,11 @@ class Settings(BaseSettings):
 
     # n8n → Skylize bridge key (X-Skylize-API-Key header on agent-prompts endpoint)
     n8n_api_key: str = ""
+
+    # Web-search tool provider (tools/builtin/web_search.py). Empty api key =
+    # NullWebSearchPort (tool returns an honest empty result set).
+    search_provider: str = "brave"
+    search_api_key: str = ""
 
     # HMAC-SHA256 secrets for inbound webhook verification; empty = check disabled.
     knowledge_webhook_secret: str = ""    # X-Hub-Signature-256 from n8n knowledge ingest
@@ -93,6 +130,27 @@ class Settings(BaseSettings):
     llm_price_haiku_out: float = 4.0
     llm_price_opus_in: float = 15.0
     llm_price_opus_out: float = 75.0
+
+    @model_validator(mode="after")
+    def _forbid_wildcard_cors(self) -> "Settings":
+        # The gateway registers CORSMiddleware with allow_credentials=True; a
+        # wildcard origin in that mode would hand credentialed responses to any
+        # site. Fail at boot instead of shipping the leak.
+        if "*" in self.cors_origins:
+            raise ValueError(
+                "SKYLIZE_CORS_ORIGINS must enumerate origins; '*' is not allowed"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _require_jwt_secret_when_prod(self) -> "Settings":
+        # Fail closed at boot: with dev_auth off there is no header-trust path, so
+        # a missing JWT signing key means user tokens cannot be issued/verified.
+        if not self.dev_auth and not self.jwt_secret:
+            raise ValueError(
+                "SKYLIZE_JWT_SECRET must be set when dev_auth is disabled"
+            )
+        return self
 
 
 _settings: Settings | None = None

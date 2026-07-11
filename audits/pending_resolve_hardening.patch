@@ -1,0 +1,56 @@
+# Parked security hardening for GET /api/v1/credentials/resolve
+# Restricts resolve to owner/admin (drops operator; removes the privilege
+# inversion vs store/delete), reconciles the module docstring, and flips the
+# operator test to expect 403. NOT yet applicable end-to-end: the credentials
+# router is unmounted and get_credential_resolve_limiter is undefined (see
+# handoff). Re-apply with:  git apply audits/pending_resolve_hardening.patch
+#
+--- a/src/skylize/edge/routes/credentials.py
++++ b/src/skylize/edge/routes/credentials.py
+@@ -1,12 +1,16 @@
+ """
+ Credential vault routes.
+ 
+-Store / list / delete per-tenant provider credentials. Retrieval of decrypted
+-values is intentionally NOT exposed via HTTP — it is internal-only, called from
+-agent adapters directly via CredentialVault.retrieve().
++Store / list / delete / resolve per-tenant provider credentials. Decrypted
++values are returned ONLY via GET /resolve, which is restricted to owner/admin,
++strictly org-scoped, rate-limited, and audit-logged. It exists so trusted
++machine integrations (e.g. the Anytype sync job) can fetch a provider secret for
++their own org via a service API key; in-process agents should prefer
++CredentialVault.retrieve() directly.
+ 
+   POST   /api/v1/credentials          — store (owner/admin)
+   GET    /api/v1/credentials          — list provider names, never values (owner/admin/operator)
++  GET    /api/v1/credentials/resolve  — decrypt one provider value (owner/admin)
+   DELETE /api/v1/credentials/{id}     — remove by credential UUID (owner/admin)
+ """
+ 
+@@ -82,7 +86,7 @@
+ async def resolve_credential(
+     provider: str,
+     label: str = "",
+-    ctx: RequestContext = Depends(require_any_role("owner", "admin", "operator")),
++    ctx: RequestContext = Depends(require_any_role("owner", "admin")),
+     container: Container = Depends(get_container),
+     limiter: RateLimiter = Depends(get_credential_resolve_limiter),
+ ) -> ResolvedCredential:
+--- a/tests/unit/test_credential_resolve.py
++++ b/tests/unit/test_credential_resolve.py
+@@ -48,11 +48,12 @@
+     assert resp.json()["value"] == "key-for-admin"
+ 
+ 
+-def test_resolve_operator_allowed(client: TestClient) -> None:
++def test_resolve_operator_forbidden(client: TestClient) -> None:
++    # operator can list provider names but must NOT read decrypted values —
++    # /resolve is restricted to owner/admin (matches store/delete).
+     _store(client, "anytype", "key-for-operator")
+     resp = client.get("/api/v1/credentials/resolve", params={"provider": "anytype"}, headers=_OPERATOR)
+-    assert resp.status_code == 200
+-    assert resp.json()["value"] == "key-for-operator"
++    assert resp.status_code == 403
+ 
+ 
+ def test_resolve_with_label(client: TestClient) -> None:

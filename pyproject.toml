@@ -53,6 +53,33 @@ dependencies = [
     # Knowledge ingestion pipeline (Sprint-2 memory work)
     "qdrant-client>=1.9",
     "openai>=1.0",
+
+    # LLM provider — Anthropic Claude (creative crew + agent execution).
+    "anthropic>=0.39",
+
+    # Durable workflow execution (Temporal Cloud). activities.py imports
+    # `temporalio` at module load, so it is required for test collection.
+    "temporalio>=1.7",
+
+    # Resilience — @retry on the HubSpot + web-search built-in tools.
+    "tenacity>=8.2",
+
+    # Human user auth — bcrypt password hashing; email-validator backs the
+    # pydantic EmailStr fields on the auth request models (import-time check).
+    "bcrypt>=4.1",
+    "email-validator>=2.1",
+
+    # Async file IO for the credential vault / deliverable staging.
+    "aiofiles>=23.2",
+
+    # Deliverable exporters + memory extraction: DOCX (python-docx), Markdown,
+    # XLSX (openpyxl), Markdown→HTML→PDF (xhtml2pdf, pure-Python), and PDF
+    # text extraction (pypdf — memory/extraction.py imports it at call time).
+    "python-docx>=1.1",
+    "markdown>=3.6",
+    "openpyxl>=3.1",
+    "xhtml2pdf>=0.2.16",
+    "pypdf>=5.0",
 ]
 
 [project.optional-dependencies]
@@ -60,9 +87,11 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "pytest-benchmark",
+    "hypothesis>=6.100",   # property test pinning the injective identity map (test_identity.py)
     "import-linter>=2.0",
     "ruff>=0.4",
     "mypy>=1.10",
+    "respx>=0.21",   # httpx mocking for the edge/CORS + adapter tests
 ]
 
 [tool.setuptools.packages.find]
@@ -150,5 +179,22 @@ plugins = ["pydantic.mypy"]
 # Third-party libraries that ship no type information (no py.typed / stubs).
 # We keep `strict` for our own code; these get import-level leniency only.
 [[tool.mypy.overrides]]
-module = ["asyncpg.*", "redis.*", "jose.*", "langgraph.*", "qdrant_client.*", "openai.*"]
+module = [
+    "asyncpg.*", "redis.*", "jose.*", "langgraph.*", "qdrant_client.*", "openai.*",
+    "markdown.*", "xhtml2pdf.*", "openpyxl.*", "temporalio.*", "mem0.*",
+]
 ignore_missing_imports = true
+
+# Subsystems that are NOT wired into bootstrap (dead/paused code slated for the
+# post-launch M5 excision/rework — see the launch plan). Typing errors here
+# must not gate CI for the live product; remove each line when the subsystem
+# is excised or brought back to life.
+[[tool.mypy.overrides]]
+module = [
+    "skylize.decision_engine.*",
+    "skylize.app.decision_engine.*",
+    "skylize.app.orchestrator.temporal.*",
+    "skylize.services.obsidian_writer.*",
+    "skylize.memory.adapters.*",
+]
+ignore_errors = true

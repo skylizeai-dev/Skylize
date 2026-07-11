@@ -16,6 +16,7 @@ const ctaVariants = cva(
           "text-foreground hover:bg-foreground/[0.04]",
       },
       size: {
+        sm: "h-8 px-3 text-[13px]",
         md: "h-11 px-5 text-sm",
         lg: "h-12 px-6 text-[0.95rem]",
       },

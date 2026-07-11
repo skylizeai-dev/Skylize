@@ -10,3 +10,31 @@ Business logic (the live revocation set, circuit breaker, kill-switch state) is
 NOT here — those are injected at runtime via the `LiveStateChecker` protocol in
 `token.py` and implemented by the Governance Authority in a later sprint.
 """
+
+from __future__ import annotations
+
+from .base import (
+    AgentContract,
+    FailureMode,
+    GovernanceToken,
+    HumanInLoopTrigger,
+    ToolGrant,
+)
+from .registry import (
+    AgentNotRegistered,
+    AgentRegistry,
+    ContractSchemaError,
+    resolve_model,
+)
+
+__all__ = [
+    "AgentContract",
+    "FailureMode",
+    "GovernanceToken",
+    "HumanInLoopTrigger",
+    "ToolGrant",
+    "AgentNotRegistered",
+    "AgentRegistry",
+    "ContractSchemaError",
+    "resolve_model",
+]

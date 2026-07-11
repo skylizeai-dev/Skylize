@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { animate, useInView } from "framer-motion";
+import { animate, useInView, useReducedMotion } from "framer-motion";
 import { EASE_ALTITUDE } from "@/lib/motion";
 import { cn } from "@/lib/utils";
 
@@ -25,22 +25,27 @@ export function Counter({
 }: CounterProps) {
   const ref = useRef<HTMLSpanElement>(null);
   const inView = useInView(ref, { once: true, margin: "-15% 0px" });
+  const reduceMotion = useReducedMotion();
   const [display, setDisplay] = useState(0);
 
   useEffect(() => {
-    if (!inView) return;
+    if (!inView || reduceMotion) return;
     const controls = animate(0, value, {
       duration: 1.4,
       ease: EASE_ALTITUDE,
       onUpdate: (v) => setDisplay(v),
     });
     return () => controls.stop();
-  }, [inView, value]);
+  }, [inView, value, reduceMotion]);
+
+  // MotionConfig doesn't reach imperative animate() calls, so the
+  // reduced-motion path renders the final value directly.
+  const shown = reduceMotion ? value : display;
 
   return (
     <span ref={ref} className={cn("tabular-nums", className)}>
       {prefix}
-      {display.toFixed(decimals)}
+      {shown.toFixed(decimals)}
       {suffix}
     </span>
   );

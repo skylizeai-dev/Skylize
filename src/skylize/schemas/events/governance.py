@@ -137,3 +137,21 @@ class GovernanceKillSwitchDisengaged(BaseEvent):
         disengaged_by: str
 
     payload: Payload
+
+
+class GovernanceHumanApprovalReceived(BaseEvent):
+    """A human verdict on a HITL-deferred decision. Consumed by the Decision
+    Engine to resume a paused decision into its terminal approve/reject outcome."""
+
+    category: Literal[EventCategory.GOVERNANCE] = EventCategory.GOVERNANCE
+    type: Literal["governance.human_approval_received"] = "governance.human_approval_received"
+    schema_version: Literal["1.0"] = "1.0"
+
+    class Payload(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        decision_id: UUID
+        hitl_id: UUID
+        approved: bool
+        decided_by: str
+
+    payload: Payload

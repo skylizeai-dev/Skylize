@@ -22,7 +22,7 @@ from langgraph.graph import END, StateGraph
 
 from ....contracts.base import AgentContract, GovernanceToken
 from ....contracts.token import validate_tool_call
-from ..runner import AgentRunner
+from ..runner import AgentRunner, RunnerMeta
 
 
 class WorkflowState(TypedDict, total=False):
@@ -33,6 +33,7 @@ class WorkflowState(TypedDict, total=False):
     token: GovernanceToken
     input_payload: dict[str, Any]
     output: dict[str, Any] | None
+    run_meta: RunnerMeta | None
     failure: str | None
     failed_stage: str | None
 
@@ -79,12 +80,13 @@ def build_creative_graph(deps: GraphDeps) -> Any:
 
     async def agent_step(state: WorkflowState) -> WorkflowState:
         try:
-            output = await deps.runner.run(
+            output, meta = await deps.runner.run(
                 contract=state["contract"],
                 input_payload=state["input_payload"],
                 token=state["token"],
+                org_id=state["org_id"],
             )
-            return {"output": output}
+            return {"output": output, "run_meta": meta}
         except Exception as exc:  # noqa: BLE001 — surfaced as a governed failure
             return {"failure": f"agent_step error: {exc}", "failed_stage": "agent_step"}
 

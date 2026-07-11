@@ -1,0 +1,193 @@
+name: Deploy → Staging
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  id-token: write   # OIDC
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: skylize-api
+  ECS_CLUSTER: skylize-staging
+  ECS_SERVICE: skylize-staging-api
+  CONTAINER_NAME: api
+
+jobs:
+  # ── Gate: lint + type-check + unit tests ────────────────────────────────────
+  lint-and-test:
+    name: Lint & Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Ruff lint
+        run: ruff check src tests
+
+      - name: Import boundaries
+        run: lint-imports
+
+      - name: Type check
+        run: mypy src
+
+      - name: Unit tests
+        run: pytest -q --tb=short -m "not integration"
+
+  # ── Integration tests (real Postgres + Redis) ────────────────────────────────
+  integration-test:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: lint-and-test
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: skylize
+          POSTGRES_USER: skylize
+          POSTGRES_PASSWORD: testpass
+        options: >-
+          --health-cmd "pg_isready -U skylize"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+        ports:
+          - 5432:5432
+
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+        ports:
+          - 6379:6379
+
+    env:
+      SKYLIZE_TEST_DB_URL: postgresql://skylize:testpass@localhost:5432/skylize
+      SKYLIZE_TEST_APP_DB_URL: postgresql://skylize:testpass@localhost:5432/skylize
+      SKYLIZE_APP_DB_PASSWORD: testpass
+      SKYLIZE_TEST_REDIS_URL: redis://localhost:6379
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Run migrations
+        run: alembic upgrade head
+        env:
+          SKYLIZE_DB_URL: postgresql://skylize:testpass@localhost:5432/skylize
+
+      - name: Integration tests
+        run: pytest -q -m integration -rA
+
+  # ── Build + push Docker image to ECR ─────────────────────────────────────────
+  build-and-push:
+    name: Build & Push Image
+    runs-on: ubuntu-latest
+    needs: integration-test
+    outputs:
+      image: ${{ steps.build.outputs.image }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_GITHUB_ACTIONS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push image
+        id: build
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t $REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG -t $REGISTRY/$ECR_REPOSITORY:latest .
+          docker push $REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $REGISTRY/$ECR_REPOSITORY:latest
+          echo "image=$REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+  # ── Deploy to ECS (rolling) ──────────────────────────────────────────────────
+  deploy:
+    name: Deploy to ECS Staging
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    environment: staging
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_GITHUB_ACTIONS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Download current task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition $ECS_CLUSTER-api \
+            --query taskDefinition \
+            > task-def.json
+
+      - name: Update image in task definition
+        id: task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-def.json
+          container-name: ${{ env.CONTAINER_NAME }}
+          image: ${{ needs.build-and-push.outputs.image }}
+
+      - name: Deploy to ECS
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.task-def.outputs.task-definition }}
+          service: ${{ env.ECS_SERVICE }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true
+          wait-for-minutes: 10
+
+      - name: Smoke test
+        run: |
+          ALB_DNS=$(aws elbv2 describe-load-balancers \
+            --names skylize-staging-alb \
+            --query 'LoadBalancers[0].DNSName' \
+            --output text)
+          echo "ALB: $ALB_DNS"
+          # Retry for up to 60s to account for TG health check warm-up
+          for i in $(seq 1 6); do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://$ALB_DNS/health)
+            if [ "$STATUS" = "200" ]; then
+              echo "Health check passed (HTTP $STATUS)"
+              exit 0
+            fi
+            echo "Attempt $i: HTTP $STATUS — waiting 10s..."
+            sleep 10
+          done
+          echo "Smoke test failed after retries"
+          exit 1

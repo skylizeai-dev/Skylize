@@ -30,14 +30,53 @@ CONTRACT NOTES for Sprint 2 implementers:
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
+if TYPE_CHECKING:
+    from ...tools.base import ToolDefinition
+
+
+class LLMContentBlock(BaseModel):
+    """One provider-neutral content block in a multi-turn message.
+
+    `kind="text"` carries `text`; `kind="tool_use"` carries the tool call
+    (`tool_use_id` / `tool_name` / `tool_input`); `kind="tool_result"` carries the
+    tool's output back to the model (`tool_use_id` / `tool_output`, with
+    `is_error` set on failure). Adapters translate this to/from provider wire
+    formats so agent/runtime code never sees a provider-specific block shape.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: Literal["text", "tool_use", "tool_result"]
+    text: str | None = None
+    tool_use_id: str | None = None
+    tool_name: str | None = None
+    tool_input: dict[str, Any] | None = None
+    tool_output: str | None = None
+    is_error: bool = False
+
+
+class LLMMessage(BaseModel):
+    """One turn in a multi-turn exchange: a role plus its content blocks."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    role: str  # "user" | "assistant"
+    content: list[LLMContentBlock]
+
 
 class TokenBudgetExceeded(Exception):
     """Raised when a generation would exceed the run's token budget ceiling."""
+
+
+class LLMProviderUnavailable(Exception):
+    """Raised when a provider is unreachable after retries (retryable 5xx/network
+    errors exhausted). The gateway may fail over to another provider; if none is
+    available the error propagates so the caller can degrade gracefully."""
 
 
 class LLMGenerateRequest(BaseModel):
@@ -51,6 +90,33 @@ class LLMGenerateRequest(BaseModel):
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
 
     # Governance / tenancy context — required for cost attribution & isolation.
+    governance_token_id: UUID
+    org_id: str
+
+    # Optional run-budget context. When set, adapters refuse a call whose
+    # requested_max_tokens exceeds (max_token_budget - tokens_used_so_far)
+    # BEFORE any provider egress → TokenBudgetExceeded.
+    max_token_budget: int | None = None
+    tokens_used_so_far: int | None = None
+
+
+class LLMGenerateWithToolsRequest(BaseModel):
+    """Multi-turn, tool-enabled generation request.
+
+    Unlike `LLMGenerateRequest` (single prompt), this carries a full message
+    history (`messages`) so the model can be driven through a tool-use loop:
+    assistant emits `tool_use` blocks, the runtime executes them and appends
+    `tool_result` blocks, and the request is re-issued until the model stops.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    model: str = "default"
+    system: str | None = None
+    messages: list[LLMMessage]
+    requested_max_tokens: int = Field(gt=0)
+    temperature: float = Field(default=0.7, ge=0.0, le=2.0)
+
     governance_token_id: UUID
     org_id: str
 
@@ -72,6 +138,12 @@ class LLMGenerateResponse(BaseModel):
     usage: LLMUsage
     cost_usd_micros: int = 0  # cost in millionths of a USD; 0 if not priced
 
+    # Multi-turn / tool-use path (empty on single-shot `generate`): why the model
+    # stopped ("end_turn" | "tool_use" | ...) and the structured content blocks
+    # (assistant text + any `tool_use` calls the runtime must execute).
+    stop_reason: str | None = None
+    content: list[LLMContentBlock] = Field(default_factory=list)
+
 
 @runtime_checkable
 class LLMGateway(Protocol):
@@ -92,4 +164,10 @@ class LLMGateway(Protocol):
 
     def generate_sync(self, request: LLMGenerateRequest) -> LLMGenerateResponse:
         """Blocking variant for execution inside a thread-pool executor."""
+        ...
+
+    async def generate_with_tools(
+        self, request: LLMGenerateWithToolsRequest, tools: list[ToolDefinition]
+    ) -> LLMGenerateResponse:
+        """Multi-turn tool-enabled generation through the governed tool set."""
         ...

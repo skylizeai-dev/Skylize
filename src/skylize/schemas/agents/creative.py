@@ -80,6 +80,21 @@ class HooksOut(_Base):
     hooks: list[str]
 
 
+# Operator-execute variant (`/api/v1/agents/execute` + the creative workflow):
+# a human supplies brand context instead of an upstream brief, so there is no
+# brief_id to echo.
+class HookGeneratorExecuteIn(_Base):
+    brand_name: str
+    product_description: str
+    target_audience: str
+    tone: str | None = None
+    count: int = Field(default=3, ge=1, le=10)
+
+
+class HookGeneratorExecuteOut(_Base):
+    hooks: list[str]
+
+
 # ── Ad Copy (worker) ─────────────────────────────────────────────────────────
 class AdCopyRequestIn(_Base):
     brief_id: UUID

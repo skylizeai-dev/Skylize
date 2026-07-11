@@ -7,10 +7,13 @@ implementations live in `repositories.py`; in-memory fakes in `memory.py`.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 from uuid import UUID
+
+if TYPE_CHECKING:
+    from ..schemas.memory import MemoryWriteOutcome, ProvenanceEntry
 
 
 # ---------------------------------------------------------------------------
@@ -113,9 +116,23 @@ class GovernanceRepository(Protocol):
 class AuditRepository(Protocol):
     async def append(self, row: AuditRow) -> None: ...
 
+    async def list_for_org(
+        self, org_id: str, *, limit: int = 50, before: datetime | None = None
+    ) -> list[AuditRow]:
+        """Newest-first audit rows for one org; `before` pages backwards in time."""
+        ...
+
 
 class ContractRepository(Protocol):
     async def upsert(self, agent_id: str, version: int, contract_json: str) -> None: ...
+
+    async def load_all_active(self) -> list[tuple[str, str]]:
+        """All active contracts as (agent_id, contract_json), latest version per agent."""
+        ...
+
+    async def get_latest_active(self, agent_id: str) -> str | None:
+        """Latest active contract_json for one agent, or None if absent."""
+        ...
 
 
 # ---------------------------------------------------------------------------
@@ -193,3 +210,159 @@ class ApiKeyRepository(Protocol):
     async def revoke(self, key_id: UUID, org_id: str, reason: str, when: datetime) -> None: ...
 
     async def touch_last_used(self, key_id: UUID, when: datetime) -> None: ...
+
+
+# ---------------------------------------------------------------------------
+# Users & auth (human RBAC layer — distinct from the agent authority layer)
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True, slots=True)
+class UserRow:
+    user_id: UUID
+    org_id: str
+    email: str
+    password_hash: str
+    roles: list[str]
+    is_active: bool
+    created_at: datetime
+    display_name: str | None = None
+    last_login_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RefreshTokenRow:
+    token_id: UUID
+    user_id: UUID
+    expires_at: datetime
+    revoked_at: datetime | None = None
+
+
+class UserRepository(Protocol):
+    """Human user store + refresh-token lifecycle. Email lookup is cross-tenant
+    (login); everything else is scoped by `org_id` at the call site."""
+
+    async def create_user(self, row: UserRow) -> None: ...
+
+    async def get_by_email(self, email: str) -> UserRow | None: ...
+
+    async def get_by_id(self, user_id: UUID) -> UserRow | None: ...
+
+    async def list_by_org(self, org_id: str) -> list[UserRow]: ...
+
+    async def update_last_login(self, user_id: UUID, when: datetime) -> None: ...
+
+    async def store_refresh_token(
+        self, token_id: UUID, user_id: UUID, expires_at: datetime
+    ) -> None: ...
+
+    async def get_refresh_token(self, token_id: UUID) -> RefreshTokenRow | None: ...
+
+    async def revoke_refresh_token(self, token_id: UUID) -> None: ...
+
+
+# ---------------------------------------------------------------------------
+# Deliverables (agent-produced artifacts, versioned, human-approvable)
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True, slots=True)
+class DeliverableRow:
+    id: UUID
+    org_id: str
+    agent_id: str
+    deliverable_type: str
+    title: str
+    content_markdown: str
+    summary: str
+    status: str
+    version: int
+    created_at: datetime
+    updated_at: datetime
+    governance_token_id: UUID | None = None
+    parent_id: UUID | None = None
+    metadata_json: dict[str, Any] = field(default_factory=dict)
+    approved_at: datetime | None = None
+    approved_by: str | None = None
+
+
+class DeliverableRepository(Protocol):
+    """Store for agent-produced deliverables. Every read/write is `org_id`-scoped
+    (tenant isolation at IF-DATA); approval mutates status + approver fields."""
+
+    async def create(self, row: DeliverableRow) -> None: ...
+
+    async def get_by_id(self, id: UUID, org_id: str) -> DeliverableRow | None: ...
+
+    async def list_by_org(
+        self,
+        org_id: str,
+        *,
+        status: str | None = None,
+        deliverable_type: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[DeliverableRow], int]: ...
+
+    async def update_status(self, id: UUID, org_id: str, status: str) -> bool: ...
+
+    async def update_approved(
+        self, id: UUID, org_id: str, approved_by: str, approved_at: datetime
+    ) -> bool: ...
+
+    async def list_versions(
+        self, org_id: str, deliverable_id: UUID
+    ) -> list[DeliverableRow]: ...
+
+
+# ---------------------------------------------------------------------------
+# Memory write port (the DAL owns SQL; the memory layer owns hashing/events)
+# ---------------------------------------------------------------------------
+
+class MemoryWritePort(Protocol):
+    """What `memory/repository.py` needs from the DAL: an idempotent fact
+    upsert (ON CONFLICT collapses to provenance-append + reinforcement) and a
+    scoped point read. Tenant isolation is enforced by `org_id` in the key."""
+
+    async def upsert_fact(
+        self,
+        *,
+        org_id: str,
+        namespace: str,
+        tier: str,
+        fact_hash: str,
+        content_text: str,
+        provenance_entry: "ProvenanceEntry",
+        created_by_agent: str,
+        half_life_seconds: float,
+        reinforcement: float,
+    ) -> "MemoryWriteOutcome": ...
+
+    async def get_fact(
+        self, *, org_id: str, namespace: str, fact_hash: str
+    ) -> Any | None: ...
+
+
+# ---------------------------------------------------------------------------
+# Capital allocation (Decision Engine stage 4) + idempotency
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True, slots=True)
+class BudgetCeiling:
+    org_id: str
+    scope: str  # department/capital scope, e.g. "growth"
+    ceiling_minor_units: int
+    committed_minor_units: int = 0
+
+
+class CapitalRepository(Protocol):
+    """The budget ledger read the evaluator consults at stage 4. Tightest ceiling
+    wins; a missing ceiling fails closed (defers to human)."""
+
+    async def get_ceiling(self, org_id: str, scope: str) -> BudgetCeiling | None: ...
+
+
+class ProcessedEventStore(Protocol):
+    """Idempotency guard: the async engine decides each `event_id` at most once."""
+
+    async def is_processed(self, key: str) -> bool: ...
+
+    async def mark_processed(self, key: str, outcome: str) -> None: ...

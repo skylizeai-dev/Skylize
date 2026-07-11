@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { Menu, X } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -19,6 +19,8 @@ const links = [
 export function Navigation() {
   const [scrolled, setScrolled] = useState(false);
   const [open, setOpen] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const firstLinkRef = useRef<HTMLAnchorElement>(null);
 
   useEffect(() => {
     const onScroll = () => setScrolled(window.scrollY > 8);
@@ -32,6 +34,21 @@ export function Navigation() {
     return () => {
       document.body.style.overflow = "";
     };
+  }, [open]);
+
+  // Modal keyboard contract: focus moves into the menu on open, Escape
+  // dismisses and hands focus back to the trigger.
+  useEffect(() => {
+    if (!open) return;
+    firstLinkRef.current?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setOpen(false);
+        triggerRef.current?.focus();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
   }, [open]);
 
   return (
@@ -65,7 +82,7 @@ export function Navigation() {
 
           <div className="hidden items-center gap-3 md:flex">
             <a
-              href="#"
+              href="/console/login"
               className="text-sm text-muted-foreground transition-colors duration-200 hover:text-foreground"
             >
               Sign in
@@ -77,6 +94,7 @@ export function Navigation() {
 
           {/* Mobile trigger */}
           <button
+            ref={triggerRef}
             type="button"
             aria-label={open ? "Close menu" : "Open menu"}
             aria-expanded={open}
@@ -92,6 +110,9 @@ export function Navigation() {
       <AnimatePresence>
         {open && (
           <motion.div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Site menu"
             className="fixed inset-0 top-16 z-40 bg-background md:hidden"
             initial={{ opacity: 0, y: -12 }}
             animate={{ opacity: 1, y: 0 }}
@@ -109,6 +130,7 @@ export function Navigation() {
                     className="border-b border-border"
                   >
                     <a
+                      ref={i === 0 ? firstLinkRef : undefined}
                       href={link.href}
                       onClick={() => setOpen(false)}
                       className="flex items-center justify-between py-4 font-display text-xl tracking-tight text-foreground"
@@ -122,10 +144,22 @@ export function Navigation() {
                 ))}
               </ul>
               <div className="mt-auto flex flex-col gap-3">
-                <CtaButton href="#contact" size="lg" arrow className="w-full">
+                <CtaButton
+                  href="#contact"
+                  size="lg"
+                  arrow
+                  className="w-full"
+                  onClick={() => setOpen(false)}
+                >
                   Book Strategy Call
                 </CtaButton>
-                <CtaButton href="#" variant="secondary" size="lg" className="w-full">
+                <CtaButton
+                  href="/console/login"
+                  variant="secondary"
+                  size="lg"
+                  className="w-full"
+                  onClick={() => setOpen(false)}
+                >
                   Sign in
                 </CtaButton>
               </div>

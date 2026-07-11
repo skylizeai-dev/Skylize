@@ -29,6 +29,29 @@ jobs:
         run: pytest -q
 
   # ---------------------------------------------------------------------------
+  # Website gate: typecheck + unit tests for the Next.js frontend.
+  # Mirrors the Python fast gate — no services, must be green on every PR.
+  # ---------------------------------------------------------------------------
+  website:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: website
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: website/package-lock.json
+      - name: Install
+        run: npm ci
+      - name: Types (tsc --noEmit)
+        run: npm run typecheck
+      - name: Tests (vitest)
+        run: npm test
+
+  # ---------------------------------------------------------------------------
   # Integration gate: real Postgres + Redis (Sprint-2 Tasks 4/5).
   # The integration tests skip themselves if SKYLIZE_TEST_DB_URL /
   # SKYLIZE_TEST_REDIS_URL are unset, so this job is what actually exercises
