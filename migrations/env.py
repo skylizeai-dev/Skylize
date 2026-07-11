@@ -76,6 +76,12 @@ async def run_migrations_online() -> None:
     engine = async_engine_from_config(cfg, prefix="sqlalchemy.")
     async with engine.connect() as connection:
         await connection.run_sync(_do_run_migrations)
+        # The SET search_path call above starts connection's implicit
+        # transaction before Alembic's own per-migration transactions do,
+        # so nothing is durably committed until this connection-level
+        # transaction itself commits — without it, __aexit__ rolls back
+        # silently and every migration's DDL vanishes on connection close.
+        await connection.commit()
     await engine.dispose()
 
 
