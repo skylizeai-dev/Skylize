@@ -55,7 +55,10 @@ def _do_run_migrations(connection: Connection) -> None:
     if test_schema:
         from sqlalchemy import text
 
-        connection.execute(text(f'SET search_path TO "{test_schema}"'))
+        # `public` stays on the path so extension functions installed there
+        # (pgcrypto's digest(), etc.) resolve; DDL still lands in test_schema
+        # because it comes first.
+        connection.execute(text(f'SET search_path TO "{test_schema}", public'))
         version_table_schema = test_schema
 
     context.configure(

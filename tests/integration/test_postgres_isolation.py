@@ -117,6 +117,10 @@ async def test_with_check_blocks_cross_tenant_insert(app_conn, admin_conn) -> No
 
 @requires_app_role
 async def test_append_only_trigger_blocks_update_and_delete(app_conn, admin_conn) -> None:
+    """audit_log is immutable in depth: skylize_app has no UPDATE/DELETE grant
+    (migration 0003), so Postgres denies the statement before the append-only
+    trigger (migration 0001) ever runs. Either layer failing first is a pass —
+    the row must not change either way."""
     org_a, _ = _orgs()
     try:
         await _seed_tenant(admin_conn, org_a)
@@ -124,10 +128,10 @@ async def test_append_only_trigger_blocks_update_and_delete(app_conn, admin_conn
         await _insert_audit(app_conn, org_a)
         import asyncpg
 
-        with pytest.raises(asyncpg.PostgresError, match="append-only"):
+        with pytest.raises(asyncpg.PostgresError, match="append-only|permission denied"):
             await app_conn.execute("UPDATE audit_log SET result='tampered' WHERE org_id=$1",
                                    org_a)
-        with pytest.raises(asyncpg.PostgresError, match="append-only"):
+        with pytest.raises(asyncpg.PostgresError, match="append-only|permission denied"):
             await app_conn.execute("DELETE FROM audit_log WHERE org_id=$1", org_a)
     finally:
         await admin_conn.execute("DELETE FROM tenants WHERE org_id = $1", org_a)
