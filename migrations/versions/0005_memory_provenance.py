@@ -42,6 +42,10 @@ _APP_ROLE = "skylize_app"
 
 
 def upgrade() -> None:
+    # 0. digest() (used below to compute fact_hash) lives in pgcrypto, not core.
+    #    Idempotent — a no-op on a database that already has it.
+    op.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto")
+
     # 1. Add the columns (nullable fact_hash first so existing rows survive).
     op.execute(
         """
