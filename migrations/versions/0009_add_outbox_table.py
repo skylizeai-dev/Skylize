@@ -34,11 +34,16 @@ depends_on = None
 
 
 def upgrade() -> None:
+    # Deliberately public, not search_path[0]: the outbox relay is a single
+    # cross-tenant process with no per-schema instance, so it always lives in
+    # public even when this migration replays into a disposable test schema
+    # (integration tests re-run the full chain there). Every DDL statement
+    # below is therefore guarded so a replay is a no-op instead of erroring.
     op.execute("SET search_path TO public")
 
     op.execute(
         """
-        CREATE TABLE decision_outbox (
+        CREATE TABLE IF NOT EXISTS decision_outbox (
             id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             tenant_id       TEXT NOT NULL,
             stream_key      TEXT NOT NULL,
@@ -55,7 +60,7 @@ def upgrade() -> None:
 
     op.execute(
         """
-        CREATE INDEX idx_outbox_unpublished
+        CREATE INDEX IF NOT EXISTS idx_outbox_unpublished
             ON decision_outbox (tenant_id, created_at)
             WHERE published_at IS NULL AND failed_at IS NULL;
         """
@@ -63,7 +68,7 @@ def upgrade() -> None:
 
     op.execute(
         """
-        CREATE INDEX idx_outbox_published_at
+        CREATE INDEX IF NOT EXISTS idx_outbox_published_at
             ON decision_outbox (published_at)
             WHERE published_at IS NOT NULL;
         """
@@ -73,10 +78,17 @@ def upgrade() -> None:
     op.execute("ALTER TABLE decision_outbox FORCE ROW LEVEL SECURITY;")
     op.execute(
         """
-        CREATE POLICY outbox_tenant_isolation ON decision_outbox
-            FOR ALL
-            USING (tenant_id = current_setting('skylize.org_id', true))
-            WITH CHECK (tenant_id = current_setting('skylize.org_id', true));
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_policy WHERE polname = 'outbox_tenant_isolation'
+            ) THEN
+                CREATE POLICY outbox_tenant_isolation ON decision_outbox
+                    FOR ALL
+                    USING (tenant_id = current_setting('skylize.org_id', true))
+                    WITH CHECK (tenant_id = current_setting('skylize.org_id', true));
+            END IF;
+        END $$;
         """
     )
 
