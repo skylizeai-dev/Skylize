@@ -150,8 +150,8 @@ class LLMGateway(Protocol):
     """The provider-abstracted LLM port.
 
     Implemented in Sprint 2 by `AnthropicAdapter` (primary). The async method is
-    canonical; `generate_sync` exists for the thread-pool path used when CrewAI
-    runs inside a LangGraph node.
+    canonical; `generate_sync` exists for the thread-pool path used when a
+    LangGraph node must call the gateway from synchronous code.
     """
 
     async def generate(self, request: LLMGenerateRequest) -> LLMGenerateResponse:

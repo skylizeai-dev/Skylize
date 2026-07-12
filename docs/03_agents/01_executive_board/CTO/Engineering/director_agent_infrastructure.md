@@ -29,7 +29,7 @@ Runtime reliability; gateway cost/quality; sandbox integrity.
 `skylize.schemas.engineering.DirectorAgentInfrastructureOut` — its produced artifact, wrapped by the Orchestrator into the correct event.
 
 ## 8. Dependencies
-LangGraph/CrewAI; the LLM gateway; tool proxy.
+LangGraph; the LLM gateway; tool proxy.
 
 ## 9. Events Consumed
 - `decision.approved` (work authorized to proceed)

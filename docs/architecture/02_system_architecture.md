@@ -38,8 +38,8 @@ and it does not contradict them.
     │ IF-AGENT      │ IF-EVENT           │ IF-DATA
 ┌───▼─────────┐ ┌───▼──────────────┐ ┌──▼────────────────────────┐
 │ AGENT RUNTIME│ │ EVENT BUS        │ │ DATA ACCESS LAYER (DAL)    │
-│ LangGraph +  │ │ Redis Streams    │ │ Postgres · Qdrant · Redis  │
-│ CrewAI       │ │ (+ S3 archive)   │ │ · S3   (RLS by org_id)     │
+│ LangGraph    │ │ Redis Streams    │ │ Postgres · Qdrant · Redis  │
+│ (sole orch.) │ │ (+ S3 archive)   │ │ · S3   (RLS by org_id)     │
 │ (sandboxed)  │ └──────────────────┘ └────────────────────────────┘
 └───┬──────────┘
     │ IF-TOOL (tool proxy)
@@ -153,23 +153,25 @@ This is exactly the registry lookup / resolution pattern in
 - Governance checks (token validity, authority, kill switch) are explicit nodes,
   not hidden middleware, so they are inspectable and testable.
 
-### 5.3 CrewAI for intra-team collaboration
+### 5.3 LangGraph subgraphs for intra-team collaboration
 Within a department crew (e.g. the copy team: `copy_director` coordinating
-`hook_generator_agent`, `ad_copy_agent`, …), CrewAI expresses role-based
-collaboration ergonomically. The crew runs *inside* a LangGraph node, so the
-control-plane guarantees (durability, governance checkpoints) still wrap it.
+`hook_generator_agent`, `ad_copy_agent`, …), role-based collaboration is
+expressed as a **LangGraph subgraph** — not a separate framework. The crew runs
+as nodes *inside* the parent LangGraph run, so the control-plane guarantees
+(durability, governance checkpoints, replay) wrap it exactly like any other step.
 
 ### 5.4 Division of labor
 | Concern | Owner |
 |---|---|
 | Durable control flow, checkpoints, resume, replay | **LangGraph** |
 | Governance checkpoints, HITL pauses, escalation/conflict branches | **LangGraph nodes** |
-| Role-based team collaboration within a department | **CrewAI** (inside a node) |
-| Contract resolution, token minting, event wrapping, audit | **Orchestrator** (facade over both) |
+| Role-based team collaboration within a department | **LangGraph subgraph** (inside a node) |
+| Contract resolution, token minting, event wrapping, audit | **Orchestrator** (facade over the runtime) |
 
-Both frameworks sit behind the Orchestrator facade and the `AgentContract`
-registry, so either can be replaced without changing agent contracts (see
-[01_final_stack.md §4.7](./01_final_stack.md#47-orchestration--langgraph-control-plane--crewai-team-patterns)).
+LangGraph sits behind the Orchestrator facade and the `AgentContract`
+registry, so the orchestration layer can be replaced without changing agent
+contracts (see [01_final_stack.md §4.7](./01_final_stack.md#47-orchestration--langgraph-sole-orchestration-layer)
+and [ADR-0002](./adr/0002-crewai-removal-langgraph-only.md)).
 
 ---
 

@@ -47,7 +47,7 @@ A choice that wins on rule 1 but loses on rule 3 or 4 is rejected.
 | Vector store | **Qdrant** (primary), **pgvector** (fallback) |
 | Cache + event bus + queue | **Redis 7 (Streams)** |
 | Object storage | **S3 API** (AWS S3 / MinIO) |
-| Agent orchestration | **LangGraph** (control) + **CrewAI** (team patterns) |
+| Agent orchestration | **LangGraph** (sole orchestration layer) |
 | Workflow automation | **n8n** (external execution surface) |
 | LLM access | **provider-abstracted gateway** (OpenAI / Anthropic / Gemini) |
 | Auth / identity | **OIDC IdP** (Clerk / Auth0 / Keycloak) |
