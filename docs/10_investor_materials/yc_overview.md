@@ -69,10 +69,26 @@ per-agent budget ceilings and provider abstraction (cost routing).
 
 ## 9. Traction & status
 
-- **Foundation built:** the full governance/audit/boundary spine and architecture
+- **Backend spine built:** the governance/audit/boundary architecture — signed
+  tokens, policy guardrails, immutable audit log, tenant isolation — is
+  implemented in the backend
   (see [technical_due_diligence.md](./technical_due_diligence.md)).
-- **MVP:** governed creative + growth team, multi-tenant, audited
-  ([../11_product/mvp_definition.md](../11_product/mvp_definition.md)).
+- **Console UI built, not yet wired:** the operator-facing `/console/*`
+  surface (chat, dashboard, agent network, etc.) is fully designed and
+  implemented against the target visual system, but currently runs on mock
+  data and is not yet connected to the live backend
+  (status: [`docs/audits/console_state_audit.md`](../audits/console_state_audit.md)).
+- **User-auth & credential vault: not started.** The login/session layer that
+  will make the console's auth guard functional, and the vault for storing
+  org integration credentials, are scoped but not yet built — the routers
+  exist but depend on a persistence, composition-root, and config layer that
+  isn't in place yet
+  (status: [`docs/audits/epic_user_auth_buildout.md`](../audits/epic_user_auth_buildout.md)).
+- **MVP target:** governed creative + growth team, multi-tenant, audited
+  ([../11_product/mvp_definition.md](../11_product/mvp_definition.md)) —
+  the backend capability for this exists; the remaining work to reach an
+  end-to-end demoable product is the console-to-backend wiring and user-auth
+  buildout above.
 - *(Metrics to be populated as the MVP ships to design partners.)*
 
 ## 10. The ask & use of funds

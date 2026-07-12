@@ -84,6 +84,15 @@ Formal attestation is a Phase-4 milestone ([../01_vision/roadmap.md §3](../01_v
 - Cross-tenant learning is **off** at MVP; enabled only with the consent/de-id
   machinery in place ([../05_memory/learning_pipeline.md](../05_memory/learning_pipeline.md)).
 - A graph DB is deliberately deferred; Postgres relations until proven otherwise.
+- The `/console/*` operator UI is fully styled but runs entirely on mock data
+  today — it is not yet wired to the live backend endpoints. Tracked openly in
+  [docs/audits/console_state_audit.md](../audits/console_state_audit.md).
+- User-auth (`/api/v1/auth/*`) and the credential vault (`/api/v1/credentials/*`)
+  are **not started**: the routers exist but depend on a persistence,
+  composition-root, and config layer that isn't built yet, so they are not
+  mounted. This also means the console's auth guard is fail-closed rather than
+  functional. Scoped out pending an owner and attack-surface sign-off — see
+  [docs/audits/epic_user_auth_buildout.md](../audits/epic_user_auth_buildout.md).
 
 ## 9. Ownership & evolution
 
