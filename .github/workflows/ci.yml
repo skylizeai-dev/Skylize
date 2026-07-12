@@ -23,6 +23,8 @@ jobs:
         run: ruff check src tests
       - name: Import boundaries (import-linter)
         run: lint-imports
+      - name: Forbidden imports (no direct LangChain/CrewAI in src)
+        run: python scripts/check_forbidden_imports.py
       - name: Types (mypy strict)
         run: mypy src
       - name: Tests (no exclusions)
