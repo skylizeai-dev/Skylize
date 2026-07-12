@@ -49,7 +49,7 @@ A choice that wins on rule 1 but loses on rule 3 or 4 is rejected.
 | Object storage | **S3 API** (AWS S3 / MinIO) |
 | Agent orchestration | **LangGraph** (sole orchestration layer) |
 | Workflow automation | **n8n** (external execution surface) |
-| LLM access | **provider-abstracted gateway** (OpenAI / Anthropic / Gemini) |
+| LLM access | **provider-abstracted gateway** (OpenAI / Anthropic implemented; Gemini roadmap — no SDK dependency yet) |
 | Auth / identity | **OIDC IdP** (Clerk / Auth0 / Keycloak) |
 | Edge / CDN / WAF | **Cloudflare** |
 | Containers / orchestration | **Docker** → **Docker Compose (MVP)** → **Kubernetes (Scale)** |

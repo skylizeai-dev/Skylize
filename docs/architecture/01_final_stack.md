@@ -42,7 +42,7 @@ adopt anything we cannot, in principle, run ourselves.
 | Object storage | **S3 API (AWS S3 / MinIO)** | yes (MinIO) | no (S3 API is commodity) |
 | Agent orchestration | **LangGraph** (sole orchestration layer) | yes | no |
 | Workflow automation | **n8n** (external execution surface) | yes | no |
-| LLM access | **Provider-abstracted gateway** (OpenAI / Anthropic / Gemini) | n/a | **no** — abstraction is the point |
+| LLM access | **Provider-abstracted gateway** (OpenAI / Anthropic implemented; Gemini roadmap — no SDK dependency yet) | n/a | **no** — abstraction is the point |
 | Auth / identity | **OIDC IdP (Clerk or Auth0)** | swappable | no (OIDC standard) |
 | Edge / CDN / WAF | **Cloudflare** | swappable | low |
 | Containerization | **Docker** | yes | no |
@@ -157,11 +157,15 @@ well, it is rejected by default.
 
 ### 4.8 LLM access — provider-abstracted gateway
 - **Rationale:** vendor independence is a first-class requirement. A single
-  internal gateway routes to OpenAI/Anthropic/Gemini, enforces
-  `max_token_budget`, captures cost in Langfuse, and is the only egress to model
-  providers (see [system_boundaries.md](../02_architecture/system_boundaries.md)).
+  internal gateway routes to OpenAI and Anthropic today (both are dependencies
+  in `pyproject.toml`), enforces `max_token_budget`, captures cost in Langfuse,
+  and is the only egress to model providers (see
+  [system_boundaries.md](../02_architecture/system_boundaries.md)). Gemini is a
+  **planned third provider** — no Google SDK dependency exists yet, and it is
+  not wired into the gateway.
 - **Migration path:** add/drop a provider by adding an adapter; agents never name
-  a provider directly.
+  a provider directly. Adding Gemini means adding the adapter and the SDK
+  dependency, not a design change.
 
 ### 4.9 Auth — OIDC IdP (Clerk or Auth0)
 - **Rationale:** identity is undifferentiated heavy lifting; buy it, but only via
