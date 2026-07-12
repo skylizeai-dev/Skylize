@@ -32,6 +32,7 @@ from skylize.app.governance import GovernanceAuthority
 from skylize.config import Settings
 from skylize.contracts.base import AgentContract, FailureMode, ToolGrant
 from skylize.contracts.registry import AgentRegistry, MVP_REGISTRY
+from skylize.contracts.token import TokenValidationResult, ValidationStage
 from skylize.dal.memory import InMemoryAuditRepository, InMemoryGovernanceRepository
 from skylize.events.memory_bus import InMemoryEventBus
 from skylize.tools.builtin import build_builtin_tools
@@ -335,3 +336,82 @@ async def test_demo_mode_full_pipeline_produces_deliverable_via_tool_loop() -> N
     ]
     assert len(tool_events) == 1
     assert tool_events[0].payload.result == "success"
+
+
+# ── Single-shot is governed pre-egress too (GAP 1) ─────────────────────────
+
+_SINGLE_SHOT_CONTRACT = _TOOL_LOOP_CONTRACT.model_copy(update={"invocable_tools": []})
+
+
+async def test_single_shot_governed_path_passes_gate_then_calls_llm() -> None:
+    """A wired authority now runs the ordered validation pipeline before the
+    single-shot generate() call. A valid minted token passes all six stages, so
+    the model is still called exactly once and the deliverable is produced — the
+    added gate does not regress the happy path."""
+    authority, audit, bus, _ = _harness(_SINGLE_SHOT_CONTRACT)
+    llm = MagicMock()
+    llm.generate = AsyncMock(return_value=LLMGenerateResponse(
+        text=json.dumps({"hooks": ["A", "B"]}), provider="demo", concrete_model="demo-v1",
+        usage=LLMUsage(prompt_tokens=10, completion_tokens=10, total_tokens=20),
+    ))
+    llm.generate_with_tools = AsyncMock(side_effect=AssertionError("single-shot must not call tools"))
+    deliverables, row = _deliverable_mock()
+
+    service = AgentExecutionService(
+        registry=AgentRegistry([_SINGLE_SHOT_CONTRACT]), llm=llm, deliverables=deliverables,
+        authority=authority, audit=audit,
+    )
+    result = await service.execute(
+        org_id=ORG, agent_id="test_tool_loop_agent", input_data=_INPUT, user_id="u1",
+    )
+    assert result is row
+    llm.generate.assert_awaited_once()
+    llm.generate_with_tools.assert_not_called()
+
+
+async def test_single_shot_gate_blocks_llm_egress_on_budget_denial(monkeypatch) -> None:
+    """When the pre-egress gate fails, the single-shot path raises before the
+    model is ever called. A single call can never exceed its own contract budget
+    (requested cost = min(budget // 2, 4096) < budget, tokens_used_so_far = 0), so
+    the BUDGET denial is injected at the validator to prove the wiring: the gate
+    is consulted with the *real* per-step cost (was a dead 0 pre-fix), a BUDGET
+    failure blocks egress with TokenBudgetExceeded, and the denial is audited."""
+    authority, audit, bus, _ = _harness(_SINGLE_SHOT_CONTRACT)
+
+    captured: dict = {}
+
+    def _deny_at_budget(**kwargs):
+        captured.update(kwargs)
+        return TokenValidationResult.fail(
+            ValidationStage.BUDGET, "call would exceed max_token_budget"
+        )
+
+    monkeypatch.setattr(
+        "skylize.app.agents.execution.validate_tool_call", _deny_at_budget
+    )
+
+    llm = MagicMock()
+    llm.generate = AsyncMock()
+    deliverables, _ = _deliverable_mock()
+
+    service = AgentExecutionService(
+        registry=AgentRegistry([_SINGLE_SHOT_CONTRACT]), llm=llm, deliverables=deliverables,
+        authority=authority, audit=audit,
+    )
+    with pytest.raises(TokenBudgetExceeded):
+        await service.execute(
+            org_id=ORG, agent_id="test_tool_loop_agent", input_data=_INPUT, user_id="u1",
+        )
+    # Refused before egress — the model was never reached.
+    llm.generate.assert_not_called()
+    # The gate received the real per-step ceiling, not the pre-fix hardcoded 0.
+    assert captured["requested_token_cost"] == min(_SINGLE_SHOT_CONTRACT.max_token_budget // 2, 4096)
+    assert captured["requested_token_cost"] != 0
+    assert captured["tokens_used_so_far"] == 0
+    # The denial was audited as a governance budget escalation.
+    escalations = [
+        e for e in bus.published_of_type("audit.action_recorded")
+        if e.payload.action_type == "governance.budget_exceeded"
+    ]
+    assert len(escalations) == 1
+    assert escalations[0].payload.result == "escalated"

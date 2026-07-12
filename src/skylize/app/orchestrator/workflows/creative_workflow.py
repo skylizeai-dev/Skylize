@@ -61,12 +61,18 @@ def build_creative_graph(deps: GraphDeps) -> Any:
         checker = deps.live_state_for(state["org_id"])
         allowed = {t.tool_id for t in contract.allowed_tools}
         primary_tool = "llm.generate" if "llm.generate" in allowed else next(iter(allowed))
+        # The upcoming agent_step issues one LLM call whose ceiling is
+        # min(max_token_budget // 2, 4096) — the same per-step request the runner
+        # (LLMStepRunner) and the single-shot path use. Feeding that real cost
+        # (was a hardcoded 0) lets the ordered pipeline's BUDGET stage actually
+        # evaluate this step instead of unconditionally passing it.
+        requested_token_cost = min(contract.max_token_budget // 2, 4096)
         result = validate_tool_call(
             token=token,
             public_key=deps.public_key,
             requested_tool_id=primary_tool,
             contract_allowed_tool_ids=allowed,
-            requested_token_cost=0,
+            requested_token_cost=requested_token_cost,
             tokens_used_so_far=0,
             live_state=checker,
             now=datetime.now(timezone.utc),

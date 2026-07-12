@@ -139,18 +139,62 @@ class AgentExecutionService:
             # so the deliverable's governance_token_id is verifiable — not a
             # bare correlation id. Without an authority (unit-test harnesses),
             # the legacy ungoverned path is preserved.
+            max_tokens = min(contract.max_token_budget // 2, 4096)
             if self._authority is not None:
                 token = await self._authority.mint(
                     contract, org_id=org_id, correlation_id=run_id
                 )
                 governance_token_id = token.token_id
+                # Pre-egress governance re-validation on the canonical single-shot
+                # path — the same ordered pipeline the multi-turn loop runs before
+                # every turn (signature -> expiry -> revocation -> scope -> budget
+                # -> delegation). Running it here means a revoked token, killed
+                # agent, or out-of-budget request is refused *before* the model is
+                # ever called, not merely stamped onto the deliverable afterwards.
+                # `max_tokens` is the real cost this one call could add and
+                # `tokens_used_so_far` is 0 (single-shot makes exactly one call, so
+                # there is no running ledger — this mirrors the loop's first turn).
+                allowed_tool_ids = {grant.tool_id for grant in contract.allowed_tools}
+                primary_tool = (
+                    "llm.generate" if "llm.generate" in allowed_tool_ids
+                    else next(iter(allowed_tool_ids))
+                )
+                gate = validate_tool_call(
+                    token=token,
+                    public_key=self._authority.public_key,
+                    requested_tool_id=primary_tool,
+                    contract_allowed_tool_ids=allowed_tool_ids,
+                    requested_token_cost=max_tokens,
+                    tokens_used_so_far=0,
+                    live_state=self._authority.live_state_checker(org_id),
+                )
+                if not gate.is_valid:
+                    is_budget = gate.failed_stage is ValidationStage.BUDGET
+                    if self._audit is not None:
+                        await self._audit.record(
+                            org_id=org_id, correlation_id=run_id,
+                            action_type=(
+                                "governance.budget_exceeded" if is_budget
+                                else "governance.tool_call_denied"
+                            ),
+                            result="escalated",
+                            source_agent_id=agent_id,
+                            authority_level=contract.authority_level,
+                            governance_token_id=token.token_id,
+                            result_reason=(
+                                f"{gate.failed_stage.value if gate.failed_stage else 'unknown'}: {gate.reason}"
+                            ),
+                        )
+                    if is_budget:
+                        raise TokenBudgetExceeded(gate.reason or "token budget exceeded")
+                    raise GovernanceDenied(gate.reason or "governance denied pre-egress")
             else:
                 governance_token_id = run_id
             llm_request = LLMGenerateRequest(
                 model="fast",
                 prompt=user_prompt,
                 system=system_prompt,
-                requested_max_tokens=min(contract.max_token_budget // 2, 4096),
+                requested_max_tokens=max_tokens,
                 temperature=0.7,
                 governance_token_id=governance_token_id,
                 org_id=org_id,
