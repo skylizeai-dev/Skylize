@@ -61,17 +61,41 @@ Per-row rationale, alternatives, and migration paths:
 
 ## 5. How Temporal / LangGraph / OPA fit (reconciliation)
 
-The platform description sometimes references Temporal, LangGraph, and OPA. They
-are reconciled into the canonical stack as follows, without displacing it:
+The platform description references Temporal, LangGraph, and OPA. They occupy
+**distinct, non-overlapping layers** of the agent runtime — they do not compete,
+so the reconciliation is a division of labor, not a choice between them
+([ADR-0002](../architecture/adr/0002-crewai-removal-langgraph-only.md)):
 
-- **LangGraph** is the **durable execution / control plane** for agent workflows
-  (checkpointed to Postgres, resumable, replayable). It is the canonical
-  orchestration choice ([../architecture/03_agent_runtime.md](../architecture/03_agent_runtime.md)).
-- **Temporal-style durable execution** is realized *by* LangGraph's
-  Postgres-checkpointed state machine; Skylize does not run a separate Temporal
-  cluster in v1 (rule 2: one system per job). If a future workload needs
-  general-purpose durable workflows beyond agent control flow, Temporal is
-  adoptable behind the Orchestrator facade with no agent-contract change.
+- **LangGraph** is the **agent-orchestration graph** — the control plane. It owns
+  node sequencing, conditional routing, the governance checkpoints
+  (token → authority → kill-switch), and the human-in-the-loop pause/resume gates.
+  It is the *sole* agent-orchestration framework
+  ([ADR-0002](../architecture/adr/0002-crewai-removal-langgraph-only.md);
+  see [../architecture/03_agent_runtime.md §3.1](../architecture/03_agent_runtime.md#31-the-langgraph--temporal-split)).
+- **Temporal Cloud** is the **durable-execution layer that sits *underneath*
+  LangGraph** in the committed architecture — the decision of record is
+  [ADR-0002](../architecture/adr/0002-crewai-removal-langgraph-only.md), and
+  `temporalio>=1.7` is a hard runtime dependency
+  ([`pyproject.toml`](../../pyproject.toml)). It is a chosen part of the stack,
+  not a rejected alternative: LangGraph decides *what* runs and in what order,
+  while Temporal is the substrate meant to make each durable unit of work
+  *survive process restarts* (activity-level retries, timeouts, crash recovery).
+  The worker's activity layer is defined at
+  [`src/skylize/app/orchestrator/temporal/`](../../src/skylize/app/orchestrator/temporal/activities.py)
+  (`@activity.defn` methods `run_judge_verification` and `write_run_step` on
+  `WorkflowActivities`). In managed environments the durable substrate is
+  **Temporal Cloud**; a self-hosted Temporal covers local/self-host (rule 4).
+  The two layers are complementary — LangGraph is not a substitute for Temporal's
+  durability, and Temporal does not orchestrate the agent graph.
+  - **Integration status.** The activity layer above is *defined in code* but is
+    **not yet wired into the live execution path**: the current runtime invokes
+    the LangGraph graph in-process (an in-memory checkpointer; the agent step
+    calls the runner directly), and no node dispatches to a Temporal activity.
+    `pyproject.toml` currently marks `orchestrator.temporal.*` as paused pending
+    post-launch (M5) integration/rework. The stack decision itself is settled —
+    Temporal is a committed dependency underneath LangGraph — and its durability
+    guarantees take effect once the worker is wired in. Runtime detail lives in
+    [../architecture/03_agent_runtime.md §3.1](../architecture/03_agent_runtime.md#31-the-langgraph--temporal-split).
 - **OPA (Open Policy Agent)** is the **policy engine behind the Decision Engine
   and Governance Authority** — it evaluates the authority/guardrail policies in
   [../04_decision_engine/guardrails.md](../04_decision_engine/guardrails.md). It

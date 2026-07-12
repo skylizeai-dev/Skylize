@@ -54,6 +54,75 @@ Orchestrator (facade)
 See orchestration division of labor in
 [02_system_architecture.md §5](./02_system_architecture.md#5-orchestration-architecture).
 
+### 3.1 The LangGraph / Temporal split
+
+Two layers, one runtime, with a clean seam between them: **LangGraph is the
+orchestration graph — *what* runs and in what order; Temporal is the
+durable-execution substrate the long-running units of work are meant to run on.**
+They are complementary, not alternatives — LangGraph is not a substitute for
+Temporal's durability, and Temporal does not orchestrate the agent graph
+([ADR-0002](./adr/0002-crewai-removal-langgraph-only.md);
+[../02_architecture/tech_stack.md §5](../02_architecture/tech_stack.md#5-how-temporal--langgraph--opa-fit-reconciliation)).
+Temporal is a committed part of the stack — the decision of record is ADR-0002
+and `temporalio>=1.7` is a hard runtime dependency
+([`pyproject.toml`](../../pyproject.toml)); in managed environments the durable
+substrate is **Temporal Cloud**.
+
+> **Integration status.** The Temporal worker's activity layer is *defined* in
+> code (detailed below) but is **not yet wired into the live execution path**.
+> The current runtime invokes the LangGraph graph in-process —
+> `build_creative_graph` compiled with an in-memory `MemorySaver`, and
+> `agent_step` calling `runner.run(...)` directly — and no node dispatches to a
+> Temporal activity. `pyproject.toml` marks `orchestrator.temporal.*` as paused
+> pending post-launch (M5) integration/rework. This section documents the
+> committed split and the code that realizes each half; the Temporal durability
+> guarantees below take effect once the activity layer is wired in.
+
+| Concern | Layer | Where in code |
+|---|---|---|
+| Node sequencing, conditional routing, entry/exit edges | **LangGraph** (live) | [`orchestrator/workflows/creative_workflow.py`](../../src/skylize/app/orchestrator/workflows/creative_workflow.py) — `build_creative_graph`; the `governance_checkpoint → agent_step → emit` nodes plus the `handle_failure` branch |
+| Governance checkpoints (token → authority → kill-switch), HITL pause/resume gates | **LangGraph nodes** (live) | `governance_checkpoint` node driving the `validate_tool_call` pipeline |
+| Retries, timeouts, crash recovery, durable persistence of each step | **Temporal** (defined; wiring pending) | [`orchestrator/temporal/activities.py`](../../src/skylize/app/orchestrator/temporal/activities.py) — the `@activity.defn` units on `WorkflowActivities` |
+
+**LangGraph — the graph (what runs, in what order).** `build_creative_graph`
+compiles an explicit `StateGraph`: which node runs next is a pure function of
+state (`route_after_governance`, `route_after_agent`), and only the `agent_step`
+node reasons. This is the "deterministic control, probabilistic reasoning"
+principle (§2) made concrete, and it is the path the runtime executes today.
+
+**Temporal — the durable substrate (each unit meant to survive a crash).** Each
+long-running unit of work is defined as a Temporal **activity** — a method
+decorated `@activity.defn` on `WorkflowActivities`, which Temporal is designed to
+register, schedule, and *retry* on failure. Dependencies (`repo`, `judge`,
+`minter`) are injected once at construction rather than threaded through every
+call. The activity layer defines:
+
+- **`run_judge_verification(JudgeRequest) -> JudgeVerdict`** — runs the LLM judge
+  over a node's output against its `success_criteria`. With no judge wired it
+  returns a verdict with `passed=False` and `raw.unverified=True` (the
+  `unverified` flag lives in the verdict's `raw` payload, not as a top-level
+  field) rather than silently passing — the fail-closed behavior the engine's
+  gate depends on.
+- **`write_run_step(StepRecordRequest) -> None`** — builds a `WorkflowRunStepRow`
+  (status, input/output, judge verdict, retry count, timestamps) and persists it
+  via `repo.record_step(...)`, so a run stays reconstructable from durable state.
+  Note: `activities.py` imports `WorkflowRepository` and `WorkflowRunStepRow` from
+  `dal/ports.py`, but those port/row definitions are **not yet present there** — a
+  known gap (the module would otherwise fail to import) that must be closed as
+  part of wiring the worker in.
+
+Tenancy rides on **`RunContext`** — the per-run envelope (`org_id`, `run_id`,
+`workflow_id`, `correlation_id`, `thread_id`, `triggered_by`) threaded through
+every activity call, so each durable step would carry the same isolation and
+audit-correlation keys as the orchestration graph above it. Activity arguments
+are plain dataclasses (`JudgeRequest`, `StepRecordRequest`) because Temporal
+serialises them across the worker boundary.
+
+The intended seam: LangGraph's in-process graph decides *what* happens and
+enforces governance at each edge, while Temporal is the substrate that will make
+each unit of work *survive a restart* and retry deterministically once the
+activity layer is wired into the graph. Neither replaces the other.
+
 ---
 
 ## 4. The agent sandbox (IF-AGENT)
