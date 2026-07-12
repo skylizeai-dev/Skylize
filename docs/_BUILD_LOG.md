@@ -20,7 +20,7 @@ The consistency anchor for the entire build. One line per file written, in order
 - `docs/architecture/02_system_architecture.md` — Layered system view, consolidated boundaries, agent communication architecture (delegation/event/decision modes), and LangGraph orchestration architecture.
 - `docs/architecture/03_agent_runtime.md` — Agent sandbox, tool proxy validation order, LangGraph execution stack, lifecycle, failure modes, escalation/HITL/conflict at runtime, and framework migration path.
 - `docs/architecture/04_memory_architecture.md` — Memory tiers and store assignment (Qdrant/Postgres/Redis/S3), event-sourced read/write paths, consistency model, tenant isolation, and scale migration behind VectorStore/MemoryRepository ports.
-- `docs/architecture/05_security_architecture.md` — Threat model, identity/authZ layers, the Ed25519 governance-token chain of trust, zero-trust agent runtime, secrets, defense-in-depth tenant isolation, incident controls, and audit/compliance.
+- `docs/architecture/05_security_architecture.md` — Threat model, identity/authZ layers, the ECDSA P-384 governance-token chain of trust, zero-trust agent runtime, secrets, defense-in-depth tenant isolation, incident controls, and audit/compliance.
 - `docs/architecture/06_deployment_architecture.md` — Deployable units, MVP (Compose) → Scale (Kubernetes) topology, per-component migration triggers, CI/CD contract gate, backup/replay, observability, and disaster recovery.
 
 ## Wave 1 — Architecture (supporting docs)
