@@ -94,3 +94,9 @@ class AuditService:
             )
         )
         return event.event_id
+
+    async def recent(
+        self, org_id: str, *, limit: int = 50, before: datetime | None = None
+    ) -> list[AuditRow]:
+        """Newest-first audit trail for one org (the console's audit feed)."""
+        return await self._repo.list_for_org(org_id, limit=limit, before=before)

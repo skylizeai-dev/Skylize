@@ -104,8 +104,8 @@ hook_generator_agent = AgentContract(
     agent_role="Hook Generator — produces ad/scroll-stopping hooks",
     authority_level="worker",
     department="creative",
-    input_schema="skylize.schemas.agents.creative.HookRequestIn",
-    output_schema="skylize.schemas.agents.creative.HooksOut",
+    input_schema="skylize.schemas.agents.creative.HookGeneratorExecuteIn",
+    output_schema="skylize.schemas.agents.creative.HookGeneratorExecuteOut",
     allowed_tools=[
         ToolGrant(tool_id="llm.generate", purpose="generate hooks", max_calls_per_run=3),
         ToolGrant(tool_id="memory.search", purpose="recall high-performing patterns"),

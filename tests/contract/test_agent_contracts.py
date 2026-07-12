@@ -33,12 +33,20 @@ EXPECTED_MVP_AGENTS = {
     "director_growth",
     # security
     "fraud_detection_agent",
+    # seo
+    "seo_keyword_agent",
+    # finance
+    "cfo_agent",
+    # sdr
+    "sdr_outreach_agent", "lead_qualifier_agent",
+    # agency
+    "agency_requirements_analyst", "agency_deliverable_drafter",
 }
 
 
 def test_registry_loads_expected_mvp_agents() -> None:
     assert set(MVP_REGISTRY.agent_ids()) == EXPECTED_MVP_AGENTS
-    assert len(MVP_REGISTRY.all()) == 15
+    assert len(MVP_REGISTRY.all()) == 21
 
 
 def test_agent_ids_are_unique_and_snake_case() -> None:

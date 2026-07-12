@@ -38,7 +38,7 @@ export function Roi() {
                   decimals={m.decimals}
                   prefix={m.prefix}
                   suffix={m.suffix}
-                  className="font-display text-[clamp(2.5rem,5vw,3.5rem)] font-semibold tracking-tight text-foreground"
+                  className="font-mono text-[clamp(2.5rem,5vw,3.5rem)] font-semibold tracking-tight text-foreground tabular-nums"
                 />
                 <div
                   aria-hidden

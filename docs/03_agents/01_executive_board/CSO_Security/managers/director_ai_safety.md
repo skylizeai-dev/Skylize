@@ -40,10 +40,10 @@ The Orchestrator, Governance Authority, Decision Engine, Memory service, and its
 - `audit.action_recorded` for every action
 
 ## 11. OPA Governance Requirements
-`allowed_tools`: `llm.generate`, `memory.search`, `orchestrator.delegate`. Token `scope` ⊆ `allowed_tools`, validated signature → expiry → revocation → scope → budget → delegation. `governance_token_required = true`. `max_token_budget = 40000`, `max_execution_time_seconds = 300`. `human_in_loop_triggers`: `SECURITY_SEVERITY_HIGH`.
+`allowed_tools`: `llm.generate`, `orchestrator.delegate`. Token `scope` ⊆ `allowed_tools`, validated signature → expiry → revocation → scope → budget → delegation. `governance_token_required = true`. `max_token_budget = 40000`, `max_execution_time_seconds = 300`. `human_in_loop_triggers`: `SECURITY_SEVERITY_HIGH`.
 
 ## 12. Memory Requirements
-**Read:** `security:*`, `org:summary`. **Write:** `security:aisafety:policy`
+`memory_read_access: []`, `memory_write_access: []`. All Safety Suite agents are stateless — they must evaluate each run in isolation, since cross-run state risks anchoring bias and audit contamination.
 
 ## 13. Success Metrics
 Outputs accepted by its parent/Decision Engine; SLOs met; no scope or budget violations; full audit trail.

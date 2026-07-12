@@ -31,7 +31,10 @@ def test_creative_workflow_runs(client: TestClient) -> None:
     body = resp.json()
     assert body["status"] == "completed"
     assert body["event_type"] == "creative.hooks_generated"
-    assert len(body["output"]["hooks"]) == 2
+    # The agent step is a real model call now (demo adapter without a key), so
+    # hook count is model-determined — assert real output, not a stub's shape.
+    assert body["output"]["hooks"], "expected non-empty hooks from the LLM runner"
+    assert all(isinstance(h, str) and h for h in body["output"]["hooks"])
 
 
 def test_kill_switch_requires_owner(client: TestClient) -> None:

@@ -16,10 +16,14 @@ from .ports import (
     AgentStateRow,
     ApiKeyRow,
     AuditRow,
+    BudgetCeiling,
+    DeliverableRow,
     KillScope,
+    RefreshTokenRow,
     TenantRow,
     TenantUserRow,
     TokenRow,
+    UserRow,
 )
 
 
@@ -93,6 +97,16 @@ class InMemoryAuditRepository:
     async def append(self, row: AuditRow) -> None:
         self.rows.append(row)
 
+    async def list_for_org(
+        self, org_id: str, *, limit: int = 50, before: datetime | None = None
+    ) -> list[AuditRow]:
+        rows = [
+            r for r in self.rows
+            if r.org_id == org_id and (before is None or r.occurred_at < before)
+        ]
+        rows.sort(key=lambda r: r.occurred_at, reverse=True)
+        return rows[:limit]
+
 
 class InMemoryContractRepository:
     def __init__(self) -> None:
@@ -100,6 +114,23 @@ class InMemoryContractRepository:
 
     async def upsert(self, agent_id: str, version: int, contract_json: str) -> None:
         self.contracts[(agent_id, version)] = contract_json
+
+    async def load_all_active(self) -> list[tuple[str, str]]:
+        latest: dict[str, tuple[int, str]] = {}
+        for (agent_id, version), payload in self.contracts.items():
+            if agent_id not in latest or version > latest[agent_id][0]:
+                latest[agent_id] = (version, payload)
+        return [(agent_id, payload) for agent_id, (_, payload) in sorted(latest.items())]
+
+    async def get_latest_active(self, agent_id: str) -> str | None:
+        versions = [
+            (version, payload)
+            for (aid, version), payload in self.contracts.items()
+            if aid == agent_id
+        ]
+        if not versions:
+            return None
+        return max(versions)[1]
 
 
 class InMemoryTenantRepository:
@@ -155,3 +186,166 @@ class InMemoryApiKeyRepository:
         k = self._keys.get(key_id)
         if k is not None:
             self._keys[key_id] = replace(k, last_used_at=when)
+
+
+class InMemoryCapitalRepository:
+    """In-memory budget ledger (memory backend + tests). Ceilings are seeded via
+    `set_ceiling`; the evaluator reads them through the `CapitalRepository` port."""
+
+    def __init__(self) -> None:
+        self._ceilings: dict[tuple[str, str], BudgetCeiling] = {}
+
+    def set_ceiling(self, ceiling: BudgetCeiling) -> None:
+        self._ceilings[(ceiling.org_id, ceiling.scope)] = ceiling
+
+    async def get_ceiling(self, org_id: str, scope: str) -> BudgetCeiling | None:
+        return self._ceilings.get((org_id, scope))
+
+
+class InMemoryProcessedEventStore:
+    """In-memory idempotency guard for the async Decision Engine."""
+
+    def __init__(self) -> None:
+        self._seen: dict[str, str] = {}
+
+    async def is_processed(self, key: str) -> bool:
+        return key in self._seen
+
+    async def mark_processed(self, key: str, outcome: str) -> None:
+        self._seen[key] = outcome
+
+
+class InMemoryUserRepository:
+    """In-memory human-user store + refresh-token lifecycle (memory backend + tests)."""
+
+    def __init__(self) -> None:
+        self._users: dict[UUID, UserRow] = {}
+        self._by_email: dict[str, UUID] = {}
+        self._refresh: dict[UUID, RefreshTokenRow] = {}
+
+    async def create_user(self, row: UserRow) -> None:
+        self._users[row.user_id] = row
+        self._by_email[row.email.lower()] = row.user_id
+
+    async def get_by_email(self, email: str) -> UserRow | None:
+        user_id = self._by_email.get(email.lower())
+        return self._users.get(user_id) if user_id is not None else None
+
+    async def get_by_id(self, user_id: UUID) -> UserRow | None:
+        return self._users.get(user_id)
+
+    async def list_by_org(self, org_id: str) -> list[UserRow]:
+        return [u for u in self._users.values() if u.org_id == org_id]
+
+    async def update_last_login(self, user_id: UUID, when: datetime) -> None:
+        u = self._users.get(user_id)
+        if u is not None:
+            self._users[user_id] = replace(u, last_login_at=when)
+
+    async def store_refresh_token(
+        self, token_id: UUID, user_id: UUID, expires_at: datetime
+    ) -> None:
+        self._refresh[token_id] = RefreshTokenRow(
+            token_id=token_id, user_id=user_id, expires_at=expires_at
+        )
+
+    async def get_refresh_token(self, token_id: UUID) -> RefreshTokenRow | None:
+        return self._refresh.get(token_id)
+
+    async def revoke_refresh_token(self, token_id: UUID) -> None:
+        rt = self._refresh.get(token_id)
+        if rt is not None:
+            self._refresh[token_id] = replace(rt, revoked_at=datetime.now(timezone.utc))
+
+
+class InMemoryDeliverableRepository:
+    """In-memory deliverable store (memory backend + tests). Every read is
+    `org_id`-scoped to uphold tenant isolation, same as the Pg implementation."""
+
+    def __init__(self) -> None:
+        self._rows: dict[UUID, DeliverableRow] = {}
+
+    async def create(self, row: DeliverableRow) -> None:
+        self._rows[row.id] = row
+
+    async def get_by_id(self, id: UUID, org_id: str) -> DeliverableRow | None:
+        row = self._rows.get(id)
+        return row if row is not None and row.org_id == org_id else None
+
+    async def list_by_org(
+        self,
+        org_id: str,
+        *,
+        status: str | None = None,
+        deliverable_type: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[DeliverableRow], int]:
+        matched = [
+            r
+            for r in self._rows.values()
+            if r.org_id == org_id
+            and (status is None or r.status == status)
+            and (deliverable_type is None or r.deliverable_type == deliverable_type)
+        ]
+        matched.sort(key=lambda r: r.created_at, reverse=True)
+        total = len(matched)
+        return matched[offset : offset + limit], total
+
+    async def update_status(self, id: UUID, org_id: str, status: str) -> bool:
+        row = await self.get_by_id(id, org_id)
+        if row is None:
+            return False
+        self._rows[id] = replace(row, status=status, updated_at=datetime.now(timezone.utc))
+        return True
+
+    async def update_approved(
+        self, id: UUID, org_id: str, approved_by: str, approved_at: datetime
+    ) -> bool:
+        row = await self.get_by_id(id, org_id)
+        if row is None:
+            return False
+        self._rows[id] = replace(
+            row,
+            status="approved",
+            approved_by=approved_by,
+            approved_at=approved_at,
+            updated_at=datetime.now(timezone.utc),
+        )
+        return True
+
+    async def list_versions(
+        self, org_id: str, deliverable_id: UUID
+    ) -> list[DeliverableRow]:
+        root = await self.get_by_id(deliverable_id, org_id)
+        if root is None:
+            return []
+        # Walk the parent chain up to the root, then collect the whole lineage.
+        root_id = deliverable_id
+        seen: set[UUID] = set()
+        cursor: DeliverableRow | None = root
+        while cursor is not None and cursor.parent_id is not None and cursor.parent_id not in seen:
+            seen.add(cursor.id)
+            root_id = cursor.parent_id
+            cursor = self._rows.get(cursor.parent_id)
+
+        lineage = [
+            r
+            for r in self._rows.values()
+            if r.org_id == org_id and (r.id == root_id or _descends_from(r, root_id, self._rows))
+        ]
+        lineage.sort(key=lambda r: r.version)
+        return lineage
+
+
+def _descends_from(
+    row: DeliverableRow, root_id: UUID, rows: dict[UUID, DeliverableRow]
+) -> bool:
+    seen: set[UUID] = set()
+    cursor: DeliverableRow | None = row
+    while cursor is not None and cursor.parent_id is not None and cursor.id not in seen:
+        seen.add(cursor.id)
+        if cursor.parent_id == root_id:
+            return True
+        cursor = rows.get(cursor.parent_id)
+    return False

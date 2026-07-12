@@ -43,10 +43,10 @@ security directors/managers/workers; the Governance Authority; incident response
 - safety-veto signals
 
 ## 11. OPA Governance Requirements
-`allowed_tools`: `llm.generate`, `memory.search`, `bi.query`, `orchestrator.delegate`. Token `scope` ⊆ `allowed_tools`, validated signature → expiry → revocation → scope → budget → delegation. `governance_token_required = true`. `max_token_budget = 120000`, `max_execution_time_seconds = 600`. `human_in_loop_triggers`: `SECURITY_SEVERITY_HIGH`, `LOW_CONFIDENCE_IRREVERSIBLE`.
+`allowed_tools`: `llm.generate`, `bi.query`, `orchestrator.delegate`. Token `scope` ⊆ `allowed_tools`, validated signature → expiry → revocation → scope → budget → delegation. `governance_token_required = true`. `max_token_budget = 120000`, `max_execution_time_seconds = 600`. `human_in_loop_triggers`: `SECURITY_SEVERITY_HIGH`, `LOW_CONFIDENCE_IRREVERSIBLE`.
 
 ## 12. Memory Requirements
-**Read:** `security:*`, `org:summary`. **Write:** `security:policy`, `security:rulings`
+`memory_read_access: []`, `memory_write_access: []`. All Safety Suite agents are stateless — they must evaluate each run in isolation, since cross-run state risks anchoring bias and audit contamination.
 
 ## 13. Success Metrics
 Outputs accepted by its parent/Decision Engine; SLOs met; no scope or budget violations; full audit trail.

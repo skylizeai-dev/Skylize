@@ -11,7 +11,6 @@ from qdrant_client.http.models import (
     FieldCondition,
     Filter,
     MatchValue,
-    PointIdsList,
     PointStruct,
     UpdateStatus,
     VectorParams,
@@ -39,14 +38,14 @@ class QdrantAdapter:
             )
 
     async def upsert_document(
-        self, doc_id: str, content: str, metadata: dict
+        self, doc_id: str, content: str, metadata: dict[str, object]
     ) -> None:
         raise TypeError(
             "upsert_document requires a pre-computed vector; call upsert_vector instead"
         )
 
     async def upsert_vector(
-        self, doc_id: str, vector: list[float], metadata: dict
+        self, doc_id: str, vector: list[float], metadata: dict[str, object]
     ) -> None:
         await self._ensure_collection()
         result = await self._client.upsert(
@@ -58,8 +57,8 @@ class QdrantAdapter:
         log.debug("qdrant.upserted", doc_id=doc_id)
 
     async def search(
-        self, query_vector: list[float], top_k: int, filters: dict
-    ) -> list[dict]:
+        self, query_vector: list[float], top_k: int, filters: dict[str, object]
+    ) -> list[dict[str, object]]:
         await self._ensure_collection()
         qdrant_filter: Filter | None = None
         if filters:
@@ -69,7 +68,7 @@ class QdrantAdapter:
                     for k, v in filters.items()
                 ]
             )
-        hits = await self._client.search(
+        hits = await self._client.search(  # type: ignore[attr-defined]  # qdrant-client API drift; recall path unwired (M5)
             collection_name=_COLLECTION,
             query_vector=query_vector,
             limit=top_k,

@@ -3,7 +3,7 @@
 import { motion } from "framer-motion";
 import { Container } from "@/components/skylize";
 import { CtaButton } from "@/components/skylize";
-import { AltitudeDashboard } from "./altitude-dashboard";
+import { HeroWorkflowDemo } from "./hero-workflow-demo";
 import { EASE_ALTITUDE } from "@/lib/motion";
 
 const headlineLines = ["Less manual work.", "More revenue.", "More scale."];
@@ -104,14 +104,15 @@ export function Hero() {
           </motion.div>
         </motion.div>
 
-        {/* Hero visual — Operational Altitude Dashboard */}
+        {/* Hero visual — live interactive workflow demo (the interface
+            sells itself: real dial + real ActionCard in inert demo mode) */}
         <motion.div
           initial={{ opacity: 0, y: 40 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 1, delay: 0.5, ease: EASE_ALTITUDE }}
           className="mx-auto mt-16 max-w-[1080px] sm:mt-20"
         >
-          <AltitudeDashboard />
+          <HeroWorkflowDemo />
         </motion.div>
       </Container>
     </section>

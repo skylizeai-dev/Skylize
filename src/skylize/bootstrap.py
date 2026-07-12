@@ -17,17 +17,34 @@ from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass
 
+from .adapters.llm.demo_adapter import DemoLLMAdapter
+from .adapters.llm.gateway import LLMGateway
+from .app.agents.execution import AgentExecutionService
 from .app.audit.service import AuditService
 from .app.auth.service import ApiKeyService
+from .app.auth.user_service import UserAuthService
+from .app.credentials.encryption import FernetEncryptor
+from .app.credentials.vault import CredentialVault
+from .app.deliverables.service import DeliverableService
 from .app.governance.authority import GovernanceAuthority
 from .app.governance.broadcast import GovernanceBroadcast
-from .app.orchestrator import Orchestrator, StubAgentRunner
+from .app.orchestrator import LLMStepRunner, Orchestrator
 from .app.tenants.service import TenantService
 from .config import Settings, get_settings
 from .contracts.registry import MVP_REGISTRY
-from .dal.ports import ApiKeyRepository, AuditRepository, GovernanceRepository, TenantRepository
+from .dal.credentials import CredentialRepository
+from .dal.ports import (
+    ApiKeyRepository,
+    AuditRepository,
+    DeliverableRepository,
+    GovernanceRepository,
+    TenantRepository,
+    UserRepository,
+)
 from .events.bus import EventBus
 from .memory.knowledge_ingestion import KnowledgeIngestionService
+from .tools.builtin import default_tool_registry
+from .tools.proxy import ToolProxy
 
 
 @dataclass
@@ -39,6 +56,10 @@ class Container:
     orchestrator: Orchestrator
     tenants: TenantService
     api_keys: ApiKeyService
+    user_auth: UserAuthService
+    deliverables: DeliverableService
+    credential_vault: CredentialVault
+    agent_execution: AgentExecutionService
     knowledge_ingestion: KnowledgeIngestionService | None
     _closers: list[Callable[[], Awaitable[None]]]
 
@@ -57,15 +78,21 @@ async def build_container(settings: Settings | None = None) -> Container:
     audit_repo: AuditRepository
     tenant_repo: TenantRepository
     apikey_repo: ApiKeyRepository
+    user_repo: UserRepository
+    deliverable_repo: DeliverableRepository
+    credential_repo: CredentialRepository
     broadcast: GovernanceBroadcast
 
     if settings.backend == "memory":
         from .app.governance.broadcast import InMemoryGovernanceBroadcast
+        from .dal.credentials import InMemoryCredentialRepository
         from .dal.memory import (
             InMemoryApiKeyRepository,
             InMemoryAuditRepository,
+            InMemoryDeliverableRepository,
             InMemoryGovernanceRepository,
             InMemoryTenantRepository,
+            InMemoryUserRepository,
         )
         from .events.memory_bus import InMemoryEventBus
 
@@ -74,9 +101,14 @@ async def build_container(settings: Settings | None = None) -> Container:
         audit_repo = InMemoryAuditRepository()
         tenant_repo = InMemoryTenantRepository()
         apikey_repo = InMemoryApiKeyRepository()
+        user_repo = InMemoryUserRepository()
+        deliverable_repo = InMemoryDeliverableRepository()
+        credential_repo = InMemoryCredentialRepository()
         broadcast = InMemoryGovernanceBroadcast()
     else:
         from .dal.connection import Database
+        from .dal.credentials import PgCredentialRepository
+        from .dal.deliverables import PgDeliverableRepository
         from .dal.repositories import (
             PgApiKeyRepository,
             PgAuditRepository,
@@ -84,6 +116,7 @@ async def build_container(settings: Settings | None = None) -> Container:
             PgGovernanceRepository,
             PgTenantRepository,
         )
+        from .dal.users import PgUserRepository
         from .events.redis_adapter import RedisEventBus
         from .events.redis_governance_broadcast import RedisGovernanceBroadcast
 
@@ -97,6 +130,9 @@ async def build_container(settings: Settings | None = None) -> Container:
         audit_repo = PgAuditRepository(db)
         tenant_repo = PgTenantRepository(db)
         apikey_repo = PgApiKeyRepository(db)
+        user_repo = PgUserRepository(db)
+        deliverable_repo = PgDeliverableRepository(db)
+        credential_repo = PgCredentialRepository(db)
         redis_broadcast = RedisGovernanceBroadcast(settings.redis_url)
         broadcast = redis_broadcast
 
@@ -112,6 +148,21 @@ async def build_container(settings: Settings | None = None) -> Container:
     audit = AuditService(bus, audit_repo)
     tenants = TenantService(tenant_repo, audit)
     api_keys = ApiKeyService(apikey_repo, audit)
+
+    # Human-user auth (register/login/refresh + /me).
+    user_auth = UserAuthService(user_repo, settings)
+
+    # Agent-produced deliverables (versioned, human-approvable).
+    deliverables = DeliverableService(deliverable_repo)
+
+    # Credential vault (at-rest Fernet encryption). With no configured key the
+    # memory backend mints an ephemeral one — fine for dev/tests; production sets
+    # `credential_encryption_key` so stored credentials survive a restart.
+    encryptor = FernetEncryptor(
+        settings.credential_encryption_key or FernetEncryptor.generate_key()
+    )
+    credential_vault = CredentialVault(encryptor, credential_repo, audit)
+
     authority = GovernanceAuthority.build(
         repo=gov_repo, audit=audit, bus=bus, registry=registry, settings=settings,
         broadcast=broadcast,
@@ -130,8 +181,34 @@ async def build_container(settings: Settings | None = None) -> Container:
 
     closers.append(_stop_subscriber)
 
+    # LLM gateway: the live Anthropic adapter when a key is configured, else the
+    # deterministic `[DEMO]` adapter (memory backend / tests / no-key local run).
+    llm: LLMGateway
+    if settings.anthropic_api_key:
+        from .adapters.llm.anthropic_adapter import AnthropicAdapter
+
+        llm = AnthropicAdapter(settings=settings)
+    else:
+        llm = DemoLLMAdapter()
+
+    # The workflow agent step runs the same governed LLM gateway as direct
+    # execution — no stubbed output on any reachable path.
     orchestrator = Orchestrator(
-        registry=registry, authority=authority, audit=audit, bus=bus, runner=StubAgentRunner()
+        registry=registry, authority=authority, audit=audit, bus=bus,
+        runner=LLMStepRunner(llm),
+    )
+    # Governed tool dispatch (IF-TOOL). Every tool_use block from the LLM passes
+    # through the proxy: token signature/expiry/revocation/scope/budget checks
+    # against the live governance snapshot, then audit. Null ports back
+    # memory.search / search.web until real providers are wired.
+    tool_proxy = ToolProxy(
+        registry=default_tool_registry(credential_vault=credential_vault),
+        audit=audit,
+        public_key=authority.public_key,
+        live_state_for=authority.live_state_checker,
+    )
+    agent_execution = AgentExecutionService(
+        registry, llm, deliverables, tools=tool_proxy, authority=authority, audit=audit
     )
 
     knowledge_ingestion: KnowledgeIngestionService | None = None
@@ -146,5 +223,7 @@ async def build_container(settings: Settings | None = None) -> Container:
     return Container(
         settings=settings, bus=bus, audit=audit, authority=authority,
         orchestrator=orchestrator, tenants=tenants, api_keys=api_keys,
+        user_auth=user_auth, deliverables=deliverables,
+        credential_vault=credential_vault, agent_execution=agent_execution,
         knowledge_ingestion=knowledge_ingestion, _closers=closers,
     )

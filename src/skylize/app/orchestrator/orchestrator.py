@@ -19,7 +19,7 @@ from ...events.bus import EventBus
 from ...schemas.events.creative import CreativeHooksGenerated
 from ..audit.service import AuditService
 from ..governance.authority import GovernanceAuthority, GovernanceDenied
-from .runner import AgentRunner
+from .runner import AgentRunner, RunnerMeta
 from .workflows.creative_workflow import GraphDeps, build_creative_graph
 
 # Stages that indicate the agent overstepped its grant → feed the circuit breaker.
@@ -117,6 +117,7 @@ class Orchestrator:
                 "token": token,
                 "input_payload": input_model.model_dump(),
                 "output": None,
+                "run_meta": None,
                 "failure": None,
                 "failed_stage": None,
             },
@@ -140,8 +141,9 @@ class Orchestrator:
             return WorkflowResult("failed", agent_id, correlation_id, token.token_id,
                                   reason=f"invalid output: {exc}")
 
+        meta = final.get("run_meta") or RunnerMeta(provider="unknown", model="unknown", total_tokens=0)
         event_type = await self._publish_output(contract, output_model.model_dump(), org_id,
-                                                 correlation_id, token.token_id)
+                                                 correlation_id, token.token_id, meta)
         await self._audit.record(
             org_id=org_id, correlation_id=correlation_id,
             action_type="orchestrator.run", result="success",
@@ -178,18 +180,22 @@ class Orchestrator:
 
     async def _publish_output(
         self, contract: AgentContract, output: dict[str, Any], org_id: str,
-        correlation_id: UUID, token_id: UUID,
+        correlation_id: UUID, token_id: UUID, meta: RunnerMeta,
     ) -> str | None:
         """Wrap the validated agent output into its typed business event."""
         if contract.agent_id == "hook_generator_agent":
+            # Operator-executed hooks carry no upstream brief; the run's
+            # correlation_id is the brief surrogate so the partition key stays
+            # stable and the payload stays honest about its origin.
+            brief_ref = output.get("brief_id") or correlation_id
             event = CreativeHooksGenerated(
-                tenant_id=org_id, partition_key=f"brief:{output['brief_id']}",
+                tenant_id=org_id, partition_key=f"brief:{brief_ref}",
                 department=contract.department, source_agent_id=contract.agent_id,
                 authority_level=contract.authority_level, governance_token_id=token_id,
                 correlation_id=correlation_id,
                 payload=CreativeHooksGenerated.Payload(
-                    brief_id=output["brief_id"], hooks=output["hooks"],
-                    model_used="stub", token_cost=0,
+                    brief_id=brief_ref, hooks=output["hooks"],
+                    model_used=meta.model, token_cost=meta.total_tokens,
                 ),
             )
             await self._bus.publish(event)

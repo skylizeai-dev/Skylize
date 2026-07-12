@@ -188,6 +188,35 @@ class PgAuditRepository:
                 row.result_reason, row.occurred_at,
             )
 
+    async def list_for_org(
+        self, org_id: str, *, limit: int = 50, before: datetime | None = None
+    ) -> list[AuditRow]:
+        query = (
+            "SELECT event_id, org_id, correlation_id, causation_id, source_agent_id, "
+            "authority_level, governance_token_id, action_type, inputs_hash, "
+            "outputs_hash, result, result_reason, occurred_at "
+            "FROM audit_log WHERE org_id = $1"
+        )
+        args: list[object] = [org_id]
+        if before is not None:
+            query += " AND occurred_at < $2"
+            args.append(before)
+        query += f" ORDER BY occurred_at DESC LIMIT {int(limit)}"
+        async with self._db.tenant_session(org_id) as conn:
+            rows = await conn.fetch(query, *args)
+        return [
+            AuditRow(
+                event_id=r["event_id"], org_id=r["org_id"],
+                correlation_id=r["correlation_id"], causation_id=r["causation_id"],
+                source_agent_id=r["source_agent_id"], authority_level=r["authority_level"],
+                governance_token_id=r["governance_token_id"], action_type=r["action_type"],
+                inputs_hash=r["inputs_hash"], outputs_hash=r["outputs_hash"],
+                result=r["result"], result_reason=r["result_reason"],
+                occurred_at=r["occurred_at"],
+            )
+            for r in rows
+        ]
+
 
 class PgContractRepository:
     def __init__(self, db: Database) -> None:
@@ -204,6 +233,32 @@ class PgContractRepository:
                 """,
                 agent_id, version, contract_json,
             )
+
+    async def load_all_active(self) -> list[tuple[str, str]]:
+        async with self._db.admin_session() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT DISTINCT ON (agent_id) agent_id, contract_json::text AS payload
+                FROM agent_contracts
+                WHERE is_active
+                ORDER BY agent_id, version DESC
+                """
+            )
+        return [(r["agent_id"], r["payload"]) for r in rows]
+
+    async def get_latest_active(self, agent_id: str) -> str | None:
+        async with self._db.admin_session() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT contract_json::text AS payload
+                FROM agent_contracts
+                WHERE agent_id = $1 AND is_active
+                ORDER BY version DESC
+                LIMIT 1
+                """,
+                agent_id,
+            )
+        return None if row is None else str(row["payload"])
 
 
 # ---------------------------------------------------------------------------

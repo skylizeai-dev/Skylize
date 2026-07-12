@@ -50,14 +50,34 @@ def resolve_model(dotted_path: str) -> type[BaseModel]:
 
 
 class AgentRegistry:
-    """In-memory cache of AgentContracts. Fail-closed on unknown agent_id."""
+    """In-memory cache of AgentContracts. Fail-closed on unknown agent_id.
 
-    def __init__(self, contracts: list[AgentContract]) -> None:
+    ``AgentRegistry()`` with no argument default-loads the full contract set from
+    ``contracts/definitions/`` (the exact implementations of the specs in
+    docs/03_agents/). Pass an explicit list to scope the registry — e.g.
+    ``MVP_REGISTRY = AgentRegistry(ALL_MVP_CONTRACTS)`` restricts it to the
+    governed Creative + Growth team that is in MVP scope.
+    """
+
+    def __init__(self, contracts: list[AgentContract] | None = None) -> None:
+        if contracts is None:
+            from .definitions import ALL_DEFINITION_CONTRACTS
+
+            contracts = ALL_DEFINITION_CONTRACTS
         self._cache: dict[str, AgentContract] = {}
         for contract in contracts:
             if contract.agent_id in self._cache:
                 raise ValueError(f"duplicate agent_id in registry: {contract.agent_id}")
             self._cache[contract.agent_id] = contract
+
+    def register_contract(self, contract: AgentContract) -> None:
+        """Add or replace a contract in the cache (upsert).
+
+        Unlike construction — which rejects duplicate agent_ids — a
+        re-registration overwrites, so a caller can override a default-loaded
+        contract (e.g. a tenant-custom variant or a test fixture).
+        """
+        self._cache[contract.agent_id] = contract
 
     def resolve(
         self,
