@@ -31,7 +31,7 @@ every action explainable and reversible.
 ## 3. Why now
 
 - **Capable models** make multi-step reasoning and content production viable.
-- **Orchestration** (LangGraph/CrewAI) makes durable, inspectable agent control
+- **Orchestration** (LangGraph) makes durable, inspectable agent control
   flow practical.
 - **The gap** is not raw model capability — it is **governance**: businesses
   cannot hand real budgets and brand to ungoverned agents. Skylize's bet is that

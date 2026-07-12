@@ -40,7 +40,7 @@ adopt anything we cannot, in principle, run ourselves.
 | Vector store | **Qdrant** | yes | no |
 | Cache + event bus + queue | **Redis 7 (Streams)** | yes | no |
 | Object storage | **S3 API (AWS S3 / MinIO)** | yes (MinIO) | no (S3 API is commodity) |
-| Agent orchestration | **LangGraph (control) + CrewAI (team patterns)** | yes | no |
+| Agent orchestration | **LangGraph** (sole orchestration layer) | yes | no |
 | Workflow automation | **n8n** (external execution surface) | yes | no |
 | LLM access | **Provider-abstracted gateway** (OpenAI / Anthropic / Gemini) | n/a | **no** — abstraction is the point |
 | Auth / identity | **OIDC IdP (Clerk or Auth0)** | swappable | no (OIDC standard) |
@@ -81,7 +81,7 @@ well, it is rejected by default.
 ## 4. Category decisions (rationale · alternatives · migration)
 
 ### 4.1 Backend language — Python 3.12
-- **Rationale:** the AI/agent ecosystem (LangGraph, CrewAI, provider SDKs,
+- **Rationale:** the AI/agent ecosystem (LangGraph, provider SDKs,
   Pydantic) is Python-first; matching it removes an entire class of glue. 3.12
   for performance + typing maturity.
 - **Alternatives:** Go (great ops story, weak agent ecosystem); Node/TS
@@ -132,17 +132,28 @@ well, it is rejected by default.
 - **Migration path:** identical API → move AWS S3 ↔ MinIO ↔ R2 ↔ GCS (S3 mode)
   by config.
 
-### 4.7 Orchestration — LangGraph (control plane) + CrewAI (team patterns)
+### 4.7 Orchestration — LangGraph (sole orchestration layer)
+
+> **⚠️ Superseded by [ADR-0002](adr/0002-crewai-removal-langgraph-only.md) (2026-07-12).**
+> The original decision paired LangGraph with **CrewAI** for intra-team
+> collaboration. CrewAI has since been removed: **LangGraph OSS is the sole
+> agent-orchestration framework**, with role-based team collaboration expressed as
+> LangGraph subgraphs and durable execution provided beneath it by Temporal Cloud
+> (see `orchestrator/temporal/`). The original rationale is retained below as a
+> historical record.
+
 - **Rationale:** LangGraph gives explicit, inspectable, resumable state machines
   — essential for governance checkpoints, human-in-the-loop pauses, and replay.
-  CrewAI expresses role/team collaboration ergonomically for department crews.
-  LangGraph owns *control & durability*; CrewAI owns *intra-team collaboration*.
+  A single orchestration model keeps every side effect on one durable, auditable,
+  replayable control path. Role-based department-crew collaboration is expressed
+  as LangGraph subgraphs, inheriting the same governance and audit guarantees.
 - **Alternatives:** AutoGen (less deterministic control); bespoke engine (cost,
-  risk); CrewAI-only (weaker durable control); LangGraph-only (more boilerplate
-  for team patterns).
-- **Migration path:** both run behind the **Orchestrator** facade and the
-  `AgentContract` registry (see 03); a framework can be retired by reimplementing
-  the facade for affected agents while contracts stay identical.
+  risk); CrewAI-only (weaker durable control); *(historical)* a LangGraph + CrewAI
+  hybrid — rejected in ADR-0002 for widening the audit and sandbox surface.
+- **Migration path:** orchestration runs behind the **Orchestrator** facade and
+  the `AgentContract` registry (see 03); the framework can be retired by
+  reimplementing the facade for affected agents while contracts stay identical.
+  That same isolation is what made the CrewAI removal a contained change.
 
 ### 4.8 LLM access — provider-abstracted gateway
 - **Rationale:** vendor independence is a first-class requirement. A single

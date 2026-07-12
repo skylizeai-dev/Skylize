@@ -17,8 +17,8 @@ The consistency anchor for the entire build. One line per file written, in order
 ## Final architecture documents
 
 - `docs/architecture/01_final_stack.md` — Final technology selection per category with rationale/alternatives/migration, rejected overlapping tech (one tool per job), MVP-vs-Scale stack, and anti-lock-in invariants.
-- `docs/architecture/02_system_architecture.md` — Layered system view, consolidated boundaries, agent communication architecture (delegation/event/decision modes), and LangGraph+CrewAI orchestration architecture.
-- `docs/architecture/03_agent_runtime.md` — Agent sandbox, tool proxy validation order, LangGraph/CrewAI execution stack, lifecycle, failure modes, escalation/HITL/conflict at runtime, and framework migration path.
+- `docs/architecture/02_system_architecture.md` — Layered system view, consolidated boundaries, agent communication architecture (delegation/event/decision modes), and LangGraph orchestration architecture.
+- `docs/architecture/03_agent_runtime.md` — Agent sandbox, tool proxy validation order, LangGraph execution stack, lifecycle, failure modes, escalation/HITL/conflict at runtime, and framework migration path.
 - `docs/architecture/04_memory_architecture.md` — Memory tiers and store assignment (Qdrant/Postgres/Redis/S3), event-sourced read/write paths, consistency model, tenant isolation, and scale migration behind VectorStore/MemoryRepository ports.
 - `docs/architecture/05_security_architecture.md` — Threat model, identity/authZ layers, the Ed25519 governance-token chain of trust, zero-trust agent runtime, secrets, defense-in-depth tenant isolation, incident controls, and audit/compliance.
 - `docs/architecture/06_deployment_architecture.md` — Deployable units, MVP (Compose) → Scale (Kubernetes) topology, per-component migration triggers, CI/CD contract gate, backup/replay, observability, and disaster recovery.
@@ -27,7 +27,7 @@ The consistency anchor for the entire build. One line per file written, in order
 
 - `docs/README.md` — Master documentation index: what Skylize is, the four-document spine, the canonical vocabulary (authority levels, interfaces, event categories, failure modes, token validation order, core objects), the section map, the new-engineer reading order, and build provenance.
 - `docs/02_architecture/repository_structure.md` — Physical repo layout projected onto the logical boundaries; package-to-boundary mapping; the enforced rule that `agents/` may import only `schemas/`; the org-chart-shaped docs mirror; manifest-flagged known issues (vc_procurement, departmant typo, duplicate director_vendor_management/CPO, depth contradictions).
-- `docs/02_architecture/system_architecture.md` — Index to the consolidated `architecture/02`; one-screen system view, the three agent-communication modes, orchestration summary (LangGraph control + CrewAI teams + Orchestrator facade), multi-tenancy summary.
+- `docs/02_architecture/system_architecture.md` — Index to the consolidated `architecture/02`; one-screen system view, the three agent-communication modes, orchestration summary (LangGraph + Orchestrator facade), multi-tenancy summary.
 - `docs/02_architecture/service_map.md` — Catalogue of runtime services (gateway, api, orchestrator, governance, decision-engine, agent-worker, memory, integration-adapters, worker-archiver) with boundary/consume/produce/scale; the contract registry as an orchestrator concern; service dependency direction; CI contract gate.
 - `docs/02_architecture/tech_stack.md` — Index to the consolidated `architecture/01`; five decision principles, the stack at a glance, reconciliation of Temporal/LangGraph/OPA into the canonical stack (LangGraph = durable control plane, Temporal not separately run in v1, OPA = policy engine behind Decision Engine/Governance), one-tool-per-job, anti-lock-in invariants.
 

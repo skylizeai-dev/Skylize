@@ -38,7 +38,7 @@ Orchestrator (facade)
         └─ LangGraph workflow (durable state machine, Postgres checkpointer)
              ├─ node: governance checkpoint (token/authority/kill-switch)
              ├─ node: agent step (single agent reasoning)
-             ├─ node: CrewAI crew (intra-team collaboration)
+             ├─ node: subgraph (intra-team collaboration)
              ├─ node: human-in-the-loop pause (resumable)
              └─ node: decision / escalation / conflict branch
                   └─ Tool Proxy (IF-TOOL): validates token → dispatches
@@ -47,8 +47,8 @@ Orchestrator (facade)
 
 - **LangGraph** owns durable control flow, checkpoints, resume, replay, and the
   governance/HITL nodes.
-- **CrewAI** runs *inside* a LangGraph node for role-based team patterns, wrapped
-  by the same control guarantees.
+- **Intra-team collaboration** runs as a **LangGraph subgraph** for role-based
+  team patterns, wrapped by the same control guarantees — not a separate framework.
 - **Tool Proxy** is the only path from agent reasoning to a side effect.
 
 See orchestration division of labor in
@@ -171,8 +171,8 @@ contracts in the registry.
 
 ## 10. Framework migration path
 
-Both LangGraph and CrewAI sit behind the Orchestrator facade and the contract
-registry. To replace either:
+LangGraph sits behind the Orchestrator facade and the contract
+registry. To replace the orchestration framework:
 1. Keep `AgentContract`s and the `GovernanceToken` unchanged.
 2. Reimplement the facade's node execution for affected agents on the new
    framework.
