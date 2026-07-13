@@ -36,6 +36,7 @@ from .governance import (
     GovernanceAgentReinstated,
     GovernanceAgentSuspended,
     GovernanceCircuitBreakerTripped,
+    GovernanceHumanApprovalReceived,
     GovernanceKillSwitchDisengaged,
     GovernanceKillSwitchEngaged,
     GovernanceScopeViolation,
@@ -103,6 +104,9 @@ EVENT_REGISTRY: dict[str, type[BaseEvent]] = {
         GovernanceAgentReinstated,
         GovernanceKillSwitchEngaged,
         GovernanceKillSwitchDisengaged,
+        # The HITL verdict the Decision Engine resumes on — it rides the bus
+        # (console/API -> engine), so it must be registered like any other.
+        GovernanceHumanApprovalReceived,
         # audit
         AuditActionRecorded,
         AuditAccessDenied,
