@@ -17,6 +17,7 @@ from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass
 
+from .adapters.llm.content_gate import GuardedLLMGateway, LLMContentGate
 from .adapters.llm.demo_adapter import DemoLLMAdapter
 from .adapters.llm.gateway import LLMGateway
 from .app.agents.execution import AgentExecutionService
@@ -191,6 +192,13 @@ async def build_container(settings: Settings | None = None) -> Container:
     else:
         llm = DemoLLMAdapter()
 
+    # Content gate: deterministic prompt-injection screen wrapped around the
+    # single shared gateway reference, so every downstream holder of `llm`
+    # (Orchestrator's LLMStepRunner, AgentExecutionService, ToolProxy's LLM
+    # dispatch) is gated uniformly without a per-call-site change.
+    content_gate = LLMContentGate()
+    llm = GuardedLLMGateway(llm, gate=content_gate)
+
     # The workflow agent step runs the same governed LLM gateway as direct
     # execution — no stubbed output on any reachable path.
     orchestrator = Orchestrator(
@@ -218,6 +226,7 @@ async def build_container(settings: Settings | None = None) -> Container:
         knowledge_ingestion = KnowledgeIngestionService(
             qdrant=QdrantAdapter(settings.qdrant_url, settings.qdrant_api_key),
             embedding_service=EmbeddingService(settings.openai_api_key),
+            content_gate=content_gate,
         )
 
     return Container(

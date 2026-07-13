@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 
 import structlog
 
+from ..adapters.llm.content_gate import LLMContentGate
 from .embedding_service import EmbeddingService
 from .qdrant_adapter import QdrantAdapter
 
@@ -14,11 +15,21 @@ log = structlog.get_logger(__name__)
 
 
 class KnowledgeIngestionService:
-    def __init__(self, qdrant: QdrantAdapter, embedding_service: EmbeddingService) -> None:
+    def __init__(
+        self,
+        qdrant: QdrantAdapter,
+        embedding_service: EmbeddingService,
+        content_gate: LLMContentGate | None = None,
+    ) -> None:
         self._qdrant = qdrant
         self._embed = embedding_service
+        # Ingested docs land in `platform_knowledge` and are later retrieved
+        # into agent context — an indirect-injection vector, so screen the raw
+        # content before it is embedded/stored, not just at generation time.
+        self._gate = content_gate or LLMContentGate()
 
     async def ingest(self, doc_id: str, content: str, source_path: str) -> None:
+        self._gate.check(content)
         content_hash = hashlib.sha256(content.encode()).hexdigest()
         if await self._qdrant.verify_document(doc_id, content_hash):
             log.debug("knowledge_ingestion.skipped", doc_id=doc_id, reason="already_current")
