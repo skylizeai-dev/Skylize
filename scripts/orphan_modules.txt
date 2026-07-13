@@ -1,0 +1,18 @@
+# Known orphaned modules — nothing in src/ or tests/ imports these.
+# Each entry needs a human disposition: delete, wire, or test.
+# Regenerate deliberately with: python scripts/find_orphan_modules.py --update
+skylize.agents
+skylize.app.runtime_adapters
+skylize.contracts.models
+skylize.contracts.mvp.safety
+skylize.dal.memory_adapter
+skylize.memory.adapters
+skylize.schemas.agents.agency
+skylize.schemas.agents.brand
+skylize.schemas.agents.creative
+skylize.schemas.agents.executive
+skylize.schemas.agents.growth
+skylize.schemas.agents.safety
+skylize.schemas.agents.sdr
+skylize.schemas.agents.security
+skylize.schemas.workflow
