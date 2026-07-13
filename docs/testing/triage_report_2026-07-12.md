@@ -55,6 +55,8 @@ No forbidden-stack imports in `src/` or `tests/`. The scan surfaced a single **p
 ## Observation (report-only, not fixed per read-only mandate)
 
 - Deprecation warnings only, none failing: Starlette `TestClient`/httpx deprecation (fastapi), and `datetime.utcnow()` in `test_memory_gateway` / `test_memory_service`. These will eventually break on newer deps; not launch-blocking today.
+- **Post-hoc addendum (2026-07-12, separate import-audit pass):** `src/skylize/app/orchestrator/temporal/activities.py` unconditionally fails to import (`ImportError: cannot import name 'WorkflowRepository' from 'skylize.dal.ports'` — confirmed via clean-venv `pip install -e ".[dev]"` + direct import). The 929-collected count above did not exercise this file: it's not imported by `temporal/__init__.py`, not imported by any test, and not wired into app startup, so pytest collection legitimately passes it by (no swallowed exception). This does not reopen the "0 new / 0 pre-existing failures" gate above, but it is a real latent break for any future Temporal worker bootstrap or test that imports this module — worth a follow-up ticket.
+  - **RESOLVED by `fix/dal-ports-workflow-repo`:** added `WorkflowRunStepRow` and `WorkflowRepository` (Protocol) to `src/skylize/dal/ports.py`, matching the existing repository-port style. Direct import of `activities.py` now succeeds (verified with `temporalio` installed); `pytest --collect-only` still shows 929 collected / 0 errors (unchanged, since nothing imported this module during collection either way); mypy clean on both files. No concrete DB-backed implementation was added — still a follow-up before a Temporal worker can actually run.
 
 ## Hard exit gates
 
