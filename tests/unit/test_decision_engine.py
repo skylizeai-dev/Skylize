@@ -5,8 +5,6 @@ runs with no infrastructure."""
 
 from __future__ import annotations
 
-import pytest
-
 import asyncio
 from uuid import uuid4
 
@@ -142,7 +140,6 @@ async def test_consumes_from_subscribed_stream() -> None:
 
 
 # -- HITL resume ------------------------------------------------------------
-@pytest.mark.skip(reason="HITL resume payload drifted (Payload.reason); decision_engine is unwired from bootstrap - M5 excision/rework per launch plan")
 async def test_human_approval_resumes_to_approved() -> None:
     bus = InMemoryEventBus()
     engine = _engine(bus)
@@ -165,7 +162,6 @@ async def test_human_approval_resumes_to_approved() -> None:
     assert approved and approved[0].payload.decision_id == decision_id
 
 
-@pytest.mark.skip(reason="HITL resume payload drifted (Payload.reason); decision_engine is unwired from bootstrap - M5 excision/rework per launch plan")
 async def test_human_rejection_resumes_to_rejected_and_is_idempotent() -> None:
     bus = InMemoryEventBus()
     processed = InMemoryProcessedEventStore()

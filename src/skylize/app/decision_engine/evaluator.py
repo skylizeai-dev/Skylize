@@ -253,7 +253,7 @@ class DecisionEvaluator:
                 outcome="deferred_to_human",
                 reasons=[
                     f"spend_over_ceiling: {projected} > {ceiling.ceiling_minor_units} "
-                    f"({ceiling.currency}) for scope={proposal.capital_scope}"
+                    f"({proposal.currency or 'minor_units'}) for scope={proposal.capital_scope}"
                 ],
                 hitl_trigger=HumanInLoopTrigger.SPEND_OVER_CEILING.value,
                 routed_to="human_owner",

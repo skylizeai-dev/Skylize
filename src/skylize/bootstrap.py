@@ -26,6 +26,7 @@ from .app.auth.service import ApiKeyService
 from .app.auth.user_service import UserAuthService
 from .app.credentials.encryption import FernetEncryptor
 from .app.credentials.vault import CredentialVault
+from .app.decision_engine import DecisionEngine
 from .app.deliverables.service import DeliverableService
 from .app.governance.authority import GovernanceAuthority
 from .app.governance.broadcast import GovernanceBroadcast
@@ -62,6 +63,7 @@ class Container:
     credential_vault: CredentialVault
     agent_execution: AgentExecutionService
     knowledge_ingestion: KnowledgeIngestionService | None
+    decision_engine: DecisionEngine
     _closers: list[Callable[[], Awaitable[None]]]
 
     async def aclose(self) -> None:
@@ -182,6 +184,19 @@ async def build_container(settings: Settings | None = None) -> Container:
 
     closers.append(_stop_subscriber)
 
+    # Decision Engine (business-action authz; the ONLY emitter of terminal
+    # `decision.*` events). Wired behind the CapitalRepository /
+    # ProcessedEventStore ports — in-memory defaults until Pg implementations
+    # land. With no configured orgs it is wired but idle; tenants are
+    # subscribed as they are provisioned (SKYLIZE_DECISION_ENGINE_ORG_IDS seeds
+    # subscriptions at startup). Deliberately NOT handed the LLM gateway:
+    # business authz and LLM content safety (content_gate) stay separate.
+    decision_engine = DecisionEngine(bus, registry, audit, settings)
+    await decision_engine.start()
+    for org_id in settings.decision_engine_org_ids:
+        decision_engine.subscribe(org_id)
+    closers.append(decision_engine.stop)
+
     # LLM gateway: the live Anthropic adapter when a key is configured, else the
     # deterministic `[DEMO]` adapter (memory backend / tests / no-key local run).
     llm: LLMGateway
@@ -234,5 +249,6 @@ async def build_container(settings: Settings | None = None) -> Container:
         orchestrator=orchestrator, tenants=tenants, api_keys=api_keys,
         user_auth=user_auth, deliverables=deliverables,
         credential_vault=credential_vault, agent_execution=agent_execution,
-        knowledge_ingestion=knowledge_ingestion, _closers=closers,
+        knowledge_ingestion=knowledge_ingestion, decision_engine=decision_engine,
+        _closers=closers,
     )
