@@ -64,6 +64,10 @@ class Container:
     agent_execution: AgentExecutionService
     knowledge_ingestion: KnowledgeIngestionService | None
     decision_engine: DecisionEngine
+    # The single shared content-gated gateway reference. Anything that makes
+    # LLM calls (incl. the Temporal worker's LLMJudge) must take THIS, never a
+    # bare provider adapter.
+    llm: LLMGateway
     _closers: list[Callable[[], Awaitable[None]]]
 
     async def aclose(self) -> None:
@@ -250,5 +254,5 @@ async def build_container(settings: Settings | None = None) -> Container:
         user_auth=user_auth, deliverables=deliverables,
         credential_vault=credential_vault, agent_execution=agent_execution,
         knowledge_ingestion=knowledge_ingestion, decision_engine=decision_engine,
-        _closers=closers,
+        llm=llm, _closers=closers,
     )
