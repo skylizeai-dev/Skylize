@@ -30,7 +30,7 @@ to exactly one boundary so that a failure is isolable to one trust zone.
 | `orchestrator` | Application (`IF-AGENT`) | resolve `AgentContract`, mint token, run LangGraph control plane, wrap output→event | contracts, requests | agent runs, events |
 | `governance` | Application | Governance Authority: ECDSA P-384 signing, mint/revoke, circuit breaker, kill switch | governance state | `GovernanceToken`, `governance.*` |
 | `decision-engine` | Application | evaluate proposals against authority + policy; resolve conflicts | `creative.*`, `sales.*`, `decision.conflict_detected`, `governance.*` | `decision.*` |
-| `agent-worker` | Agent (`IF-AGENT`) | sandboxed LangGraph/CrewAI execution + tool proxy | token + scoped input | typed agent output |
+| `agent-worker` | Agent (`IF-AGENT`) | sandboxed LangGraph execution + tool proxy | token + scoped input | typed agent output |
 | `memory` | Data path | Memory service over `VectorStore` + `MemoryRepository` ports | `memory.write_requested`, recall calls | `memory.*` |
 | `integration-adapters` | Integration (`IF-INTEGRATION`) | sole egress + credentials: LLM gateway, Shopify, Stripe, Meta, TikTok, n8n | tool-call intent (via proxy) | normalized results, result events |
 | `worker-archiver` | Event | ship hot Redis events to S3 Parquet before trimming | event streams | cold archive |

@@ -366,3 +366,32 @@ class ProcessedEventStore(Protocol):
     async def is_processed(self, key: str) -> bool: ...
 
     async def mark_processed(self, key: str, outcome: str) -> None: ...
+
+
+# ---------------------------------------------------------------------------
+# Workflow orchestration (Temporal activities) — run-step audit trail
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True, slots=True)
+class WorkflowRunStepRow:
+    step_id: UUID
+    run_id: UUID
+    org_id: str
+    step_name: str
+    step_order: int
+    agent_id: str
+    status: str
+    input: dict[str, Any]
+    output: dict[str, Any] | None
+    judge_verdict: dict[str, Any] | None
+    error_message: str | None
+    retry_count: int
+    created_at: datetime
+    completed_at: datetime | None
+
+
+class WorkflowRepository(Protocol):
+    """Durable record of each workflow node's execution, written by the
+    Temporal `write_run_step` activity to the `workflow_run_steps` table."""
+
+    async def record_step(self, row: WorkflowRunStepRow) -> None: ...

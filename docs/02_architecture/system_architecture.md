@@ -11,7 +11,7 @@
 This file is the **entry point** to Skylize's system architecture from within the
 `02_architecture/` spine folder. The full, consolidated production architecture —
 layered view, the six interfaces, the three agent-communication modes, the
-LangGraph + CrewAI orchestration model, and the end-to-end request lifecycle —
+LangGraph orchestration model, and the end-to-end request lifecycle —
 is maintained as a single source of truth in
 [../architecture/02_system_architecture.md](../architecture/02_system_architecture.md).
 This index summarizes it and routes the reader; it never restates it differently.
@@ -34,7 +34,7 @@ EDGE  (Cloudflare → FastAPI gateway)            IF-EDGE
    │ derives signed RequestContext{org_id,user}
 APPLICATION (service layer · Orchestrator ·     IF-AGENT / IF-DATA / IF-EVENT
              Decision Engine · Governance Authority)
-   ├── AGENT RUNTIME  (LangGraph + CrewAI, sandboxed)   IF-TOOL
+   ├── AGENT RUNTIME  (LangGraph, sandboxed)            IF-TOOL
    ├── EVENT BUS      (Redis Streams + S3 archive)
    └── DATA ACCESS    (Postgres · Qdrant · Redis · S3, RLS by org_id)
 INTEGRATION (adapters: LLM gateway, Shopify,    IF-INTEGRATION
@@ -56,14 +56,14 @@ Agents never call each other directly; all communication is mediated.
 
 ## 5. Orchestration (summary)
 
-- **LangGraph** = durable control plane (checkpointed to Postgres; pauses at
-  human-in-the-loop nodes; replayable).
-- **CrewAI** = intra-team collaboration, run *inside* a LangGraph node.
+- **LangGraph** = the sole orchestration layer / durable control plane
+  (checkpointed to Postgres; pauses at human-in-the-loop nodes; replayable).
+  Intra-team collaboration runs as LangGraph subgraphs *inside* a node.
 - **Orchestrator** = the facade that resolves the `AgentContract`, mints the
   `GovernanceToken`, wraps output as events, and audits every step.
 
-Both frameworks sit behind the Orchestrator facade and the contract registry, so
-either is replaceable without touching agent contracts. Full division of labor:
+LangGraph sits behind the Orchestrator facade and the contract registry, so the
+orchestration layer is replaceable without touching agent contracts. Full division of labor:
 [../architecture/02 §5](../architecture/02_system_architecture.md#5-orchestration-architecture)
 and runtime detail in [../architecture/03_agent_runtime.md](../architecture/03_agent_runtime.md).
 

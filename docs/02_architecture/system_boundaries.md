@@ -40,9 +40,9 @@ layer and emitted as events (see
                          ┌───▼───┐   ┌──────▼──────┐  ┌──────▼───────┐
                          │ AGENT │   │   DATA      │  │  EVENT BUS   │
                          │ LAYER │   │  BOUNDARY   │  │  (Redis      │
-                         │(CrewAI│   │ Postgres ·  │  │   Streams)   │
-                         │ Lang  │   │ Qdrant ·    │  └──────┬───────┘
-                         │ Graph)│   │ Redis · S3  │         │ IF-EVENT
+                         │ Lang  │   │ Postgres ·  │  │   Streams)   │
+                         │ Graph │   │ Qdrant ·    │  └──────┬───────┘
+                         │ (sbx) │   │ Redis · S3  │         │ IF-EVENT
                          └───┬───┘   └─────────────┘         │
                   IF-TOOL    │                               │
                          ┌───▼───────────────────────────────▼─────────┐
@@ -122,7 +122,7 @@ to mint governance tokens, resolve agent contracts, and authorize data access.
 Responsibilities:
 - **Orchestrator** — resolves agent contracts from the registry
   (see [registry lookup pattern](../03_agents/agent_contract_registry.md#5-registry-lookup-pattern)),
-  composes CrewAI/LangGraph runs, and injects a signed **governance token**
+  composes LangGraph runs, and injects a signed **governance token**
   into every agent invocation.
 - **Governance Authority** — the root of trust. Holds the ECDSA P-384 signing key,
   mints and revokes governance tokens, and enforces circuit-breaker / kill-switch
@@ -136,7 +136,7 @@ sub-boundaries (Agent, Data, Event). Agents do not.
 
 ### 4.3 Agent Boundary — interface `IF-AGENT`
 
-**Perimeter:** the CrewAI / LangGraph runtime where agent reasoning executes.
+**Perimeter:** the LangGraph runtime where agent reasoning executes.
 
 This boundary is deliberately **sandboxed and outbound-restricted**:
 - An agent receives, on `IF-AGENT`: its resolved contract, a signed governance

@@ -9,7 +9,7 @@ description = "Skylize multi-agent platform"
 requires-python = ">=3.12"
 
 # Sprint 1 foundation + Sprint 2 backend core.
-# LLM providers (anthropic, openai), CrewAI intra-team patterns, vector store
+# LLM providers (anthropic, openai), LangGraph orchestration, vector store
 # (qdrant-client), observability (opentelemetry, langfuse) and object storage
 # (aioboto3) are added in the sprints that first import them.
 dependencies = [

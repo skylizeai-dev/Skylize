@@ -26,7 +26,7 @@ environment per tier.
 | `gateway` | FastAPI edge: authN, rate limit, webhook receivers | replicas behind LB |
 | `api` | service layer / business endpoints | replicas |
 | `orchestrator` | contract resolution, token minting, LangGraph control plane | replicas (stateless between checkpoints) |
-| `agent-worker` | LangGraph/CrewAI execution sandbox + tool proxy | replicas; per-tenant/agent limits |
+| `agent-worker` | LangGraph execution sandbox + tool proxy | replicas; per-tenant/agent limits |
 | `decision-engine` | event consumer; emits DecisionEvents | replicas (consumer group) |
 | `governance` | Governance Authority (signing, revocation, kill switch) | HA, restricted |
 | `memory` | Memory service (VectorStore + MemoryRepository ports) | replicas |
