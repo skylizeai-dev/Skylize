@@ -23,6 +23,8 @@ jobs:
         run: ruff check src tests
       - name: Import boundaries (import-linter)
         run: lint-imports
+      - name: All modules importable (catches broken imports lint-imports can't see)
+        run: python scripts/check_all_modules_importable.py
       - name: Types (mypy strict)
         run: mypy src
       - name: Tests (no exclusions)
