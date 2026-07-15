@@ -24,7 +24,7 @@ htmlcov/
 
 # Build artifacts / sync caches (never track)
 .next/
-console/
+/console/
 .ds-sync/
 *.egg-info/
 
