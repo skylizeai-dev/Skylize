@@ -2,17 +2,45 @@
 
 Ranked by what unblocks the most.
 
-## [DECISION] Pg implementations for CapitalRepository / ProcessedEventStore
+## Session A addendum (2026-07-15, branch `feat/durable-governance`)
+
+RESOLVED: #1 (Pg stores) is done — durable PgCapitalRepository +
+PgProcessedEventStore, migration 0011, runtime-proven against real Postgres.
+See SESSION_A_REPORT.md. New judgment calls from that session:
+
+- **[JUDGMENT] Branch base**: the session brief said "branch from
+  release/console-m1 (post-merge HEAD)", but the overnight branch was never
+  merged — everything A1/A2 build on (engine wiring, PgWorkflowRepository,
+  migration 0010, LLMJudge) exists only on `chore/overnight-2026-07-14`.
+  `feat/durable-governance` is cut from that branch's HEAD (8ff18d17), which
+  contains release/console-m1. Merge order to intend: overnight branch →
+  release/console-m1, then this branch.
+- **[JUDGMENT] ProcessedEventStore port now carries `org_id`** (keyword-only
+  param on both methods). Not a new port, but it IS a port-signature change:
+  without the tenant, the Pg impl could not run inside `tenant_session` and
+  the new table could not be RLS'd — which the brief required. Engine had the
+  tenant at every call site; in-memory impl keys by (org_id, key) to match.
+- **[JUDGMENT] No second budget table**: `budget_ledger` (migration 0001)
+  already owns the budget-ceiling domain and maps 1:1 onto the BudgetCeiling
+  port row. PgCapitalRepository reads it; 0011 adds only the UNIQUE
+  (org_id, scope, period) natural key (plus the new processed-events table).
+  Code-is-ground-truth beat the brief's literal "budget-ceiling table".
+- **[JUDGMENT] Historical migration 0009 edited** (search_path leak fix):
+  behavior-preserving for real deployments (public was the target anyway);
+  only test-schema replays change. First real-DB run of the chain exposed it.
+- **[NOTE] Container now exposes `db`** (postgres pool; None on memory) for
+  sibling processes composed from the root (the Temporal worker). Services
+  above bootstrap still depend on ports only.
+
+## [DECISION — RESOLVED in Session A] Pg implementations for CapitalRepository / ProcessedEventStore
 - Task: T2
 - Need from me: green-light (and priority) for Postgres-backed budget-ceiling +
   idempotency stores, or explicit acceptance that the engine's stores are
   in-memory for M1.
-- What I did instead: best-effort default — DecisionEngine is wired at the
-  composition root behind the existing ports; on the postgres backend it falls
-  back to the in-memory defaults. Functionally correct single-process, but
-  idempotency does not survive a restart and budget ceilings aren't durable.
-  NOT production-grade for the postgres backend.
-- Files: src/skylize/bootstrap.py (comment marks the gap), src/skylize/app/decision_engine/engine.py:73-74
+- ~~What I did instead: best-effort default~~ RESOLVED 2026-07-15: durable Pg
+  stores implemented + wired on the postgres backend; migration 0011; proofs
+  (a)/(b) executed against real Postgres. See SESSION_A_REPORT.md.
+- Files: src/skylize/dal/decision_stores.py, migrations/versions/0011_decision_engine_stores.py
 
 ## [DECISION] feat/tenant-isolation-port rebase (security-sensitive conflicts)
 - Task: T6
