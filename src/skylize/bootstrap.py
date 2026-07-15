@@ -212,6 +212,19 @@ async def build_container(settings: Settings | None = None) -> Container:
 
     closers.append(_stop_subscriber)
 
+    # Engine selection (SKYLIZE_DECISION_ENGINE). Only the inline engine is
+    # wired. The OPA-backed decision_engine package is not selectable yet — its
+    # consumer transport still assumes a Redis taxonomy the live EventBus does
+    # not use (see decision_engine/constants.py). Fail closed on any other value
+    # rather than silently running inline, so a misconfigured environment is a
+    # loud startup error, not a surprising fallback.
+    if settings.decision_engine != "inline":
+        raise RuntimeError(
+            f"SKYLIZE_DECISION_ENGINE={settings.decision_engine!r} is not available: "
+            "the OPA decision engine's consumer is not wired to the EventBus yet "
+            "(see skylize/decision_engine/constants.py). Only 'inline' is functional."
+        )
+
     # Decision Engine (business-action authz; the ONLY emitter of terminal
     # `decision.*` events). Wired behind the CapitalRepository /
     # ProcessedEventStore ports — durable Pg stores on the postgres backend
