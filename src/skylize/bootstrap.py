@@ -82,7 +82,12 @@ class Container:
     db: "Database | None" = None
 
     async def aclose(self) -> None:
-        for closer in self._closers:
+        # LIFO, like ExitStack: consumers/subscribers are registered after the
+        # db/redis concretes they read from, so they must stop FIRST and the
+        # pools close last. Append order used to run db/redis close first,
+        # which made the governance subscriber's blocked read die on a closed
+        # connection and turned clean shutdown into a ConnectionError.
+        for closer in reversed(self._closers):
             await closer()
 
 
