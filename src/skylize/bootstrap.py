@@ -16,6 +16,10 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .dal.connection import Database
 
 from .adapters.llm.content_gate import GuardedLLMGateway, LLMContentGate
 from .adapters.llm.demo_adapter import DemoLLMAdapter
@@ -71,6 +75,11 @@ class Container:
     # bare provider adapter.
     llm: LLMGateway
     _closers: list[Callable[[], Awaitable[None]]]
+    # The connection pool on the postgres backend (None on memory). Exposed for
+    # sibling processes composed from this root — the Temporal worker builds
+    # PgWorkflowRepository(container.db) — not for request-path use: services
+    # above this layer keep depending on ports, never on the pool.
+    db: "Database | None" = None
 
     async def aclose(self) -> None:
         for closer in self._closers:
@@ -91,6 +100,7 @@ async def build_container(settings: Settings | None = None) -> Container:
     deliverable_repo: DeliverableRepository
     credential_repo: CredentialRepository
     broadcast: GovernanceBroadcast
+    db: Database | None = None
     # Decision Engine side stores: None → the engine's in-memory defaults
     # (memory backend); the postgres branch below swaps in the durable stores.
     capital_repo: CapitalRepository | None = None
@@ -268,5 +278,5 @@ async def build_container(settings: Settings | None = None) -> Container:
         user_auth=user_auth, deliverables=deliverables,
         credential_vault=credential_vault, agent_execution=agent_execution,
         knowledge_ingestion=knowledge_ingestion, decision_engine=decision_engine,
-        llm=llm, _closers=closers,
+        llm=llm, _closers=closers, db=db,
     )

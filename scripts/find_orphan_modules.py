@@ -45,6 +45,7 @@ ENTRY_POINTS: frozenset[str] = frozenset(
         "skylize",                             # the package root itself
         "skylize.edge.gateway",                # uvicorn/asgi entry (deploy.ps1, Dockerfile)
         "skylize.services.obsidian_writer.app", # standalone writer service entry
+        "skylize.app.orchestrator.temporal.worker",  # `python -m` Temporal worker entry
     }
 )
 

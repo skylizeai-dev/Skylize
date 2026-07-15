@@ -93,6 +93,13 @@ class Settings(BaseSettings):
     # `SKYLIZE_DECISION_ENGINE_ORG_IDS='["org_a","org_b"]'`.
     decision_engine_org_ids: list[str] = []
 
+    # Temporal worker (app/orchestrator/temporal/worker.py). Address is the
+    # host:port of the Temporal frontend — local dev server by default;
+    # Temporal Cloud sets all three plus TLS via its own DSN conventions later.
+    temporal_address: str = "localhost:7233"
+    temporal_namespace: str = "default"
+    temporal_task_queue: str = "skylize-workflows"
+
     # n8n → Skylize bridge key (X-Skylize-API-Key header on agent-prompts endpoint)
     n8n_api_key: str = ""
 
