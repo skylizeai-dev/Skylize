@@ -208,6 +208,15 @@ and the LLM providers.
 This is the **only** boundary with outbound network egress, and it is reached
 **only** by the infrastructure layer's **Integration Adapters**, never by agents.
 
+> **Known tracked exception — ADR-0003.** The `website/` BFF console currently ships
+> an *ungoverned* outbound n8n admin path (`api/console/workflows/route.ts` —
+> create/activate/delete), reachable by a `skylize_console` session with **no**
+> `GovernanceToken` / Decision-Engine check, which violates this rule. It is gated
+> **default-off** (`SKYLIZE_ENABLE_N8N_ADMIN`, returns HTTP 501 unless explicitly
+> enabled) as an interim band-aid; a governed rewrite through the Decision Engine/OPA
+> is a **hard gate** before any production enablement. See
+> [ADR-0003](../architecture/adr/0003-n8n-admin-governance-gap.md).
+
 **Two named interfaces:**
 - `IF-TOOL` — the inward face. An agent calls a tool via the tool proxy. The
   proxy validates contract + governance scope, then dispatches to an adapter.
