@@ -136,12 +136,12 @@ class DecisionEngine:
             return  # not a decision-bearing event — ignore
 
         key = str(event.event_id)
-        if await self._processed.is_processed(key):
+        if await self._processed.is_processed(key, org_id=event.tenant_id):
             return  # idempotent: this event was already decided
 
         result = await self._evaluator.evaluate(proposal)
         await self._emit(proposal, result)
-        await self._processed.mark_processed(key, result.outcome)
+        await self._processed.mark_processed(key, result.outcome, org_id=event.tenant_id)
 
     # -- emission -----------------------------------------------------------
     async def _emit(self, proposal: DecisionProposal, result: DecisionResult) -> None:
@@ -269,7 +269,7 @@ class DecisionEngine:
     async def _resume_from_human(self, event: GovernanceHumanApprovalReceived) -> None:
         """A human verdict resumes a paused decision into its terminal outcome."""
         key = f"hitl:{event.payload.decision_id}"
-        if await self._processed.is_processed(key):
+        if await self._processed.is_processed(key, org_id=event.tenant_id):
             return  # already resumed
         p = event.payload
         if p.approved:
@@ -316,4 +316,4 @@ class DecisionEngine:
             partition_key=event.partition_key,
             result_reason=f"human_resume by {p.decided_by}: {p.reason or outcome}",
         )
-        await self._processed.mark_processed(key, outcome)
+        await self._processed.mark_processed(key, outcome, org_id=event.tenant_id)

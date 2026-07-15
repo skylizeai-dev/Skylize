@@ -23,6 +23,18 @@ import { consoleRoute, errorResponse } from "@/lib/skylize/handler";
 const N8N_URL = process.env.N8N_API_URL?.replace(/\/$/, "");
 const N8N_KEY = process.env.N8N_API_KEY;
 
+// SECURITY GATE (audit 3aa2bed3, HIGH severity) — INTENTIONALLY OFF BY DEFAULT.
+// This route drives ungoverned n8n admin actions (create/activate/delete
+// workflows, which can run arbitrary Code/HTTP nodes) behind only a session
+// cookie — there is NO GovernanceToken / Decision-Engine gate, contradicting
+// system_boundaries.md (egress only via governed Integration Adapters). The path
+// is dormant (no console UI calls it) and not needed for MVP, so it is gated off
+// pending a governed rewrite in Scale-tier. The code below is preserved on
+// purpose. Setting SKYLIZE_ENABLE_N8N_ADMIN=true re-enables the raw (still
+// session-only, still ungoverned) path for a controlled context; do NOT graft a
+// fake GovernanceToken here — the governed rewrite is the real fix, not this one.
+const N8N_ADMIN_ENABLED = process.env.SKYLIZE_ENABLE_N8N_ADMIN === "true";
+
 const workflowDefinitionSchema = z.strictObject({
   name: z.string().min(1),
   nodes: z.array(z.unknown()),
@@ -67,6 +79,15 @@ export const POST = consoleRoute<z.infer<typeof bodySchema>>({
   method: "POST",
   schema: bodySchema,
   handler: async ({ body }) => {
+    // Gated off by default — see the SECURITY GATE note above. Short-circuit
+    // before touching n8n credentials or the network.
+    if (!N8N_ADMIN_ENABLED) {
+      return errorResponse(
+        501,
+        "n8n workflow admin is not enabled in this build (gated off pending a governed rewrite).",
+      );
+    }
+
     if (!N8N_URL || !N8N_KEY) {
       return errorResponse(
         503,

@@ -361,11 +361,16 @@ class CapitalRepository(Protocol):
 
 
 class ProcessedEventStore(Protocol):
-    """Idempotency guard: the async engine decides each `event_id` at most once."""
+    """Idempotency guard: the async engine decides each `event_id` at most once.
 
-    async def is_processed(self, key: str) -> bool: ...
+    `org_id` scopes every read/write to one tenant so the Postgres
+    implementation can run inside `tenant_session(org_id)` and stay subject to
+    RLS — a bare key would force a cross-tenant table. The engine always has
+    the tenant at hand (`event.tenant_id`), so callers pass it through."""
 
-    async def mark_processed(self, key: str, outcome: str) -> None: ...
+    async def is_processed(self, key: str, *, org_id: str) -> bool: ...
+
+    async def mark_processed(self, key: str, outcome: str, *, org_id: str) -> None: ...
 
 
 # ---------------------------------------------------------------------------

@@ -25,6 +25,8 @@ other tenant-scoped tables (see migration 0001 + docs/architecture/05_security_a
 
 from __future__ import annotations
 
+import os
+
 from alembic import op
 
 revision: str = "0009"
@@ -91,6 +93,16 @@ def upgrade() -> None:
         END $$;
         """
     )
+
+    # The SET at the top of this migration is SESSION-scoped: without restoring
+    # the path env.py established, every LATER migration in the same alembic run
+    # inherits `public` and its unqualified DDL leaks out of the disposable
+    # test schema (integration tests replay the full chain there — migrations
+    # 0010+ would collide with the already-migrated public schema). No effect
+    # on normal runs, where public was the target all along.
+    test_schema = os.environ.get("SKYLIZE_TEST_SCHEMA")
+    if test_schema:
+        op.execute(f'SET search_path TO "{test_schema}", public')
 
 
 def downgrade() -> None:

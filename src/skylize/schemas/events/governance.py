@@ -153,5 +153,8 @@ class GovernanceHumanApprovalReceived(BaseEvent):
         hitl_id: UUID
         approved: bool
         decided_by: str
+        # Optional human rationale; surfaced in decision.rejected reasons and
+        # the audit record on a rejection resume.
+        reason: str | None = None
 
     payload: Payload

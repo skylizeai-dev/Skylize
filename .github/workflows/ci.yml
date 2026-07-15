@@ -25,6 +25,10 @@ jobs:
         run: lint-imports
       - name: Forbidden imports (no direct LangChain/CrewAI in src)
         run: python scripts/check_forbidden_imports.py
+      - name: All modules importable (catches broken imports lint-imports can't see)
+        run: python scripts/check_all_modules_importable.py
+      - name: Orphan-module contract (no NEW unreachable modules vs allowlist)
+        run: python scripts/find_orphan_modules.py
       - name: Types (mypy strict)
         run: mypy src
       - name: Tests (no exclusions)

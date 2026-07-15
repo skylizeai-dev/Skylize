@@ -16,6 +16,10 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .dal.connection import Database
 
 from .adapters.llm.content_gate import GuardedLLMGateway, LLMContentGate
 from .adapters.llm.demo_adapter import DemoLLMAdapter
@@ -26,6 +30,7 @@ from .app.auth.service import ApiKeyService
 from .app.auth.user_service import UserAuthService
 from .app.credentials.encryption import FernetEncryptor
 from .app.credentials.vault import CredentialVault
+from .app.decision_engine import DecisionEngine
 from .app.deliverables.service import DeliverableService
 from .app.governance.authority import GovernanceAuthority
 from .app.governance.broadcast import GovernanceBroadcast
@@ -37,8 +42,10 @@ from .dal.credentials import CredentialRepository
 from .dal.ports import (
     ApiKeyRepository,
     AuditRepository,
+    CapitalRepository,
     DeliverableRepository,
     GovernanceRepository,
+    ProcessedEventStore,
     TenantRepository,
     UserRepository,
 )
@@ -62,10 +69,25 @@ class Container:
     credential_vault: CredentialVault
     agent_execution: AgentExecutionService
     knowledge_ingestion: KnowledgeIngestionService | None
+    decision_engine: DecisionEngine
+    # The single shared content-gated gateway reference. Anything that makes
+    # LLM calls (incl. the Temporal worker's LLMJudge) must take THIS, never a
+    # bare provider adapter.
+    llm: LLMGateway
     _closers: list[Callable[[], Awaitable[None]]]
+    # The connection pool on the postgres backend (None on memory). Exposed for
+    # sibling processes composed from this root — the Temporal worker builds
+    # PgWorkflowRepository(container.db) — not for request-path use: services
+    # above this layer keep depending on ports, never on the pool.
+    db: "Database | None" = None
 
     async def aclose(self) -> None:
-        for closer in self._closers:
+        # LIFO, like ExitStack: consumers/subscribers are registered after the
+        # db/redis concretes they read from, so they must stop FIRST and the
+        # pools close last. Append order used to run db/redis close first,
+        # which made the governance subscriber's blocked read die on a closed
+        # connection and turned clean shutdown into a ConnectionError.
+        for closer in reversed(self._closers):
             await closer()
 
 
@@ -83,6 +105,11 @@ async def build_container(settings: Settings | None = None) -> Container:
     deliverable_repo: DeliverableRepository
     credential_repo: CredentialRepository
     broadcast: GovernanceBroadcast
+    db: Database | None = None
+    # Decision Engine side stores: None → the engine's in-memory defaults
+    # (memory backend); the postgres branch below swaps in the durable stores.
+    capital_repo: CapitalRepository | None = None
+    processed_store: ProcessedEventStore | None = None
 
     if settings.backend == "memory":
         from .app.governance.broadcast import InMemoryGovernanceBroadcast
@@ -109,6 +136,7 @@ async def build_container(settings: Settings | None = None) -> Container:
     else:
         from .dal.connection import Database
         from .dal.credentials import PgCredentialRepository
+        from .dal.decision_stores import PgCapitalRepository, PgProcessedEventStore
         from .dal.deliverables import PgDeliverableRepository
         from .dal.repositories import (
             PgApiKeyRepository,
@@ -134,6 +162,8 @@ async def build_container(settings: Settings | None = None) -> Container:
         user_repo = PgUserRepository(db)
         deliverable_repo = PgDeliverableRepository(db)
         credential_repo = PgCredentialRepository(db)
+        capital_repo = PgCapitalRepository(db)
+        processed_store = PgProcessedEventStore(db)
         redis_broadcast = RedisGovernanceBroadcast(settings.redis_url)
         broadcast = redis_broadcast
 
@@ -181,6 +211,24 @@ async def build_container(settings: Settings | None = None) -> Container:
             await subscriber_task
 
     closers.append(_stop_subscriber)
+
+    # Decision Engine (business-action authz; the ONLY emitter of terminal
+    # `decision.*` events). Wired behind the CapitalRepository /
+    # ProcessedEventStore ports — durable Pg stores on the postgres backend
+    # (budget_ledger + decision_processed_events, migration 0011), in-memory
+    # defaults on the memory backend. With no configured orgs it is wired but
+    # idle; tenants are subscribed as they are provisioned
+    # (SKYLIZE_DECISION_ENGINE_ORG_IDS seeds subscriptions at startup).
+    # Deliberately NOT handed the LLM gateway: business authz and LLM content
+    # safety (content_gate) stay separate.
+    decision_engine = DecisionEngine(
+        bus, registry, audit, settings,
+        capital=capital_repo, processed=processed_store,
+    )
+    await decision_engine.start()
+    for org_id in settings.decision_engine_org_ids:
+        decision_engine.subscribe(org_id)
+    closers.append(decision_engine.stop)
 
     # LLM gateway: the live Anthropic adapter when a key is configured, else the
     # deterministic `[DEMO]` adapter (memory backend / tests / no-key local run).
@@ -234,5 +282,6 @@ async def build_container(settings: Settings | None = None) -> Container:
         orchestrator=orchestrator, tenants=tenants, api_keys=api_keys,
         user_auth=user_auth, deliverables=deliverables,
         credential_vault=credential_vault, agent_execution=agent_execution,
-        knowledge_ingestion=knowledge_ingestion, _closers=closers,
+        knowledge_ingestion=knowledge_ingestion, decision_engine=decision_engine,
+        llm=llm, _closers=closers, db=db,
     )

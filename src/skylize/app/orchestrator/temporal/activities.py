@@ -19,6 +19,7 @@ from uuid import UUID, uuid4
 from temporalio import activity
 
 from ....dal.ports import WorkflowRepository, WorkflowRunStepRow
+from .judge import NodeJudge
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +76,11 @@ class WorkflowActivities:
     ``judge`` and ``minter`` are optional — the judge activity degrades to an
     unverified (passed=False, unverified=True) verdict when no judge is wired,
     which the fail_closed gate in the engine treats as a block.
+
+    ``judge`` is the LLM verifier port (``judge.NodeJudge``); the production
+    impl is ``judge.LLMJudge`` constructed over the composition root's single
+    shared content-gated gateway (``Container.llm``) — never a bare provider
+    adapter, and never the planner's own model selection.
     """
 
     def __init__(
@@ -82,7 +88,7 @@ class WorkflowActivities:
         *,
         repo: WorkflowRepository,
         builder: Any,
-        judge: Any | None,
+        judge: NodeJudge | None,
         minter: Any | None,
     ) -> None:
         self._repo = repo

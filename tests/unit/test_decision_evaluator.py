@@ -5,8 +5,6 @@ so each case is a plain construct-proposal → evaluate → assert."""
 
 from __future__ import annotations
 
-import pytest
-
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
@@ -131,7 +129,6 @@ async def test_score_is_deterministic_and_bounded() -> None:
 
 
 # -- stage 4: capital -------------------------------------------------------
-@pytest.mark.skip(reason="BudgetCeiling.currency drifted; decision_engine evaluator is unwired from bootstrap - M5 excision/rework per launch plan")
 async def test_spend_over_ceiling_defers() -> None:
     cap = InMemoryCapitalRepository()
     cap.set_ceiling(BudgetCeiling(ORG, "growth", ceiling_minor_units=5_000, committed_minor_units=0))
