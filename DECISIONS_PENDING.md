@@ -2,6 +2,23 @@
 
 Ranked by what unblocks the most.
 
+## [DECISION — HIGH] MemoryService un-gated embed/upsert path (release-merge session 2026-07-15, branch `release/console-m1`)
+- Priority: **HIGH** — same threat class as the `content_gate` prompt-injection
+  screen we just proved 2/2 on the `ingest()` / `ingest_document()` paths, but in
+  a DIFFERENT subsystem, currently unscreened.
+- Gap: `memory/service.py` `_index_to_qdrant` / `commit()` schedule
+  `asyncio.create_task(...)` that embeds + `upsert_vector`s content WITHOUT
+  running it through `content_gate`. That content is later returned to callers
+  via `recall()` — i.e. unscreened content re-enters the model's context.
+- Blocker to fixing here: an import-contract restriction — `MemoryService`
+  cannot import from `adapters/` (where `content_gate` lives), so the gate can't
+  be called inline. Needs either a screening port/protocol injected into
+  MemoryService, or the gate relocated to a layer MemoryService may depend on.
+- Need from me: green-light the approach (inject a screening port vs. relocate
+  the gate) and priority relative to the other pending items.
+- What I did instead: FLAGGED ONLY — not fixed in this release-merge session.
+- Files: src/skylize/memory/service.py (`_index_to_qdrant`, `commit`, `recall`)
+
 ## Session A addendum (2026-07-15, branch `feat/durable-governance`)
 
 RESOLVED: #1 (Pg stores) is done — durable PgCapitalRepository +
