@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
 
 import httpx
 
 from .config import DecisionEngineSettings
 from .exceptions import OPAPolicyDenied
-from .models import DecisionContext, ScoringResult
+from .models import DecisionContext, OPAResult, ScoringResult
+
+log = logging.getLogger(__name__)
 
 # guardrails.md §4 names the action inputs OPA reads (kind, amount, target,
 # governance_token_id, agent.authority_level) but does NOT enumerate a PII
@@ -76,8 +79,9 @@ class OPAClient:
         self,
         context: DecisionContext,
         scoring_result: ScoringResult | None = None,
-    ) -> tuple[bool, list[str]]:
-        """Evaluate the action against OPA. Returns ``(allow, deny_reasons)``.
+    ) -> OPAResult:
+        """Evaluate the action against OPA (guardrails.md §5 contract):
+        ``{allow, require_human, deny: [reasons], policy_version}``.
 
         Raises ``OPAPolicyDenied`` on any transport/protocol failure so the
         caller treats the action as denied (fail-closed).
@@ -117,6 +121,15 @@ class OPAClient:
                 self._policy_path, "OPA returned malformed response — fail-closed"
             ) from exc
 
+        if not isinstance(result, dict):
+            # A bare scalar (e.g. `opa_policy_path` misconfigured to a leaf
+            # boolean rule) is not the package-document contract this client
+            # parses — fail closed rather than crash on `.get`.
+            raise OPAPolicyDenied(
+                self._policy_path,
+                f"OPA result was {type(result).__name__}, expected an object — fail-closed",
+            )
+
         # Default-deny: a missing/false `allow` is a denial.
         allow = bool(result.get("allow", False))
         # Accept the task contract key `deny_reasons`; fall back to guardrails.md
@@ -126,7 +139,28 @@ class OPAClient:
             raw_reasons = result.get("deny", [])
         deny_reasons = list(raw_reasons)
 
-        return (allow, deny_reasons)
+        # Absent `require_human` is the normal Rego idiom for an undefined
+        # rule (no defer condition matched) — not a fail-closed gap, since
+        # reaching here already required an explicit `allow`.
+        require_human = bool(result.get("require_human", False))
+
+        policy_version = result.get("policy_version")
+        if allow and policy_version is None:
+            # A live allow with no policy_version can't be replayed/audited
+            # against the policy that produced it — flag loudly, but don't
+            # convert it into a spurious deny (guardrails.md §5 doesn't gate
+            # `allow` on `policy_version` presence).
+            log.warning(
+                "opa_allow_missing_policy_version",
+                extra={"policy_path": self._policy_path, "event_id": context.event_id},
+            )
+
+        return OPAResult(
+            allow=allow,
+            require_human=require_human,
+            deny_reasons=deny_reasons,
+            policy_version=policy_version,
+        )
 
     async def close(self) -> None:
         await self._client.aclose()

@@ -76,9 +76,16 @@ class _StageTerminal(Exception):  # noqa: N818 — internal control-flow signal,
     through every stage.
     """
 
-    def __init__(self, outcome: DecisionOutcome, reason: str) -> None:
+    def __init__(
+        self,
+        outcome: DecisionOutcome,
+        reason: str,
+        *,
+        policy_version: str | None = None,
+    ) -> None:
         self.outcome = outcome
         self.reason = reason
+        self.policy_version = policy_version
         super().__init__(reason)
 
 
@@ -149,11 +156,12 @@ class EvaluationPipeline:
         scoring: ScoringResult | None = None
         capital: CapitalCheckResult | None = None
         preliminary: DecisionOutcome | None = None
+        policy_version: str | None = None
 
         try:
             self._stage_authority(context)
 
-            await self._stage_opa(context)
+            policy_version = await self._stage_opa(context)
 
             scoring, preliminary = self._stage_scoring(context)
 
@@ -164,6 +172,8 @@ class EvaluationPipeline:
             outcome, reason = self._stage_hitl_gate(context, scoring, preliminary)
         except _StageTerminal as terminal:
             outcome, reason = terminal.outcome, terminal.reason
+            if terminal.policy_version is not None:
+                policy_version = terminal.policy_version
 
         return DecisionResult(
             decision_id=decision_id_for(context.event_id),
@@ -175,6 +185,7 @@ class EvaluationPipeline:
             final_reason=reason,
             steps=list(context.steps),
             evaluated_at=datetime.now(timezone.utc),
+            policy_version=policy_version,
         )
 
     # -- STAGE 1: AUTHORITY -------------------------------------------------
@@ -213,10 +224,14 @@ class EvaluationPipeline:
 
     # -- STAGE 2: OPA_POLICY ------------------------------------------------
 
-    async def _stage_opa(self, context: DecisionContext) -> None:
+    async def _stage_opa(self, context: DecisionContext) -> str | None:
+        """Returns the ``policy_version`` OPA evaluated under (guardrails.md
+        §5/§6: every decision — approved, rejected, or deferred — records the
+        exact policy version, so a past decision can be re-evaluated under the
+        policy that was in force)."""
         start = time.monotonic()
         try:
-            allow, deny_reasons = await self._opa.evaluate(context)
+            result = await self._opa.evaluate(context)
         except OPAPolicyDenied as exc:
             detail = {"allow": False, "denial_reason": exc.denial_reason}
             self._record_step(
@@ -231,19 +246,46 @@ class EvaluationPipeline:
                 DecisionOutcome.REJECTED, f"policy denied: {exc.denial_reason}"
             ) from exc
 
-        passed = allow
-        detail = {"allow": allow, "deny_reasons": deny_reasons}
+        detail = {
+            "allow": result.allow,
+            "require_human": result.require_human,
+            "deny_reasons": result.deny_reasons,
+            "policy_version": result.policy_version,
+        }
+
+        # require_human takes precedence over allow (guardrails.md §5): a
+        # policy that flags an action for human review is deferring, not
+        # approving, no matter what `allow` also says.
+        if result.require_human:
+            self._record_step(
+                context,
+                EvaluationStage.OPA_POLICY,
+                False,
+                DecisionOutcome.DEFERRED_TO_HUMAN,
+                detail,
+                start,
+            )
+            raise _StageTerminal(
+                DecisionOutcome.DEFERRED_TO_HUMAN,
+                "policy requires human review",
+                policy_version=result.policy_version,
+            )
+
+        passed = result.allow
         outcome = None if passed else DecisionOutcome.REJECTED
         self._record_step(
             context, EvaluationStage.OPA_POLICY, passed, outcome, detail, start
         )
         if not passed:
             reason = (
-                "policy denied: " + "; ".join(deny_reasons)
-                if deny_reasons
+                "policy denied: " + "; ".join(result.deny_reasons)
+                if result.deny_reasons
                 else "policy denied (no explicit allow)"
             )
-            raise _StageTerminal(DecisionOutcome.REJECTED, reason)
+            raise _StageTerminal(
+                DecisionOutcome.REJECTED, reason, policy_version=result.policy_version
+            )
+        return result.policy_version
 
     # -- STAGE 3: SCORING ---------------------------------------------------
 

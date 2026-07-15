@@ -33,10 +33,10 @@ async def test_allow_true_returns_true_empty_reasons(settings):
 
     with patch.object(client._client, "post", new_callable=AsyncMock) as mock_post:
         mock_post.return_value = _mock_response(200, {"result": {"allow": True}})
-        allow, reasons = await client.evaluate(ctx)
+        result = await client.evaluate(ctx)
 
-    assert allow is True
-    assert reasons == []
+    assert result.allow is True
+    assert result.deny_reasons == []
     await client.close()
 
 
@@ -52,10 +52,10 @@ async def test_allow_false_with_deny_reasons(settings):
         mock_post.return_value = _mock_response(200, {
             "result": {"allow": False, "deny_reasons": ["budget_exceeded", "agent_suspended"]}
         })
-        allow, reasons = await client.evaluate(ctx)
+        result = await client.evaluate(ctx)
 
-    assert allow is False
-    assert reasons == ["budget_exceeded", "agent_suspended"]
+    assert result.allow is False
+    assert result.deny_reasons == ["budget_exceeded", "agent_suspended"]
     await client.close()
 
 
@@ -185,10 +185,10 @@ async def test_deny_field_alias_accepted(settings):
         mock_post.return_value = _mock_response(200, {
             "result": {"allow": False, "deny": ["policy_violation"]}
         })
-        allow, reasons = await client.evaluate(ctx)
+        result = await client.evaluate(ctx)
 
-    assert allow is False
-    assert reasons == ["policy_violation"]
+    assert result.allow is False
+    assert result.deny_reasons == ["policy_violation"]
     await client.close()
 
 
@@ -202,7 +202,94 @@ async def test_missing_allow_key_defaults_to_deny(settings):
 
     with patch.object(client._client, "post", new_callable=AsyncMock) as mock_post:
         mock_post.return_value = _mock_response(200, {"result": {}})
-        allow, reasons = await client.evaluate(ctx)
+        result = await client.evaluate(ctx)
 
-    assert allow is False
+    assert result.allow is False
+    await client.close()
+
+
+# ---------------------------------------------------------------------------
+# require_human=True → surfaced regardless of allow
+# ---------------------------------------------------------------------------
+
+async def test_require_human_true_surfaced(settings):
+    client = _client(settings)
+    ctx = make_decision_context()
+
+    with patch.object(client._client, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = _mock_response(200, {
+            "result": {"allow": True, "require_human": True, "policy_version": "v3"}
+        })
+        result = await client.evaluate(ctx)
+
+    assert result.require_human is True
+    await client.close()
+
+
+# ---------------------------------------------------------------------------
+# require_human absent → defaults to False (undefined Rego rule, not a gap)
+# ---------------------------------------------------------------------------
+
+async def test_require_human_absent_defaults_false(settings):
+    client = _client(settings)
+    ctx = make_decision_context()
+
+    with patch.object(client._client, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = _mock_response(200, {"result": {"allow": True}})
+        result = await client.evaluate(ctx)
+
+    assert result.require_human is False
+    await client.close()
+
+
+# ---------------------------------------------------------------------------
+# policy_version round-trips when present
+# ---------------------------------------------------------------------------
+
+async def test_policy_version_present_round_trips(settings):
+    client = _client(settings)
+    ctx = make_decision_context()
+
+    with patch.object(client._client, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = _mock_response(200, {
+            "result": {"allow": True, "policy_version": "spend-v2.1"}
+        })
+        result = await client.evaluate(ctx)
+
+    assert result.policy_version == "spend-v2.1"
+    await client.close()
+
+
+# ---------------------------------------------------------------------------
+# policy_version absent on a live allow → None, flagged (logged), not raised
+# ---------------------------------------------------------------------------
+
+async def test_policy_version_absent_on_allow_logs_warning(settings, caplog):
+    client = _client(settings)
+    ctx = make_decision_context()
+
+    with patch.object(client._client, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = _mock_response(200, {"result": {"allow": True}})
+        with caplog.at_level("WARNING", logger="skylize.decision_engine.opa_client"):
+            result = await client.evaluate(ctx)
+
+    assert result.allow is True
+    assert result.policy_version is None
+    assert any("policy_version" in message for message in caplog.messages)
+    await client.close()
+
+
+# ---------------------------------------------------------------------------
+# Non-dict result (e.g. policy path misconfigured to a leaf boolean rule) →
+# fail-closed, not a crash
+# ---------------------------------------------------------------------------
+
+async def test_non_dict_result_fails_closed(settings):
+    client = _client(settings)
+    ctx = make_decision_context()
+
+    with patch.object(client._client, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = _mock_response(200, {"result": True})
+        with pytest.raises(OPAPolicyDenied):
+            await client.evaluate(ctx)
     await client.close()

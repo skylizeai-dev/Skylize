@@ -38,6 +38,15 @@ class ScoringResult(BaseModel):
     factors: dict[str, float]
 
 
+class OPAResult(BaseModel):
+    """OPA's evaluation contract (guardrails.md §5)."""
+
+    allow: bool
+    require_human: bool
+    deny_reasons: list[str]
+    policy_version: str | None
+
+
 class CapitalCheckResult(BaseModel):
     available_budget: Decimal
     requested_amount: Decimal
@@ -75,3 +84,7 @@ class DecisionResult(BaseModel):
     final_reason: str
     steps: list[EvaluationStepRecord]
     evaluated_at: datetime
+    # The exact OPA policy_version that produced this decision (guardrails.md
+    # §5/§6), for audit + replay. None if the OPA stage never ran or the
+    # response omitted it.
+    policy_version: str | None = None

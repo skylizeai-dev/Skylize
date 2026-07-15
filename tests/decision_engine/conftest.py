@@ -28,7 +28,7 @@ from skylize.decision_engine.models import (
 def settings() -> DecisionEngineSettings:
     return DecisionEngineSettings(
         opa_url="http://opa:8181",
-        opa_policy_path="skylize/decision/allow",
+        opa_policy_path="skylize/decision",
         opa_timeout_seconds=2.0,
         redis_url="redis://localhost:6379",
         redis_consumer_group="cg:decision_engine",
