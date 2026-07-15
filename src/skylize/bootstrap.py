@@ -38,8 +38,10 @@ from .dal.credentials import CredentialRepository
 from .dal.ports import (
     ApiKeyRepository,
     AuditRepository,
+    CapitalRepository,
     DeliverableRepository,
     GovernanceRepository,
+    ProcessedEventStore,
     TenantRepository,
     UserRepository,
 )
@@ -89,6 +91,10 @@ async def build_container(settings: Settings | None = None) -> Container:
     deliverable_repo: DeliverableRepository
     credential_repo: CredentialRepository
     broadcast: GovernanceBroadcast
+    # Decision Engine side stores: None → the engine's in-memory defaults
+    # (memory backend); the postgres branch below swaps in the durable stores.
+    capital_repo: CapitalRepository | None = None
+    processed_store: ProcessedEventStore | None = None
 
     if settings.backend == "memory":
         from .app.governance.broadcast import InMemoryGovernanceBroadcast
@@ -115,6 +121,7 @@ async def build_container(settings: Settings | None = None) -> Container:
     else:
         from .dal.connection import Database
         from .dal.credentials import PgCredentialRepository
+        from .dal.decision_stores import PgCapitalRepository, PgProcessedEventStore
         from .dal.deliverables import PgDeliverableRepository
         from .dal.repositories import (
             PgApiKeyRepository,
@@ -140,6 +147,8 @@ async def build_container(settings: Settings | None = None) -> Container:
         user_repo = PgUserRepository(db)
         deliverable_repo = PgDeliverableRepository(db)
         credential_repo = PgCredentialRepository(db)
+        capital_repo = PgCapitalRepository(db)
+        processed_store = PgProcessedEventStore(db)
         redis_broadcast = RedisGovernanceBroadcast(settings.redis_url)
         broadcast = redis_broadcast
 
@@ -190,12 +199,17 @@ async def build_container(settings: Settings | None = None) -> Container:
 
     # Decision Engine (business-action authz; the ONLY emitter of terminal
     # `decision.*` events). Wired behind the CapitalRepository /
-    # ProcessedEventStore ports — in-memory defaults until Pg implementations
-    # land. With no configured orgs it is wired but idle; tenants are
-    # subscribed as they are provisioned (SKYLIZE_DECISION_ENGINE_ORG_IDS seeds
-    # subscriptions at startup). Deliberately NOT handed the LLM gateway:
-    # business authz and LLM content safety (content_gate) stay separate.
-    decision_engine = DecisionEngine(bus, registry, audit, settings)
+    # ProcessedEventStore ports — durable Pg stores on the postgres backend
+    # (budget_ledger + decision_processed_events, migration 0011), in-memory
+    # defaults on the memory backend. With no configured orgs it is wired but
+    # idle; tenants are subscribed as they are provisioned
+    # (SKYLIZE_DECISION_ENGINE_ORG_IDS seeds subscriptions at startup).
+    # Deliberately NOT handed the LLM gateway: business authz and LLM content
+    # safety (content_gate) stay separate.
+    decision_engine = DecisionEngine(
+        bus, registry, audit, settings,
+        capital=capital_repo, processed=processed_store,
+    )
     await decision_engine.start()
     for org_id in settings.decision_engine_org_ids:
         decision_engine.subscribe(org_id)

@@ -101,7 +101,7 @@ async def test_idempotent_on_event_id() -> None:
     await engine._handle_event(event)  # redelivery — must not decide twice
     assert len(bus.published_of_type("decision.approved")) == 1
     assert len(bus.published_of_type("decision.evaluated")) == 1
-    assert await processed.is_processed(str(event.event_id))
+    assert await processed.is_processed(str(event.event_id), org_id=ORG)
 
 
 async def test_same_event_yields_same_decision_id() -> None:

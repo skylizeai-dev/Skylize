@@ -203,16 +203,17 @@ class InMemoryCapitalRepository:
 
 
 class InMemoryProcessedEventStore:
-    """In-memory idempotency guard for the async Decision Engine."""
+    """In-memory idempotency guard for the async Decision Engine. Keyed by
+    (org_id, key) to mirror the tenant-scoped Postgres implementation."""
 
     def __init__(self) -> None:
-        self._seen: dict[str, str] = {}
+        self._seen: dict[tuple[str, str], str] = {}
 
-    async def is_processed(self, key: str) -> bool:
-        return key in self._seen
+    async def is_processed(self, key: str, *, org_id: str) -> bool:
+        return (org_id, key) in self._seen
 
-    async def mark_processed(self, key: str, outcome: str) -> None:
-        self._seen[key] = outcome
+    async def mark_processed(self, key: str, outcome: str, *, org_id: str) -> None:
+        self._seen[(org_id, key)] = outcome
 
 
 class InMemoryUserRepository:
