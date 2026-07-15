@@ -50,8 +50,16 @@ async def ingest_knowledge(
     raw = await request.body()
     sig = request.headers.get("X-Hub-Signature-256")
     if not _verify_hmac(raw, sig, secret):
-        # TODO: also emit governance.integration_bad_signature via the event bus
-        # (n8n.md §7) — deferred; needs the bus, out of this route's scope.
+        # DEFERRED (audit 3aa2bed3, LOW): the documented governance model
+        # (n8n.md §7, system_boundaries.md §4.6) says a rejected inbound signature
+        # should emit a `governance.integration_bad_signature` GovernanceEvent.
+        # Not wired yet. Correction to the prior note: the event bus IS reachable
+        # here (`container.bus`) — the real blocker is that no
+        # `governance.integration_bad_signature` type exists in
+        # schemas/events/governance.py, so emitting it first means defining that
+        # event schema (org_id?, source, remote). That is net-new and out of
+        # scope for this fix; tracked as a follow-up. Until then the rejection is
+        # observable via the structured warning below and still fails closed (401).
         logger.warning(
             "integration_bad_signature knowledge remote=%s",
             request.client.host if request.client else "unknown",
