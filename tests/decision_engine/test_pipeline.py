@@ -14,6 +14,7 @@ from skylize.decision_engine.models import (
     CapitalCheckResult,
     DecisionContext,
     DecisionOutcome,
+    OPAResult,
     RiskBand,
     ScoringResult,
 )
@@ -28,13 +29,22 @@ def _make_pipeline(
     settings,
     opa_allow: bool = True,
     opa_deny_reasons: list[str] | None = None,
+    opa_require_human: bool = False,
+    opa_policy_version: str | None = "mvp-opa-1.0",
     scoring_override: ScoringResult | None = None,
     capital_passes: bool = True,
     capital_requested: Decimal | None = None,
     event_bus: Any | None = None,
 ) -> EvaluationPipeline:
     opa = MagicMock(spec=OPAClient)
-    opa.evaluate = AsyncMock(return_value=(opa_allow, opa_deny_reasons or []))
+    opa.evaluate = AsyncMock(
+        return_value=OPAResult(
+            allow=opa_allow,
+            require_human=opa_require_human,
+            deny_reasons=opa_deny_reasons or [],
+            policy_version=opa_policy_version,
+        )
+    )
 
     scoring_eng = MagicMock(spec=ScoringEngine)
     if scoring_override:
@@ -86,6 +96,7 @@ async def test_full_go_path_approved(settings):
 
     assert result.outcome == DecisionOutcome.APPROVED
     assert len(result.steps) == 6
+    assert result.policy_version == "mvp-opa-1.0"
 
 
 # ---------------------------------------------------------------------------
@@ -116,6 +127,23 @@ async def test_opa_deny_rejected_two_steps(settings):
     assert result.outcome == DecisionOutcome.REJECTED
     assert len(result.steps) == 2
     assert result.steps[1].stage.value == "OPA_POLICY"
+    assert result.policy_version == "mvp-opa-1.0"
+
+
+# ---------------------------------------------------------------------------
+# OPA require_human=True → DEFERRED_TO_HUMAN at stage 2, regardless of allow
+# ---------------------------------------------------------------------------
+
+async def test_opa_require_human_deferred_two_steps(settings):
+    pipeline = _make_pipeline(settings, opa_allow=True, opa_require_human=True)
+    ctx = _valid_ctx()
+
+    result = await pipeline.evaluate(ctx)
+
+    assert result.outcome == DecisionOutcome.DEFERRED_TO_HUMAN
+    assert len(result.steps) == 2
+    assert result.steps[1].stage.value == "OPA_POLICY"
+    assert result.policy_version == "mvp-opa-1.0"
 
 
 # ---------------------------------------------------------------------------

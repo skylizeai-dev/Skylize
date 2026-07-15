@@ -9,7 +9,10 @@ class DecisionEngineSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="SKYLIZE_", extra="ignore")
 
     opa_url: str = "http://localhost:8181"
-    opa_policy_path: str = "skylize/decision/allow"
+    # Package path (guardrails.md §5), NOT a leaf rule — OPA's /v1/data/<package>
+    # returns the whole package document {allow, require_human, deny,
+    # policy_version} as an object, matching OPAClient's object-based parsing.
+    opa_policy_path: str = "skylize/decision"
     opa_timeout_seconds: float = 2.0
 
     redis_url: str = "redis://localhost:6379"
