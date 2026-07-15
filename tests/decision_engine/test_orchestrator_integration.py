@@ -17,7 +17,7 @@ import uuid
 from datetime import datetime, timezone
 
 from skylize.decision_engine.hitl_writer import HITLQueueWriter
-from skylize.decision_engine.models import DecisionContext, DecisionOutcome
+from skylize.decision_engine.models import DecisionContext, DecisionOutcome, OPAResult
 from skylize.decision_engine.orchestrator import DecisionOrchestrator
 from skylize.decision_engine.pipeline import EvaluationPipeline
 from skylize.decision_engine.publisher import DecisionEventPublisher
@@ -27,14 +27,25 @@ from skylize.decision_engine.scoring import ScoringEngine
 class _MockOPA:
     """Stand-in for OPAClient: canned allow/deny, no live server, no HTTP."""
 
-    def __init__(self, allow: bool = True, deny_reasons: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        allow: bool = True,
+        deny_reasons: list[str] | None = None,
+        require_human: bool = False,
+    ) -> None:
         self._allow = allow
         self._deny = deny_reasons or []
+        self._require_human = require_human
         self.calls: list[str] = []
 
     async def evaluate(self, context, scoring_result=None):
         self.calls.append(context.event_id)
-        return (self._allow, list(self._deny))
+        return OPAResult(
+            allow=self._allow,
+            require_human=self._require_human,
+            deny_reasons=list(self._deny),
+            policy_version="test",
+        )
 
 
 class _NoCapital:
@@ -99,6 +110,34 @@ async def test_conflict_defer_writes_decision_outbox_and_hitl(
     assert any("INSERT INTO hitl_queue" in s for s in sqls)
 
     # The escalation event went to the tenant governance stream.
+    mock_redis.xadd.assert_awaited()
+    assert mock_redis.xadd.await_args.args[0] == "evt:org_test:governance"
+
+
+# ---------------------------------------------------------------------------
+# OPA require_human DEFER path: policy flags for human review → DEFERRED_TO_HUMAN
+# even though allow=True (require_human takes precedence, guardrails.md §5)
+# ---------------------------------------------------------------------------
+
+async def test_opa_require_human_defers_writes_decision_outbox_and_hitl(
+    settings, mock_db, mock_redis, fake_conn
+):
+    opa = _MockOPA(allow=True, require_human=True)
+    orch = _build(settings, mock_db, mock_redis, opa)
+    ctx = _context({"campaign_id": "c4"})
+
+    result = await orch.process(ctx)
+
+    assert result.outcome is DecisionOutcome.DEFERRED_TO_HUMAN
+    assert opa.calls == [ctx.event_id]
+
+    sqls = _executed_sql(fake_conn)
+    assert any(
+        "INSERT INTO decisions" in s and "INSERT INTO decision_outbox" in s
+        for s in sqls
+    )
+    assert any("INSERT INTO hitl_queue" in s for s in sqls)
+
     mock_redis.xadd.assert_awaited()
     assert mock_redis.xadd.await_args.args[0] == "evt:org_test:governance"
 
