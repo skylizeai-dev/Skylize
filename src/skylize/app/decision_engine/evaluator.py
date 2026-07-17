@@ -31,6 +31,7 @@ from .events import (
     DecisionProposal,
     DecisionResult,
     DecisionScore,
+    RuleApplied,
     decision_id_for,
 )
 
@@ -304,7 +305,14 @@ class DecisionEvaluator:
         proposal: DecisionProposal,
         contract: AgentContract,
         incumbent: _ProposalRecord,
-    ) -> tuple[UUID | None, str]:
+    ) -> tuple[UUID | None, RuleApplied]:
+        # 0. safety veto — a safety-rejected proposal cannot win a conflict,
+        #    whatever its authority or recency (guardrails.md). Absence of a
+        #    verdict is NOT a veto and NOT an implicit allow; only reject=True
+        #    vetoes, and it does so regardless of severity.
+        verdict = proposal.security_verdict
+        if verdict is not None and verdict.reject:
+            return incumbent.proposal_id, "safety_veto"
         cr, ir = _RANK[contract.authority_level], _RANK[incumbent.authority_level]
         if cr != ir:  # 1. authority — higher authority wins
             winner = proposal.proposal_id if cr > ir else incumbent.proposal_id

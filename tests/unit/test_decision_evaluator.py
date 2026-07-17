@@ -14,8 +14,9 @@ from skylize.app.decision_engine.evaluator import (
     STAGE_POLICY,
     DecisionEvaluator,
 )
-from skylize.app.decision_engine.events import DecisionProposal
+from skylize.app.decision_engine.events import DecisionProposal, SecurityVerdict
 from skylize.contracts.base import HumanInLoopTrigger
+from skylize.schemas.agents.safety import SafetyVerdictOut
 from skylize.contracts.registry import MVP_REGISTRY
 from skylize.dal.memory import InMemoryCapitalRepository
 from skylize.dal.ports import BudgetCeiling
@@ -44,6 +45,7 @@ def make_proposal(
     occurred: datetime = T0,
     metadata: dict | None = None,
     org: str = ORG,
+    security: SecurityVerdict | None = None,
 ) -> DecisionProposal:
     pid = uuid4()
     return DecisionProposal(
@@ -61,7 +63,14 @@ def make_proposal(
         occurred_at=occurred,
         source_event_id=pid,
         source_type="test",
+        security_verdict=security,
         metadata=metadata or {},
+    )
+
+
+def _reject(reason: str = "policy breach") -> SecurityVerdict:
+    return SecurityVerdict(
+        source_agent_id="content_safety_agent", reject=True, severity="high", reason=reason
     )
 
 
@@ -217,6 +226,103 @@ async def test_conflict_unresolvable_escalates_to_human() -> None:
     assert result.outcome == "deferred_to_human"
     assert result.conflicts[0].rule_applied == "escalated"
     assert result.conflicts[0].winning_proposal_id is None
+
+
+# -- stage 5: safety veto (outranks authority + recency) -------------------
+async def test_security_veto_beats_authority() -> None:
+    # Challenger has HIGHER authority (director vs worker) and would win on
+    # authority — but its safety verdict rejects, so it loses via safety_veto.
+    ev = _evaluator()
+    incumbent = make_proposal(agent="hook_generator_agent", partition="brief:v1", occurred=T0)
+    challenger = make_proposal(
+        agent="copy_director", partition="brief:v1", occurred=T1, security=_reject()
+    )
+    await ev.evaluate(incumbent)
+    result = await ev.evaluate(challenger)
+    assert result.outcome == "rejected"
+    assert result.stage_failed_at == STAGE_CONFLICT
+    assert result.conflicts[0].rule_applied == "safety_veto"
+    assert result.conflicts[0].winning_proposal_id == incumbent.proposal_id
+
+
+async def test_security_veto_beats_recency() -> None:
+    # Equal authority, challenger is newer (would win on recency) — vetoed anyway.
+    ev = _evaluator()
+    incumbent = make_proposal(agent="copy_director", partition="brief:v2", occurred=T0)
+    challenger = make_proposal(
+        agent="art_director", partition="brief:v2", occurred=T1, security=_reject()
+    )
+    await ev.evaluate(incumbent)
+    result = await ev.evaluate(challenger)
+    assert result.outcome == "rejected"
+    assert result.conflicts[0].rule_applied == "safety_veto"
+    assert result.conflicts[0].winning_proposal_id == incumbent.proposal_id
+
+
+async def test_non_rejecting_verdict_does_not_veto() -> None:
+    # A verdict that is present but does NOT reject is not a veto: normal
+    # authority resolution applies and the higher-authority challenger wins.
+    ev = _evaluator()
+    clean = SecurityVerdict(
+        source_agent_id="content_safety_agent", reject=False, severity="low", reason=""
+    )
+    incumbent = make_proposal(agent="hook_generator_agent", partition="brief:v3", occurred=T0)
+    challenger = make_proposal(
+        agent="copy_director", partition="brief:v3", occurred=T1, security=clean
+    )
+    await ev.evaluate(incumbent)
+    result = await ev.evaluate(challenger)
+    assert result.outcome == "approved"
+    assert result.conflicts[0].rule_applied == "authority"
+    assert result.conflicts[0].winning_proposal_id == challenger.proposal_id
+
+
+async def test_absent_verdict_does_not_auto_reject() -> None:
+    # No verdict must NOT be read as a reject: the higher-authority challenger
+    # still wins on authority exactly as it would without the carrier.
+    ev = _evaluator()
+    incumbent = make_proposal(agent="hook_generator_agent", partition="brief:v4", occurred=T0)
+    challenger = make_proposal(agent="copy_director", partition="brief:v4", occurred=T1)
+    assert challenger.security_verdict is None
+    await ev.evaluate(incumbent)
+    result = await ev.evaluate(challenger)
+    assert result.outcome == "approved"
+    assert result.conflicts[0].rule_applied == "authority"
+
+
+async def test_absent_verdict_does_not_auto_allow() -> None:
+    # No verdict must NOT rescue a lower-authority challenger: it still loses on
+    # authority. Absence is "no safety signal", not an implicit clearance.
+    ev = _evaluator()
+    incumbent = make_proposal(agent="copy_director", partition="brief:v5", occurred=T0)
+    challenger = make_proposal(agent="hook_generator_agent", partition="brief:v5", occurred=T1)
+    assert challenger.security_verdict is None
+    await ev.evaluate(incumbent)
+    result = await ev.evaluate(challenger)
+    assert result.outcome == "rejected"
+    assert result.conflicts[0].rule_applied == "authority"
+    assert result.conflicts[0].winning_proposal_id == incumbent.proposal_id
+
+
+# -- SecurityVerdict.from_safety_verdict mapping ---------------------------
+def test_from_safety_verdict_maps_unsafe_to_reject() -> None:
+    verdict = SecurityVerdict.from_safety_verdict(
+        SafetyVerdictOut(run_id="r1", safe=False, severity="critical", findings=["a", "b"]),
+        source_agent_id="content_safety_agent",
+    )
+    assert verdict.reject is True
+    assert verdict.severity == "critical"
+    assert verdict.reason == "a; b"
+    assert verdict.source_agent_id == "content_safety_agent"
+
+
+def test_from_safety_verdict_safe_is_not_reject() -> None:
+    verdict = SecurityVerdict.from_safety_verdict(
+        SafetyVerdictOut(run_id="r2", safe=True, severity="none", findings=[]),
+        source_agent_id="content_safety_agent",
+    )
+    assert verdict.reject is False
+    assert verdict.reason == ""
 
 
 # -- stage 6: HITL gate -----------------------------------------------------
