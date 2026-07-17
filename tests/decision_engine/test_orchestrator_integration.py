@@ -13,6 +13,7 @@ OPA server + Rego policies exist — nothing else in the chain is stubbed.
 """
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import datetime, timezone
 
@@ -81,6 +82,25 @@ def _build(settings, mock_db, mock_redis, opa: _MockOPA) -> DecisionOrchestrator
 
 def _executed_sql(fake_conn) -> list[str]:
     return [call.args[0] for call in fake_conn.execute.call_args_list]
+
+
+def _outbox_payload_hitl_id(fake_conn) -> str:
+    """hitl_id embedded in the decision.deferred_to_human outbox event payload."""
+    for call in fake_conn.execute.call_args_list:
+        sql = call.args[0]
+        if "INSERT INTO decision_outbox" in sql:
+            payload = json.loads(call.args[19])  # $19 = payload::jsonb
+            return payload["payload"]["hitl_id"]
+    raise AssertionError("no decision_outbox insert found")
+
+
+def _hitl_queue_row_hitl_id(fake_conn) -> str:
+    """hitl_id inserted as the ``hitl_queue.hitl_id`` column."""
+    for call in fake_conn.execute.call_args_list:
+        sql = call.args[0]
+        if "INSERT INTO hitl_queue" in sql:
+            return str(call.args[1])  # $1 = hitl_id
+    raise AssertionError("no hitl_queue insert found")
 
 
 # ---------------------------------------------------------------------------
@@ -180,3 +200,77 @@ async def test_opa_denial_rejects_and_persists(
     assert any("INSERT INTO decision_outbox" in s for s in sqls)
     assert not any("INSERT INTO hitl_queue" in s for s in sqls)
     mock_redis.xadd.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# HARD GATE: the decision.deferred_to_human event payload and the hitl_queue
+# row agree on hitl_id — a single id minted once by the orchestrator and
+# threaded through both writers (fixes the publisher.py/hitl_writer.py seam
+# where each mints its own uuid4() independently).
+# ---------------------------------------------------------------------------
+
+async def test_hitl_id_agrees_between_event_and_queue_row(
+    settings, mock_db, mock_redis, fake_conn
+):
+    opa = _MockOPA(allow=True)
+    orch = _build(settings, mock_db, mock_redis, opa)
+    ctx = _context({"approve": True, "reject": True, "campaign_id": "c1"})
+
+    result = await orch.process(ctx)
+    assert result.outcome is DecisionOutcome.DEFERRED_TO_HUMAN
+
+    event_hitl_id = _outbox_payload_hitl_id(fake_conn)
+    queue_hitl_id = _hitl_queue_row_hitl_id(fake_conn)
+    assert event_hitl_id == queue_hitl_id
+
+    # The governance stream event carries the same id too.
+    mock_redis.xadd.assert_awaited()
+    assert mock_redis.xadd.await_args.args[1]["hitl_queue_id"] == queue_hitl_id
+
+
+# ---------------------------------------------------------------------------
+# HARD GATE: redelivery of the same proposal reconstructs the same hitl_id
+# (deterministic uuid5 derivation) instead of minting a duplicate ticket.
+# ---------------------------------------------------------------------------
+
+async def test_hitl_id_stable_across_redelivery(
+    settings, mock_db, mock_redis, fake_conn
+):
+    """Same event_id → same decision_id → same hitl_id, end to end.
+
+    Redelivery of an at-least-once event reconstructs the identical hitl_id
+    (via the deterministic uuid5 derivation) rather than minting a new ticket;
+    ``check_duplicate_escalation`` then dedupes the second write, matching how
+    the real consumer handles a redelivered proposal.
+    """
+    from skylize.decision_engine.pipeline import decision_id_for, hitl_id_for
+
+    opa = _MockOPA(allow=True)
+    orch = _build(settings, mock_db, mock_redis, opa)
+    event_id = str(uuid.uuid4())
+    ctx = _context({"approve": True, "reject": True, "campaign_id": "c1"}).model_copy(
+        update={"event_id": event_id}
+    )
+
+    first = await orch.process(ctx)
+    first_event_hitl_id = _outbox_payload_hitl_id(fake_conn)
+    first_queue_hitl_id = _hitl_queue_row_hitl_id(fake_conn)
+    assert first_event_hitl_id == first_queue_hitl_id
+
+    expected_hitl_id = str(hitl_id_for(decision_id_for(event_id)))
+    assert first_queue_hitl_id == expected_hitl_id
+
+    # Simulate redelivery: the hitl_queue row from the first attempt is now
+    # visible as a pending duplicate.
+    fake_conn.execute.reset_mock()
+    fake_conn.fetchrow.return_value = {"hitl_id": first_queue_hitl_id}
+
+    second = await orch.process(ctx)
+
+    assert second.decision_id == first.decision_id == decision_id_for(event_id)
+    # The escalation write is deduplicated (no second hitl_queue insert)...
+    sqls_after_redelivery = _executed_sql(fake_conn)
+    assert not any("INSERT INTO hitl_queue" in s for s in sqls_after_redelivery)
+    # ...but the redelivered event still carries the SAME hitl_id it did the
+    # first time — the deterministic derivation, not a fresh mint.
+    assert _outbox_payload_hitl_id(fake_conn) == first_queue_hitl_id

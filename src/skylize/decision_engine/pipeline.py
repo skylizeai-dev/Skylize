@@ -62,10 +62,25 @@ log = logging.getLogger(__name__)
 # Deterministic namespace for decision_id derivation from event_id.
 _DECISION_NS = uuid5(NAMESPACE_URL, "skylize.decision_engine.decision_id")
 
+# Deterministic namespace for hitl_id derivation from decision_id. Kept distinct
+# from _DECISION_NS so a decision_id and its hitl_id never collide.
+_HITL_NS = uuid5(NAMESPACE_URL, "skylize.decision_engine.hitl_id")
+
 
 def decision_id_for(event_id: str) -> str:
     """Deterministically map an ``event_id`` to its ``decision_id`` (uuid5)."""
     return str(uuid5(_DECISION_NS, event_id))
+
+
+def hitl_id_for(decision_id: str) -> UUID:
+    """Deterministically map a ``decision_id`` to its HITL ticket id (uuid5).
+
+    Minted once by the orchestrator and threaded through both the
+    ``decision.deferred_to_human`` event payload and the ``hitl_queue`` row so
+    the two never disagree, and so a redelivered proposal — which reconstructs
+    the same ``decision_id`` — reconstructs the same ``hitl_id`` too.
+    """
+    return uuid5(_HITL_NS, decision_id)
 
 
 class _StageTerminal(Exception):  # noqa: N818 — internal control-flow signal, not an error
@@ -596,4 +611,4 @@ class EvaluationPipeline:
             log.debug("langfuse_flush_failed", exc_info=True)
 
 
-__all__ = ["EvaluationPipeline", "decision_id_for"]
+__all__ = ["EvaluationPipeline", "decision_id_for", "hitl_id_for"]
