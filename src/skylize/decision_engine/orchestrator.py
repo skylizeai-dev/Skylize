@@ -27,7 +27,7 @@ import logging
 
 from .hitl_writer import HITLQueueWriter
 from .models import DecisionContext, DecisionOutcome, DecisionResult
-from .pipeline import EvaluationPipeline
+from .pipeline import EvaluationPipeline, hitl_id_for
 from .publisher import DecisionEventPublisher
 
 log = logging.getLogger(__name__)
@@ -65,7 +65,18 @@ class DecisionOrchestrator:
         the consumer translates an exception into a retry / DLQ.
         """
         result = await self._pipeline.evaluate(context)
-        await self._publisher.publish_outcome(result)
+
+        # Minted once, upstream of both writers, so the decision.deferred_to_human
+        # event payload and the hitl_queue row always agree on the ticket id.
+        # Deterministic (uuid5 from decision_id) so a redelivery reconstructs the
+        # same hitl_id rather than minting a duplicate ticket.
+        hitl_id = (
+            hitl_id_for(result.decision_id)
+            if result.outcome in _ESCALATION_OUTCOMES
+            else None
+        )
+
+        await self._publisher.publish_outcome(result, hitl_id)
 
         if result.outcome in _ESCALATION_OUTCOMES:
             already = await self._hitl_writer.check_duplicate_escalation(
@@ -81,7 +92,7 @@ class DecisionOrchestrator:
                     },
                 )
             else:
-                await self._hitl_writer.write_escalation(context, result)
+                await self._hitl_writer.write_escalation(context, result, hitl_id)
 
         log.info(
             "decision_processed",

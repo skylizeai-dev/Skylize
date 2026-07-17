@@ -98,8 +98,14 @@ class HITLQueueWriter:
         self,
         context: DecisionContext,
         result: DecisionResult,
+        hitl_id: uuid.UUID | str,
     ) -> str:
         """Persist HITL record and emit governance event. Returns hitl_id.
+
+        ``hitl_id`` must be minted once by the caller (the orchestrator, via
+        ``pipeline.hitl_id_for``) and be the same id passed to
+        ``DecisionEventPublisher.publish_outcome`` for this result, so the
+        ``decision.deferred_to_human`` event and the ``hitl_queue`` row agree.
 
         Only call when result.outcome is DEFERRED_TO_HUMAN or ESCALATED.
         Postgres INSERT is the commit point — Redis failure does not trigger rollback.
@@ -109,7 +115,7 @@ class HITLQueueWriter:
                 f"write_escalation called with non-escalation outcome: {result.outcome!r}"
             )
 
-        hitl_id = str(uuid.uuid4())
+        hitl_id = str(hitl_id)
         now = datetime.now(timezone.utc)
         expiry_hours = getattr(self._settings, "hitl_expiry_hours", _HITL_EXPIRY_HOURS)
         expires_at = now + timedelta(hours=expiry_hours)

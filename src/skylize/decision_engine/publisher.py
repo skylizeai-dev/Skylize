@@ -238,7 +238,9 @@ class DecisionEventPublisher:
         self._db = db
         self._settings = settings
 
-    async def publish_outcome(self, result: DecisionResult) -> None:
+    async def publish_outcome(
+        self, result: DecisionResult, hitl_id: UUID | None = None
+    ) -> None:
         """Persist the decision and enqueue its event in one transaction.
 
         Validation happens before any I/O; an invalid outbound payload raises and
@@ -246,6 +248,10 @@ class DecisionEventPublisher:
         ONLY when the ``decisions`` row is newly inserted (``ON CONFLICT
         (decision_id) DO NOTHING``), so a redelivered proposal — which maps to the
         same deterministic ``decision_id`` — never enqueues a duplicate event.
+
+        ``hitl_id``, when the outcome is DEFERRED_TO_HUMAN, must be the same id
+        the orchestrator passes to ``HITLQueueWriter.write_escalation`` — minted
+        once upstream so the event payload and the ``hitl_queue`` row agree.
         """
         event_type = _OUTCOME_TO_EVENT_TYPE.get(result.outcome)
         if event_type is None:
@@ -254,7 +260,7 @@ class DecisionEventPublisher:
             )
 
         payload = await self._validate_outbound(
-            event_type, await self._build_outbound_payload(result)
+            event_type, await self._build_outbound_payload(result, hitl_id)
         )
         department = _OUTCOME_TO_DEPARTMENT[result.outcome]
         stream_key = f"evt:{result.tenant_id}:{department}"
@@ -412,7 +418,9 @@ class DecisionEventPublisher:
 
         return _strip_none(payload)
 
-    async def _build_outbound_payload(self, result: DecisionResult) -> dict:
+    async def _build_outbound_payload(
+        self, result: DecisionResult, hitl_id: UUID | None = None
+    ) -> dict:
         """Build the outbound payload dict (before validation)."""
         outcome = result.outcome
 
@@ -448,6 +456,10 @@ class DecisionEventPublisher:
 
         # DEFERRED_TO_HUMAN uses decision.deferred_to_human schema
         if outcome == DecisionOutcome.DEFERRED_TO_HUMAN:
+            if hitl_id is None:
+                raise DecisionEngineError(
+                    "hitl_id is required to build a decision.deferred_to_human payload"
+                )
             event = DecisionDeferredToHuman(
                 tenant_id=result.tenant_id,
                 partition_key=result.decision_id,
@@ -455,7 +467,7 @@ class DecisionEventPublisher:
                 correlation_id=_extract_correlation_id(result),
                 payload=DecisionDeferredToHuman.Payload(
                     decision_id=UUID(result.decision_id),
-                    hitl_id=uuid4(),
+                    hitl_id=hitl_id,
                     trigger_reason=result.final_reason,
                     routed_to="hitl_queue",
                 ),

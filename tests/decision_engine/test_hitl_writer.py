@@ -40,7 +40,7 @@ async def test_write_escalation_inserts_all_required_fields(settings):
     ctx = make_decision_context()
     result = make_decision_result(outcome=DecisionOutcome.DEFERRED_TO_HUMAN)
 
-    hitl_id = await writer.write_escalation(ctx, result)
+    hitl_id = await writer.write_escalation(ctx, result, uuid.uuid4())
 
     conn.execute.assert_awaited_once()
     sql, *args = conn.execute.call_args.args
@@ -62,7 +62,7 @@ async def test_governance_event_emitted_after_insert(settings):
     ctx = make_decision_context()
     result = make_decision_result(outcome=DecisionOutcome.DEFERRED_TO_HUMAN)
 
-    await writer.write_escalation(ctx, result)
+    await writer.write_escalation(ctx, result, uuid.uuid4())
 
     redis.xadd.assert_awaited_once()
     stream_key = redis.xadd.call_args.args[0]
@@ -107,7 +107,7 @@ async def test_postgres_failure_does_not_emit_redis(settings):
     result = make_decision_result(outcome=DecisionOutcome.DEFERRED_TO_HUMAN)
 
     with pytest.raises(asyncpg.PostgresError):
-        await writer.write_escalation(ctx, result)
+        await writer.write_escalation(ctx, result, uuid.uuid4())
 
     redis.xadd.assert_not_awaited()
 
@@ -131,7 +131,7 @@ async def test_expires_at_48h_from_now(settings):
     ctx = make_decision_context()
     result = make_decision_result(outcome=DecisionOutcome.DEFERRED_TO_HUMAN)
 
-    await writer.write_escalation(ctx, result)
+    await writer.write_escalation(ctx, result, uuid.uuid4())
 
     now_after = datetime.now(timezone.utc)
 
@@ -156,7 +156,7 @@ async def test_escalated_outcome_accepted(settings):
     ctx = make_decision_context()
     result = make_decision_result(outcome=DecisionOutcome.ESCALATED)
 
-    hitl_id = await writer.write_escalation(ctx, result)
+    hitl_id = await writer.write_escalation(ctx, result, uuid.uuid4())
 
     conn.execute.assert_awaited_once()
     assert hitl_id
@@ -172,7 +172,7 @@ async def test_non_eligible_outcome_raises_value_error(settings):
     result = make_decision_result(outcome=DecisionOutcome.APPROVED)
 
     with pytest.raises(ValueError, match="non-escalation outcome"):
-        await writer.write_escalation(ctx, result)
+        await writer.write_escalation(ctx, result, uuid.uuid4())
 
     conn.execute.assert_not_awaited()
     redis.xadd.assert_not_awaited()
@@ -191,5 +191,28 @@ async def test_redis_failure_after_insert_does_not_raise(settings):
     result = make_decision_result(outcome=DecisionOutcome.DEFERRED_TO_HUMAN)
 
     # Should not raise — Redis failure is warning-only
-    hitl_id = await writer.write_escalation(ctx, result)
+    hitl_id = await writer.write_escalation(ctx, result, uuid.uuid4())
     assert hitl_id
+
+
+# ---------------------------------------------------------------------------
+# write_escalation uses the caller-supplied hitl_id verbatim (single-mint
+# contract) — it does not mint its own, and returns + emits the same value.
+# ---------------------------------------------------------------------------
+
+async def test_write_escalation_uses_supplied_hitl_id(settings):
+    writer, conn, redis = _writer(settings)
+    ctx = make_decision_context()
+    result = make_decision_result(outcome=DecisionOutcome.DEFERRED_TO_HUMAN)
+    supplied_hitl_id = uuid.uuid4()
+
+    returned_hitl_id = await writer.write_escalation(ctx, result, supplied_hitl_id)
+
+    assert returned_hitl_id == str(supplied_hitl_id)
+
+    sql, *args = conn.execute.call_args.args
+    inserted_hitl_id = args[0]
+    assert inserted_hitl_id == supplied_hitl_id
+
+    fields = redis.xadd.call_args.args[1]
+    assert fields["hitl_queue_id"] == str(supplied_hitl_id)

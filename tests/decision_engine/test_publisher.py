@@ -54,10 +54,10 @@ _ARG_EVENT_TYPE = 18
 _ARG_OUTBOX_ROW_ID = 20
 
 
-async def _publish(settings, outcome, tenant_id="acme"):
+async def _publish(settings, outcome, tenant_id="acme", hitl_id=None):
     pub, conn = _publisher(settings)
     result = make_decision_result(outcome=outcome, tenant_id=tenant_id)
-    await pub.publish_outcome(result)
+    await pub.publish_outcome(result, hitl_id)
     conn.execute.assert_awaited_once()
     return conn.execute.call_args.args
 
@@ -83,9 +83,33 @@ async def test_rejected_writes_rejected_event(settings):
 
 
 async def test_deferred_writes_deferred_event(settings):
-    args = await _publish(settings, DecisionOutcome.DEFERRED_TO_HUMAN)
+    args = await _publish(
+        settings, DecisionOutcome.DEFERRED_TO_HUMAN, hitl_id=uuid.uuid4()
+    )
     assert args[_ARG_EVENT_TYPE] == "decision.deferred_to_human"
     assert args[_ARG_STREAM_KEY].endswith(":decision")
+
+
+async def test_deferred_without_hitl_id_raises(settings):
+    pub, conn = _publisher(settings)
+    result = make_decision_result(outcome=DecisionOutcome.DEFERRED_TO_HUMAN)
+
+    with pytest.raises(DecisionEngineError):
+        await pub.publish_outcome(result)
+
+    conn.execute.assert_not_awaited()
+
+
+async def test_deferred_event_payload_carries_supplied_hitl_id(settings):
+    pub, conn = _publisher(settings)
+    result = make_decision_result(outcome=DecisionOutcome.DEFERRED_TO_HUMAN)
+    supplied_hitl_id = uuid.uuid4()
+
+    await pub.publish_outcome(result, supplied_hitl_id)
+
+    args = conn.execute.call_args.args
+    payload_json = args[19]  # $19 = payload::jsonb
+    assert f'"hitl_id": "{supplied_hitl_id}"' in payload_json
 
 
 async def test_escalated_routes_to_governance_stream(settings):
@@ -112,7 +136,7 @@ async def test_outbox_row_id_is_redis_stream_id(settings):
 async def test_invalid_payload_raises_before_io(settings):
     pub, conn = _publisher(settings)
 
-    async def _bad_payload(result):
+    async def _bad_payload(result, hitl_id=None):
         return {"bad": "data"}  # missing required decision_id etc.
 
     pub._build_outbound_payload = _bad_payload
