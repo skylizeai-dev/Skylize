@@ -1,7 +1,12 @@
 """
 The Decision Engine — turns agent *intent* into authorized *outcomes*.
 
-The only component permitted to emit terminal `decision.*` events. It consumes
+The development and fallback Decision Engine implementation. When
+`SKYLIZE_DECISION_ENGINE` selects "inline" (see ADR-0004,
+docs/architecture/adr/0004-opa-production-arbiter.md), this is the only
+component permitted to emit terminal `decision.*` events in that environment;
+in production the OPA/Rego engine (skylize.decision_engine) holds that role
+instead. It consumes
 proposals off the bus, runs them through six deterministic evaluation stages
 (authority → policy → scoring → capital → conflict → HITL), and emits exactly
 one terminal outcome per proposal, mirrored to the audit trail.

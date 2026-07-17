@@ -33,7 +33,7 @@ The consistency anchor for the entire build. One line per file written, in order
 
 ## Wave 2 — Decision Engine
 
-- `docs/04_decision_engine/decision_engine.md` — The intent→outcome subsystem; six evaluation stages (authority, OPA policy, scoring, capital, conflict, HITL); determinism/explainability; failure handling; the only emitter of terminal DecisionEvents.
+- `docs/04_decision_engine/decision_engine.md` — The intent→outcome subsystem; six evaluation stages (authority, OPA policy, scoring, capital, conflict, HITL); determinism/explainability; failure handling; per-environment, flag-selected sole emitter of terminal DecisionEvents (ADR-0004: OPA/Rego in production, inline evaluator in development/fallback).
 - `docs/04_decision_engine/decision_flow.md` — Step-by-step control flow with all branches (approve/reject/escalate/conflict/HITL), escalation routing, conflict resolution order, HITL pause/resume, and delivery semantics (idempotency, ordering, retry/DLQ).
 - `docs/04_decision_engine/guardrails.md` — OPA/Rego policy engine behind the Decision Engine; token∩policy model; policy classes; default-deny rule shape; evaluation contract; versioning/testing/audit; distributed policy ownership.
 - `docs/04_decision_engine/scoring_models.md` — Deterministic, explainable, versioned scoring (creative/allocation/lead/vendor/security); Score structure with feature contributions; MVP linear → governed learned models; tenant isolation.

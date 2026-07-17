@@ -212,8 +212,13 @@ async def build_container(settings: Settings | None = None) -> Container:
 
     closers.append(_stop_subscriber)
 
-    # Decision Engine (business-action authz; the ONLY emitter of terminal
-    # `decision.*` events). Wired behind the CapitalRepository /
+    # Decision Engine (business-action authz). This is the inline evaluator —
+    # per SKYLIZE_DECISION_ENGINE (see ADR-0004,
+    # docs/architecture/adr/0004-opa-production-arbiter.md) it is the sole
+    # emitter of terminal `decision.*` events in dev/fallback environments;
+    # the OPA/Rego engine (skylize.decision_engine) holds that role in
+    # production once its consumer transport is rebuilt onto the live
+    # EventBus. Wired behind the CapitalRepository /
     # ProcessedEventStore ports — durable Pg stores on the postgres backend
     # (budget_ledger + decision_processed_events, migration 0011), in-memory
     # defaults on the memory backend. With no configured orgs it is wired but
