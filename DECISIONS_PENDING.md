@@ -89,6 +89,16 @@ See SESSION_A_REPORT.md. New judgment calls from that session:
 - What I did instead: left the 3 files dirty; excluded them from every commit.
 - Files: src/skylize.egg-info/*
 
+## Pre-production secret rotation (DEFERRED — owner decision 2026-07-XX)
+All Railway production secrets were printed into a Claude Code transcript via
+`railway variables --json` (T25). Risk accepted for now: self-demo environment,
+no real customer data, no live traffic.
+HARD REQUIREMENT before first production/customer use: regenerate ALL secrets
+from clean — especially SKYLIZE_GOVERNANCE_SIGNING_KEY_PEM (platform root signing
+key, not customer-provided). Customer API keys are per-org via credential vault,
+out of scope for this rotation.
+Do NOT run `railway variables --json` again — inspect names only.
+
 ## [NOTE] Temporal worker bootstrap still absent (not in queue — flagging)
 - Tasks T3/T4 delivered the judge, the repo impl, and the migration, but
   nothing in src/ constructs WorkflowActivities or runs a Temporal worker yet.
