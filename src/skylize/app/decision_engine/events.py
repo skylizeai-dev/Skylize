@@ -20,6 +20,7 @@ from uuid import UUID, uuid5
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ...schemas.agents.safety import SafetyVerdictOut
 from ...schemas.base import AuthorityLevelLiteral, BaseEvent
 from ...schemas.events.creative import CreativeReviewRequested
 from ...schemas.events.sales import (
@@ -39,6 +40,11 @@ KNOWN_ACTION_KINDS: frozenset[str] = frozenset(
 
 DecisionOutcome = Literal["approved", "rejected", "deferred_to_human"]
 
+# The rules the conflict resolver may apply, in precedence order. `safety_veto`
+# outranks authority/recency: a safety-rejected proposal cannot win a conflict
+# whatever its authority. `escalated` never reaches the wire (its winner is None).
+RuleApplied = Literal["authority", "recency", "safety_veto", "escalated"]
+
 
 def decision_id_for(proposal_id: UUID) -> UUID:
     """Deterministic decision_id derived from the source proposal id."""
@@ -48,6 +54,40 @@ def decision_id_for(proposal_id: UUID) -> UUID:
 def hitl_id_for(proposal_id: UUID) -> UUID:
     """Deterministic HITL ticket id derived from the source proposal id."""
     return uuid5(_DECISION_NS, f"hitl:{proposal_id}")
+
+
+class SecurityVerdict(BaseModel):
+    """A Safety Suite verdict carried onto a proposal as a typed sibling field.
+
+    A safety signal is load-bearing — it can veto a conflict — so it gets its own
+    field rather than being smuggled through the free-form `metadata` bag.
+    `reject` is the agent's own safe/unsafe call inverted; `severity` and
+    `reason` are carried verbatim for the audit trail. Deciding *which*
+    severities should reject is policy and lives in the evaluator/guardrails, not
+    here — this model only transports the verdict.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    source_agent_id: str
+    reject: bool
+    severity: str  # mirrors SafetyVerdictOut.severity ('none'..'critical')
+    reason: str
+
+    @classmethod
+    def from_safety_verdict(
+        cls, verdict: SafetyVerdictOut, *, source_agent_id: str
+    ) -> SecurityVerdict:
+        """Map a Safety Suite `SafetyVerdictOut` onto the proposal carrier.
+
+        `reject` is the direct inverse of the agent's `safe` flag — a field
+        rename, not a threshold (applying a threshold would be policy)."""
+        return cls(
+            source_agent_id=source_agent_id,
+            reject=not verdict.safe,
+            severity=verdict.severity,
+            reason="; ".join(verdict.findings) if verdict.findings else "",
+        )
 
 
 class DecisionProposal(BaseModel):
@@ -72,6 +112,10 @@ class DecisionProposal(BaseModel):
     occurred_at: datetime
     source_event_id: UUID
     source_type: str
+    # Typed safety signal from the Safety Suite. `None` means "no safety signal
+    # present" — which is NOT an implicit allow and NOT an implicit reject; only
+    # a verdict with reject=True vetoes (see DecisionEvaluator._resolve).
+    security_verdict: SecurityVerdict | None = None
     # Free-form signals the HITL / policy stages match against (brand_sensitive,
     # security_severity, confidence, irreversible, …). Hashes only ever leave the
     # engine via the audit trail.
@@ -168,7 +212,7 @@ class Conflict(BaseModel):
 
     partition_key: str
     proposal_ids: list[UUID]
-    rule_applied: str  # 'authority' | 'recency' | 'escalated'
+    rule_applied: RuleApplied
     winning_proposal_id: UUID | None
 
 

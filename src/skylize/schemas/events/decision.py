@@ -97,6 +97,9 @@ class DecisionConflictResolved(BaseEvent):
         model_config = ConfigDict(extra="forbid")
         partition_key: str
         winning_proposal_id: UUID
-        rule_applied: str  # 'authority' | 'safety_veto' | 'policy' | 'escalated'
+        # A resolved conflict always has a winner, so `escalated` (winner=None)
+        # never reaches the wire — but it is kept in the enum for parity with the
+        # engine's Conflict.rule_applied domain type.
+        rule_applied: Literal["authority", "recency", "safety_veto", "escalated"]
 
     payload: Payload
