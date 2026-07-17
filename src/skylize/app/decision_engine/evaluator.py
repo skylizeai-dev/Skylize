@@ -47,6 +47,7 @@ _RANK: dict[AuthorityLevel, int] = {
 }
 
 # Stage names (mirrored into the emitted DecisionEvaluated record).
+STAGE_SECURITY = "safety_veto"
 STAGE_AUTHORITY = "authority_check"
 STAGE_POLICY = "opa_policy"
 STAGE_SCORING = "scoring"
@@ -99,6 +100,18 @@ class DecisionEvaluator:
         except AgentNotRegistered as exc:
             stages.append(STAGE_AUTHORITY)
             return self._reject(proposal, None, stages, STAGE_AUTHORITY, [str(exc)])
+
+        # 0. safety veto (absolute) ------------------------------------------
+        # A rejecting safety verdict blocks the proposal unconditionally, ahead
+        # of every other stage and regardless of whether a rival exists on the
+        # partition. Only reject=True vetoes; absent verdict / reject=False falls
+        # through to normal evaluation (absence is 'no safety signal', not an
+        # implicit reject). This is the PRIMARY gate; the conflict-scoped rule in
+        # _resolve is a secondary guard it short-circuits before reaching.
+        sv = self.safety_veto_check(proposal, contract)
+        if sv.terminal:
+            stages.append(STAGE_SECURITY)
+            return self._terminate(proposal, contract, stages, STAGE_SECURITY, sv)
 
         # 1. authority --------------------------------------------------------
         stages.append(STAGE_AUTHORITY)
@@ -154,6 +167,29 @@ class DecisionEvaluator:
             conflicts=s.conflicts,  # any conflict the proposal *won*
             policy_version=POLICY_VERSION,
             authority_level=contract.authority_level,
+        )
+
+    # -- stage 0 (safety veto) ---------------------------------------------
+    def safety_veto_check(self, proposal: DecisionProposal, contract: AgentContract) -> _Stage:
+        """Absolute safety gate (guardrails.md). A security verdict that rejects
+        blocks the proposal unconditionally — independent of authority, spend, or
+        any rival on the partition — deferring to a human to confirm or override
+        (a reject may be a false positive; a human should see it). Absence of a
+        verdict (None) or reject=False is NOT a veto; normal evaluation proceeds.
+        Only reject=True vetoes, and it does so regardless of severity."""
+        verdict = proposal.security_verdict
+        if verdict is None or not verdict.reject:
+            return _PASS
+        detail = f": {verdict.reason}" if verdict.reason else ""
+        return _Stage(
+            terminal=True,
+            outcome="deferred_to_human",
+            reasons=[
+                f"safety_veto: security verdict rejected by {verdict.source_agent_id} "
+                f"(severity={verdict.severity}){detail}"
+            ],
+            hitl_trigger=HumanInLoopTrigger.SECURITY_SEVERITY_HIGH.value,
+            routed_to=_escalate_to(contract),
         )
 
     # -- stage 1 ------------------------------------------------------------
@@ -306,10 +342,12 @@ class DecisionEvaluator:
         contract: AgentContract,
         incumbent: _ProposalRecord,
     ) -> tuple[UUID | None, RuleApplied]:
-        # 0. safety veto — a safety-rejected proposal cannot win a conflict,
-        #    whatever its authority or recency (guardrails.md). Absence of a
-        #    verdict is NOT a veto and NOT an implicit allow; only reject=True
-        #    vetoes, and it does so regardless of severity.
+        # 0. safety veto (secondary, in-conflict guard) — the dedicated
+        #    safety_veto_check stage is the PRIMARY, unconditional gate and
+        #    short-circuits evaluate() before conflict resolution, so in the full
+        #    pipeline a rejecting verdict never reaches here. Retained as
+        #    defense-in-depth: a safety-rejected proposal can never win a conflict
+        #    even if the stage ordering is ever changed. Absence is NOT a veto.
         verdict = proposal.security_verdict
         if verdict is not None and verdict.reject:
             return incumbent.proposal_id, "safety_veto"

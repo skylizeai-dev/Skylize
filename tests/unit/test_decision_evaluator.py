@@ -12,7 +12,9 @@ from skylize.app.decision_engine.evaluator import (
     STAGE_AUTHORITY,
     STAGE_CONFLICT,
     STAGE_POLICY,
+    STAGE_SECURITY,
     DecisionEvaluator,
+    _ProposalRecord,
 )
 from skylize.app.decision_engine.events import DecisionProposal, SecurityVerdict
 from skylize.contracts.base import HumanInLoopTrigger
@@ -228,10 +230,35 @@ async def test_conflict_unresolvable_escalates_to_human() -> None:
     assert result.conflicts[0].winning_proposal_id is None
 
 
-# -- stage 5: safety veto (outranks authority + recency) -------------------
-async def test_security_veto_beats_authority() -> None:
-    # Challenger has HIGHER authority (director vs worker) and would win on
-    # authority — but its safety verdict rejects, so it loses via safety_veto.
+# -- stage 0: absolute safety veto (dedicated stage) -----------------------
+async def test_security_veto_no_rival_still_blocks() -> None:
+    # The core of the dedicated stage: a reject=True proposal with NO rival on
+    # the partition is still blocked. The conflict-scoped rule would never fire
+    # here (no incumbent) — the absolute stage does.
+    ev = _evaluator()
+    result = await ev.evaluate(
+        make_proposal(agent="copy_director", partition="brief:v0", security=_reject())
+    )
+    assert result.outcome == "deferred_to_human"
+    assert result.stage_failed_at == STAGE_SECURITY
+    assert result.stages_completed == [STAGE_SECURITY]
+    assert not result.conflicts  # never reached conflict resolution
+    assert any("safety_veto" in r for r in result.reasons)
+
+
+async def test_security_veto_defers_to_human_with_routing() -> None:
+    result = await _evaluator().evaluate(
+        make_proposal(agent="copy_director", partition="brief:vr", security=_reject("bad"))
+    )
+    assert result.outcome == "deferred_to_human"
+    assert result.hitl_trigger == HumanInLoopTrigger.SECURITY_SEVERITY_HIGH.value
+    assert result.routed_to  # escalated up the chain to a human
+
+
+async def test_security_veto_beats_authority_before_conflict() -> None:
+    # Challenger has HIGHER authority (director vs worker) and would win the
+    # conflict on authority — but the absolute veto stage fires first, ahead of
+    # conflict resolution, so it is deferred regardless.
     ev = _evaluator()
     incumbent = make_proposal(agent="hook_generator_agent", partition="brief:v1", occurred=T0)
     challenger = make_proposal(
@@ -239,14 +266,13 @@ async def test_security_veto_beats_authority() -> None:
     )
     await ev.evaluate(incumbent)
     result = await ev.evaluate(challenger)
-    assert result.outcome == "rejected"
-    assert result.stage_failed_at == STAGE_CONFLICT
-    assert result.conflicts[0].rule_applied == "safety_veto"
-    assert result.conflicts[0].winning_proposal_id == incumbent.proposal_id
+    assert result.outcome == "deferred_to_human"
+    assert result.stage_failed_at == STAGE_SECURITY
+    assert not result.conflicts  # short-circuited before conflict resolution
 
 
-async def test_security_veto_beats_recency() -> None:
-    # Equal authority, challenger is newer (would win on recency) — vetoed anyway.
+async def test_security_veto_beats_recency_before_conflict() -> None:
+    # Equal authority, challenger is newer (would win on recency) — vetoed first.
     ev = _evaluator()
     incumbent = make_proposal(agent="copy_director", partition="brief:v2", occurred=T0)
     challenger = make_proposal(
@@ -254,9 +280,25 @@ async def test_security_veto_beats_recency() -> None:
     )
     await ev.evaluate(incumbent)
     result = await ev.evaluate(challenger)
-    assert result.outcome == "rejected"
-    assert result.conflicts[0].rule_applied == "safety_veto"
-    assert result.conflicts[0].winning_proposal_id == incumbent.proposal_id
+    assert result.outcome == "deferred_to_human"
+    assert result.stage_failed_at == STAGE_SECURITY
+
+
+def test_resolve_secondary_guard_vetoes_in_conflict() -> None:
+    # Defense-in-depth: even called directly (bypassing the stage ordering), the
+    # conflict resolver refuses to let a safety-rejected proposal win.
+    ev = _evaluator()
+    contract = MVP_REGISTRY.resolve("copy_director")
+    challenger = make_proposal(agent="copy_director", occurred=T1, security=_reject())
+    incumbent = _ProposalRecord(
+        proposal_id=uuid4(),
+        agent_id="hook_generator_agent",
+        authority_level="worker",
+        occurred_at=T0,
+    )
+    winner, rule = ev._resolve(challenger, contract, incumbent)
+    assert rule == "safety_veto"
+    assert winner == incumbent.proposal_id
 
 
 async def test_non_rejecting_verdict_does_not_veto() -> None:
