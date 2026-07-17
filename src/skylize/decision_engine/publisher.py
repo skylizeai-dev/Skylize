@@ -1,10 +1,16 @@
-"""Decision event publisher — writes decisions to Postgres then publishes to Redis.
+"""Decision event publisher — transactional outbox producer (no direct Redis).
 
 Write order per publish_outcome():
-  1. Validate outbound payload (Pydantic v2) — raise on invalid, never publish garbage.
-  2. INSERT into ``decisions`` (source of truth).
-  3. XADD to Redis stream.  If Redis fails after step 2: log + dead-letter the
-     event payload to ``evt:dlq:decision_engine``; do NOT rollback Postgres.
+  1. Validate outbound payload (Pydantic v2) — raise on invalid, never enqueue garbage.
+  2. In ONE ``tenant_session`` transaction, INSERT the ``decisions`` row (source
+     of truth) AND a ``decision_outbox`` row (migration 0009). The outbox row is
+     written by the same statement (a CTE) and only when the decision row is
+     newly inserted, so a redelivered proposal never enqueues a duplicate event.
+
+The OutboxPoller relays unpublished outbox rows to Redis and stamps
+``published_at`` — this publisher never touches Redis. That is the whole point
+of the outbox: one commit point, no dual-write consistency gap between Postgres
+and the stream.
 
 mirror_audit_step() is called per pipeline stage. Uses the pool (no new
 connection per call) and serialises step fields into the audit_log columns
@@ -15,12 +21,12 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 import asyncpg
-import redis.asyncio as aioredis
 from pydantic import ValidationError
 
 from skylize.decision_engine.config import DecisionEngineSettings
@@ -57,23 +63,36 @@ _OUTCOME_TO_DB: dict[DecisionOutcome, str] = {
     DecisionOutcome.ESCALATED: "deferred_to_human",
 }
 
+# outcome → owning department channel → stream key ``evt:{tenant}:{department}``.
+# Terminal decision.* events ride the canonical ``decision`` channel (matching
+# the inline engine, which publishes DecisionApproved/Rejected/DeferredToHuman
+# with department="decision"). The escalation event rides ``governance``, the
+# same channel HITLQueueWriter emits its escalation to.
+_OUTCOME_TO_DEPARTMENT: dict[DecisionOutcome, str] = {
+    DecisionOutcome.APPROVED: "decision",
+    DecisionOutcome.REJECTED: "decision",
+    DecisionOutcome.DEFERRED_TO_HUMAN: "decision",
+    DecisionOutcome.ESCALATED: "governance",
+}
+
 
 def _strip_none(d: dict) -> dict:
     return {k: v for k, v in d.items() if v is not None}
 
 
-def _flatten_for_stream(payload: dict, prefix: str = "") -> dict[str, str]:
-    """Recursively flatten nested dict to dot-separated string pairs for XADD."""
-    out: dict[str, str] = {}
-    for k, v in payload.items():
-        full_key = f"{prefix}.{k}" if prefix else k
-        if isinstance(v, dict):
-            out.update(_flatten_for_stream(v, full_key))
-        elif isinstance(v, list):
-            out[full_key] = json.dumps(v)
-        else:
-            out[full_key] = str(v) if v is not None else ""
-    return out
+def _new_outbox_row_id() -> tuple[str, UUID]:
+    """Return ``(outbox_row_id, id)`` for a new ``decision_outbox`` row.
+
+    ``outbox_row_id`` format ``{unix_ms}-{last_4_digits_of_uuid_int}`` (migration
+    0009): a monotonic-enough, collision-resistant Redis stream id computed at
+    INSERT time and passed verbatim to XADD by the OutboxPoller. The returned
+    UUID is stored in the ``id`` column and supplies the sequence component, so
+    the two stay consistent.
+    """
+    row_uuid = uuid4()
+    seq = f"{row_uuid.int % 10000:04d}"
+    unix_ms = int(time.time() * 1000)
+    return f"{unix_ms}-{seq}", row_uuid
 
 
 def _audit_result_str(step: EvaluationStepRecord) -> str:
@@ -202,28 +221,31 @@ def _build_score_json(result: DecisionResult) -> dict | None:
 
 
 class DecisionEventPublisher:
-    """Publishes decision outcomes: Postgres write (source of truth) then Redis XADD.
+    """Persists decision outcomes and enqueues their events via the outbox.
 
-    Redis is not the source of truth. If XADD fails after the Postgres INSERT
-    the event is dead-lettered to ``evt:dlq:decision_engine``; the decision row
-    is not rolled back.
+    Postgres is the single source of truth AND the single commit point: the
+    ``decisions`` row and the ``decision_outbox`` row are written in one
+    transaction. Redis is never touched here — the OutboxPoller relays the
+    outbox row and stamps ``published_at``. There is therefore no dual-write
+    consistency gap and no dead-letter path on this side.
     """
 
     def __init__(
         self,
-        redis: aioredis.Redis,
         db: "Database",
         settings: DecisionEngineSettings,
     ) -> None:
-        self._redis = redis
         self._db = db
         self._settings = settings
 
     async def publish_outcome(self, result: DecisionResult) -> None:
-        """Write decision to Postgres, then XADD to Redis stream.
+        """Persist the decision and enqueue its event in one transaction.
 
-        Validation happens before any I/O. Postgres write is the commit point.
-        Redis failure after Postgres commit → dead-letter + log, no rollback.
+        Validation happens before any I/O; an invalid outbound payload raises and
+        nothing is written. The single CTE writes the ``decision_outbox`` row
+        ONLY when the ``decisions`` row is newly inserted (``ON CONFLICT
+        (decision_id) DO NOTHING``), so a redelivered proposal — which maps to the
+        same deterministic ``decision_id`` — never enqueues a duplicate event.
         """
         event_type = _OUTCOME_TO_EVENT_TYPE.get(result.outcome)
         if event_type is None:
@@ -231,19 +253,31 @@ class DecisionEventPublisher:
                 f"No event_type mapping for outcome {result.outcome!r}"
             )
 
-        payload = await self._validate_outbound(event_type, await self._build_outbound_payload(result))
-        stream_key = f"evt:{result.tenant_id}:decisions"
+        payload = await self._validate_outbound(
+            event_type, await self._build_outbound_payload(result)
+        )
+        department = _OUTCOME_TO_DEPARTMENT[result.outcome]
+        stream_key = f"evt:{result.tenant_id}:{department}"
+        outbox_row_id, outbox_id = _new_outbox_row_id()
 
         async with self._db.tenant_session(result.tenant_id) as conn:
             await conn.execute(
                 """
-                INSERT INTO decisions (
-                    decision_id, org_id, correlation_id, causation_event_id,
-                    partition_key, proposing_agent, authority_level, action_kind,
-                    proposal_json, outcome, outcome_reason, score_json,
-                    governance_token_id, resolved_at, created_at
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-                ON CONFLICT (decision_id) DO NOTHING
+                WITH new_decision AS (
+                    INSERT INTO decisions (
+                        decision_id, org_id, correlation_id, causation_event_id,
+                        partition_key, proposing_agent, authority_level, action_kind,
+                        proposal_json, outcome, outcome_reason, score_json,
+                        governance_token_id, resolved_at, created_at
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+                    ON CONFLICT (decision_id) DO NOTHING
+                    RETURNING decision_id
+                )
+                INSERT INTO decision_outbox (
+                    id, tenant_id, stream_key, event_type, payload, outbox_row_id
+                )
+                SELECT $16, $2, $17, $18, $19::jsonb, $20
+                FROM new_decision
                 """,
                 UUID(result.decision_id),
                 result.tenant_id,
@@ -260,35 +294,22 @@ class DecisionEventPublisher:
                 _extract_governance_token_id(result),
                 result.evaluated_at,
                 result.evaluated_at,
+                outbox_id,
+                stream_key,
+                event_type,
+                json.dumps(payload, default=str),
+                outbox_row_id,
             )
-
-        # Postgres committed — Redis failure must not roll it back
-        fields = _flatten_for_stream(payload)
-        fields["event_type"] = event_type
-        try:
-            await self._redis.xadd(stream_key, fields)
-        except Exception as exc:
-            log.error(
-                "decision_redis_publish_failed_dead_lettering",
-                extra={
-                    "decision_id": result.decision_id,
-                    "tenant_id": result.tenant_id,
-                    "event_type": event_type,
-                    "error": str(exc),
-                },
-                exc_info=True,
-            )
-            await self._dead_letter(result.tenant_id, event_type, payload, str(exc))
-            return
 
         log.info(
-            "decision_published",
+            "decision_persisted_to_outbox",
             extra={
                 "decision_id": result.decision_id,
                 "tenant_id": result.tenant_id,
                 "outcome": result.outcome.value,
                 "event_type": event_type,
                 "stream_key": stream_key,
+                "outbox_row_id": outbox_row_id,
             },
         )
 
@@ -454,28 +475,6 @@ class DecisionEventPublisher:
             "authority_level": _extract_authority_level(result),
             "escalated_at": result.evaluated_at.isoformat(),
         }
-
-    async def _dead_letter(
-        self, tenant_id: str, event_type: str, payload: dict, error: str
-    ) -> None:
-        dlq_key = self._settings.redis_dlq_stream
-        try:
-            await self._redis.xadd(
-                dlq_key,
-                {
-                    "tenant_id": tenant_id,
-                    "event_type": event_type,
-                    "payload": json.dumps(payload, default=str),
-                    "error": error,
-                    "dead_lettered_at": datetime.now(timezone.utc).isoformat(),
-                },
-            )
-        except Exception:
-            log.error(
-                "dead_letter_xadd_failed",
-                extra={"tenant_id": tenant_id, "event_type": event_type},
-                exc_info=True,
-            )
 
 
 def _safe_uuid(value: object) -> UUID:

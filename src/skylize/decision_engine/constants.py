@@ -2,28 +2,47 @@ from __future__ import annotations
 
 from .models import DecisionOutcome, RiskBand
 
-SUBSCRIBED_STREAMS: list[str] = [
+# The event types the engine is authorized to act on — the REAL wire `type`
+# strings from the versioned schemas (schemas/events/sales.py, creative.py),
+# each also present in EVENT_REGISTRY. These replace the earlier placeholders
+# "sales.proposal_submitted" / "sales.budget_requested", which were never real
+# event types (2 of the 3 did not exist in the schema at all).
+SUBSCRIBED_EVENT_TYPES: list[str] = [
     "creative.review_requested",
-    "sales.proposal_submitted",
-    "sales.budget_requested",
+    "sales.campaign_proposed",
+    "sales.budget_reallocation_proposed",
 ]
+
+# Redis stream keys the consumer reads.
+#
+# TRANSPORT MISMATCH (deferred rebuild): the live RedisEventBus keys every event
+# as `evt:{tenant}:{department}`, per-tenant (events/bus.py) — NOT by event-type
+# name, and the engine does not know the tenant set a priori. Consuming the real
+# bus therefore requires rebuilding DecisionEngineConsumer onto the EventBus port
+# with a per-(org, department) subscription, exactly as the canonical inline
+# engine already does (app/decision_engine/engine.py). Until that lands the
+# consumer is NOT started at the composition root; these logical identifiers only
+# stand in for the still-isolated consumer unit tests. Keying and the AUTHORITY
+# allow-list are now separate concerns — this list no longer doubles as the
+# event-type vocabulary (see SUBSCRIBED_EVENT_TYPES above).
+SUBSCRIBED_STREAMS: list[str] = list(SUBSCRIBED_EVENT_TYPES)
 
 
 def _build_allowed_event_types() -> dict[str, frozenset[str]]:
-    """Group SUBSCRIBED_STREAMS by their `{department}.` prefix.
+    """Group SUBSCRIBED_EVENT_TYPES by their `{department}.` prefix.
 
     The AUTHORITY stage uses this to assert an inbound event's department is one
     the engine serves and that its `event_type` is one that department is allowed
     to raise.
     """
     grouped: dict[str, set[str]] = {}
-    for stream in SUBSCRIBED_STREAMS:
-        department = stream.split(".", 1)[0]
-        grouped.setdefault(department, set()).add(stream)
+    for event_type in SUBSCRIBED_EVENT_TYPES:
+        department = event_type.split(".", 1)[0]
+        grouped.setdefault(department, set()).add(event_type)
     return {dept: frozenset(types) for dept, types in grouped.items()}
 
 
-# department -> allowed event_type set; derived once from SUBSCRIBED_STREAMS.
+# department -> allowed event_type set; derived once from SUBSCRIBED_EVENT_TYPES.
 ALLOWED_EVENT_TYPES_BY_DEPARTMENT: dict[str, frozenset[str]] = (
     _build_allowed_event_types()
 )

@@ -24,7 +24,6 @@ from skylize.decision_engine.publisher import (
     _extract_partition_key,
     _extract_proposing_agent,
     _find_rejecting_stage,
-    _flatten_for_stream,
     DecisionEventPublisher,
 )
 
@@ -229,28 +228,11 @@ def test_find_rejecting_stage_unknown():
 
 
 # ---------------------------------------------------------------------------
-# _flatten_for_stream
-# ---------------------------------------------------------------------------
-
-def test_flatten_for_stream_nested():
-    data = {"a": {"b": 1}, "c": [1, 2]}
-    flat = _flatten_for_stream(data)
-    assert flat["a.b"] == "1"
-    assert flat["c"] == "[1, 2]"
-
-
-def test_flatten_for_stream_none_values():
-    flat = _flatten_for_stream({"x": None})
-    assert flat["x"] == ""
-
-
-# ---------------------------------------------------------------------------
 # publish_outcome with step-carried metadata (source_agent_id path)
 # ---------------------------------------------------------------------------
 
-def _publisher_with_conn(settings, conn=None, redis=None):
+def _publisher_with_conn(settings, conn=None):
     c = conn or AsyncMock()
-    r = redis or AsyncMock()
     db = MagicMock()
 
     @asynccontextmanager
@@ -258,11 +240,11 @@ def _publisher_with_conn(settings, conn=None, redis=None):
         yield c
 
     db.tenant_session = _tenant_session
-    return DecisionEventPublisher(redis=r, db=db, settings=settings), c, r
+    return DecisionEventPublisher(db=db, settings=settings), c
 
 
 async def test_publish_with_step_metadata(settings):
-    pub, conn, redis = _publisher_with_conn(settings)
+    pub, conn = _publisher_with_conn(settings)
     result = make_decision_result(outcome=DecisionOutcome.APPROVED)
     result.steps = [_step(detail={
         "department": "creative",
@@ -273,14 +255,8 @@ async def test_publish_with_step_metadata(settings):
 
     await pub.publish_outcome(result)
 
-    redis.xadd.assert_awaited_once()
-
-
-async def test_dead_letter_xadd_fail_logged(settings, caplog):
-    redis = AsyncMock()
-    redis.xadd.side_effect = Exception("all xadd fail")
-    pub, conn, _ = _publisher_with_conn(settings, redis=redis)
-    result = make_decision_result(outcome=DecisionOutcome.APPROVED)
-
-    # Should not raise — dead_letter failure is swallowed
-    await pub.publish_outcome(result)
+    # One transactional write covering both tables; no Redis involvement.
+    conn.execute.assert_awaited_once()
+    sql = conn.execute.call_args.args[0]
+    assert "INSERT INTO decisions" in sql
+    assert "INSERT INTO decision_outbox" in sql

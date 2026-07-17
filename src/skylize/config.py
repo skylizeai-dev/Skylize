@@ -87,6 +87,16 @@ class Settings(BaseSettings):
     # Event bus tuning
     dlq_after_retries: int = 5
 
+    # Which Decision Engine the composition root wires (SKYLIZE_DECISION_ENGINE).
+    #   "inline" (default) — app/decision_engine, the canonical port-based engine
+    #                        and the sole emitter of terminal decision.* events.
+    #   "opa"              — the OPA-backed decision_engine package. NOT yet
+    #                        wired: its consumer transport must first be rebuilt
+    #                        onto the EventBus port (decision_engine/constants.py).
+    #                        bootstrap fails closed on "opa" rather than silently
+    #                        running inline, so no environment flips it by accident.
+    decision_engine: Literal["inline", "opa"] = "inline"
+
     # Decision Engine: org_ids to auto-subscribe its consumers to at startup.
     # Empty (default) leaves the engine wired but idle; tenants are subscribed
     # as they are provisioned. From env, set a JSON array:
