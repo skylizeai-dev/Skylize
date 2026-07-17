@@ -6,8 +6,11 @@ through this gateway, which:
      memory_write_access (empty list = stateless = denied).
   2. Guards the org_id namespace — scope.org_id MUST match the caller's JWT org_id
      (the most critical single check in the memory system).
-  3. Skips writes where importance_score < 0.40 (low-signal noise filter).
-  4. Emits structured audit log entries for every denied, skipped, or violated access.
+  3. Matches the requested namespace (scope.department) against the contract's
+     granted patterns — a non-empty grant list is not enough on its own; the
+     requested namespace must actually be covered by one of the patterns.
+  4. Skips writes where importance_score < 0.40 (low-signal noise filter).
+  5. Emits structured audit log entries for every denied, skipped, or violated access.
 """
 
 from __future__ import annotations
@@ -20,6 +23,23 @@ from .exceptions import MemoryNamespaceViolation, MemoryPermissionDenied
 from .ports import MemoryAdapter
 
 log = structlog.get_logger(__name__)
+
+
+def _namespace_granted(requested: str, granted: list[str]) -> bool:
+    """Check whether `requested` is covered by one of the `granted` patterns.
+
+    A pattern ending in ``*`` is a prefix match on everything before the ``*``;
+    any other pattern must match exactly. Patterns are matched as declared in
+    the contract — no normalization of near-duplicates (e.g. "security:fraud:*"
+    and "security:patterns" both stay literal).
+    """
+    for pattern in granted:
+        if pattern.endswith("*"):
+            if requested.startswith(pattern[:-1]):
+                return True
+        elif requested == pattern:
+            return True
+    return False
 
 
 class MemoryGateway:
@@ -55,6 +75,20 @@ class MemoryGateway:
             )
             raise MemoryPermissionDenied(f"{agent_id} has no memory_read_access")
 
+        if scope.department is not None and not _namespace_granted(
+            scope.department, contract.memory_read_access
+        ):
+            log.warning(
+                "memory.read_denied_namespace_mismatch",
+                agent_id=agent_id,
+                scope_org_id=scope.org_id,
+                requested_namespace=scope.department,
+                granted=contract.memory_read_access,
+            )
+            raise MemoryPermissionDenied(
+                f"{agent_id} is not granted read access to namespace {scope.department!r}"
+            )
+
         return await self._adapter.retrieve(scope)
 
     async def write(
@@ -85,6 +119,20 @@ class MemoryGateway:
                 scope_org_id=scope.org_id,
             )
             raise MemoryPermissionDenied(f"{agent_id} has no memory_write_access")
+
+        if scope.department is not None and not _namespace_granted(
+            scope.department, contract.memory_write_access
+        ):
+            log.warning(
+                "memory.write_denied_namespace_mismatch",
+                agent_id=agent_id,
+                scope_org_id=scope.org_id,
+                requested_namespace=scope.department,
+                granted=contract.memory_write_access,
+            )
+            raise MemoryPermissionDenied(
+                f"{agent_id} is not granted write access to namespace {scope.department!r}"
+            )
 
         if entry.importance_score < 0.40:
             log.info(
