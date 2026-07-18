@@ -91,8 +91,10 @@ so the reconciliation is a division of labor, not a choice between them
     **not yet wired into the live execution path**: the current runtime invokes
     the LangGraph graph in-process (an in-memory checkpointer; the agent step
     calls the runner directly), and no node dispatches to a Temporal activity.
-    `pyproject.toml` currently marks `orchestrator.temporal.*` as paused pending
-    post-launch (M5) integration/rework. The stack decision itself is settled —
+    `pyproject.toml` currently lists `orchestrator.temporal.*` among the
+    not-wired-into-bootstrap subsystems (a mypy override tagged "dead/paused code
+    with no tracked removal or revival plan as of 2026-07-15"). The stack
+    decision itself is settled —
     Temporal is a committed dependency underneath LangGraph — and its durability
     guarantees take effect once the worker is wired in. Runtime detail lives in
     [../architecture/03_agent_runtime.md §3.1](../architecture/03_agent_runtime.md#31-the-langgraph--temporal-split).

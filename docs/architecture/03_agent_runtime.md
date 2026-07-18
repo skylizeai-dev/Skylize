@@ -73,8 +73,9 @@ substrate is **Temporal Cloud**.
 > The current runtime invokes the LangGraph graph in-process —
 > `build_creative_graph` compiled with an in-memory `MemorySaver`, and
 > `agent_step` calling `runner.run(...)` directly — and no node dispatches to a
-> Temporal activity. `pyproject.toml` marks `orchestrator.temporal.*` as paused
-> pending post-launch (M5) integration/rework. This section documents the
+> Temporal activity. `pyproject.toml` lists `orchestrator.temporal.*` among the
+> not-wired-into-bootstrap subsystems (a mypy override tagged "dead/paused code
+> with no tracked removal or revival plan as of 2026-07-15"). This section documents the
 > committed split and the code that realizes each half; the Temporal durability
 > guarantees below take effect once the activity layer is wired in.
 
