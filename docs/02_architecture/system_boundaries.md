@@ -48,9 +48,12 @@ layer and emitted as events (see
                          ┌───▼───────────────────────────────▼─────────┐
                          │            INTEGRATION BOUNDARY              │
                          │  n8n · Shopify · Stripe · Meta Ads · TikTok  │
-                         │  LLM Providers (OpenAI/Anthropic/Gemini)     │
+                         │  LLM Providers (OpenAI/Anthropic; Gemini*)   │
                          └──────────────────────────────────────────────┘
 ```
+
+*Gemini is a roadmap provider — no Google SDK dependency in `pyproject.toml`;
+not yet integrated into the gateway.
 
 Five boundaries, six named interfaces: `IF-EDGE`, `IF-AGENT`, `IF-DATA`,
 `IF-EVENT`, `IF-TOOL`, `IF-INTEGRATION`.
@@ -82,7 +85,7 @@ Five boundaries, six named interfaces: `IF-EDGE`, `IF-AGENT`, `IF-DATA`,
 | Ad account performance & spend | Meta Ads / TikTok | Read metrics + scoped write (campaign ops) |
 | User identity & sessions | Clerk / Auth0 | `user_id`, `org_id`, verified claims only |
 | Workflow execution (low-code automations) | n8n | Trigger contracts + signed callbacks |
-| Model inference | OpenAI / Anthropic / Gemini | Prompt/response transit only; provider-abstracted |
+| Model inference | OpenAI / Anthropic (implemented); Gemini (roadmap, no SDK dependency yet) | Prompt/response transit only; provider-abstracted |
 
 **Rule:** Skylize never becomes the system of record for data an external system
 owns. It holds *scoped, expiring mirrors* and *reference IDs*. Authority over

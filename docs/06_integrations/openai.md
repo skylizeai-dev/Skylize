@@ -9,7 +9,8 @@
 ## 1. Purpose
 
 OpenAI is one provider behind the **provider-abstracted LLM gateway**, alongside
-Anthropic and Gemini. Agents never call OpenAI directly; the gateway routes
+Anthropic. Gemini is a planned third provider — not yet integrated, no Google
+SDK dependency in `pyproject.toml`. Agents never call OpenAI directly; the gateway routes
 `llm.generate` to the OpenAI adapter when policy/config selects it (e.g. for cost,
 capability, or failover). This spec defines that adapter; it is structurally
 identical to [anthropic.md](./anthropic.md) by design — that sameness is the point
@@ -50,7 +51,8 @@ provider-neutral request.
 ## 7. Failure handling
 
 - Error/timeout → normalized error → agent `failure_mode`.
-- Outage → gateway **failover** to Anthropic/Gemini per policy.
+- Outage → gateway **failover** to Anthropic per policy. Gemini is a roadmap
+  failover target — not available until the adapter and SDK dependency exist.
 - Budget overrun attempts feed circuit-breaker conditions.
 
 ## 8. Data & privacy
