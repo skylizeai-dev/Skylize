@@ -216,8 +216,8 @@ module = [
 ]
 ignore_missing_imports = true
 
-# Subsystems that are NOT wired into bootstrap (dead/paused code slated for the
-# post-launch M5 excision/rework — see the launch plan). Typing errors here
+# Subsystems that are NOT wired into bootstrap (dead/paused code with no tracked
+# removal or revival plan as of 2026-07-15). Typing errors here
 # must not gate CI for the live product; remove each line when the subsystem
 # is excised or brought back to life.
 [[tool.mypy.overrides]]

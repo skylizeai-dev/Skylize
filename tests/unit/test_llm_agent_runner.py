@@ -58,7 +58,7 @@ def _mint(signer: TokenSigner) -> Any:
     )
 
 
-@pytest.mark.skip(reason="runtime/ LLMAgentRunner ctor drifted; the runtime alt-stack is dead code - M5 excision per launch plan (LLMStepRunner is the live runner)")
+@pytest.mark.skip(reason="runtime/ LLMAgentRunner ctor drifted; the runtime alt-stack is dead code with no tracked removal plan (LLMStepRunner is the live runner)")
 async def test_runner_dispatches_through_proxy_and_validates_output() -> None:
     pair = ECCService.generate_key_pair(Curve.P384)
     signer = TokenSigner(pair.private_key)

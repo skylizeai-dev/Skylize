@@ -66,3 +66,16 @@ No forbidden-stack imports in `src/` or `tests/`. The scan surfaced a single **p
 ## Summary
 
 **0 NEW failures / 0 pre-existing failures / 15 skips (10 infra-skip, 5 intentional M5 dead-code skips).** Suite is fully green on the local Python 3.14 toolchain; delta-baseline bar met. Not launch-blocking. Recommend a confirmatory run on the CI 3.12 matrix (with integration service containers) before relying on this as the release gate.
+
+---
+
+## CORRECTION (2026-07-15) — "M5" / "launch plan" are unsourced terms
+
+Throughout the triage table and summary above, the intentional skips are attributed to **"M5 excision/rework per launch plan,"** labelled **"M5 terminal,"** and counted as **"M5 dead-code skips."** These references are **unsourced**: no document in this repository defines "M5" or any "launch plan." The term was self-propagated across this report, test skip reasons, and config comments without a defining source. Please do not treat "M5" or "the launch plan" as authoritative scoping.
+
+What remains accurate:
+
+- The **technical observations are still valid** — the modules in question (`memory_gateway`, `llm_agent_runner`, and, at the time of this report, `decision_engine`/`decision_evaluator`) were genuinely unwired/dead code with drifted expectations. Only the "M5"/"launch plan" framing was fabricated authority; there is no tracked removal plan.
+- **Status update since 2026-07-12:** the `test_decision_engine` (2 cases) and `test_decision_evaluator` (1 case) skips listed above have since been **removed** — those subsystems were wired up on the `feat/durable-governance` branch and the tests now run. Only the `memory_gateway` and `llm_agent_runner` skips remain.
+
+The live config/test comments that carried the "M5"/"launch plan" framing were corrected on branch `fix/unsourced-m5-references`. This point-in-time report is left intact with this note appended rather than silently rewritten.

@@ -101,3 +101,13 @@ a missing ceiling fails closed to HITL, which is safe but noisy.
 **Done** (9506c728), not deferred — A1+A2 were green, the bug reproduced live
 during the proof gate, and the LIFO fix covers the governance subscriber's
 identical quirk trivially rather than non-trivially.
+
+---
+
+## CORRECTION (2026-07-15) — "M5" is an unsourced term
+
+This report refers to `memory_gateway` and `llm_agent_runner` as **"the known M5-scoped drift."** That framing is **unsourced**: no document in this repository defines "M5" or any "launch plan." The term was self-propagated across reports, test skip reasons, and config comments without a defining source.
+
+The **underlying technical fact is unchanged and still accurate**: those modules are genuinely dead/unwired code with no tracked removal plan. Only the claim that they belong to a defined "M5" milestone was fabricated authority.
+
+The live config/test comments carrying this framing were corrected on branch `fix/unsourced-m5-references`. This point-in-time report is left intact with this note appended rather than silently rewritten.

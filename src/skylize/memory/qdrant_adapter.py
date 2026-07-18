@@ -68,7 +68,7 @@ class QdrantAdapter:
                     for k, v in filters.items()
                 ]
             )
-        hits = await self._client.search(  # type: ignore[attr-defined]  # qdrant-client API drift; recall path unwired (M5)
+        hits = await self._client.search(  # type: ignore[attr-defined]  # qdrant-client API drift; recall path unwired (dead code, no tracked removal plan)
             collection_name=_COLLECTION,
             query_vector=query_vector,
             limit=top_k,

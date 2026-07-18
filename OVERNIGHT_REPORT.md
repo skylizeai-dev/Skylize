@@ -54,3 +54,13 @@ See [DECISIONS_PENDING.md](DECISIONS_PENDING.md), ranked. Top three:
 - **No Temporal worker bootstrap exists** — judge + repo + migration are implemented and tested, but nothing constructs `WorkflowActivities` yet; the migration has never run against a real DB outside CI's integration job.
 - **Demo-mode judge blocks** (fail-closed unverified) rather than fake-passing — intentional; see DECISIONS_PENDING #5 if you want keyless workflows to pass judge gates.
 - **`Payload.reason`** on the HITL verdict event is my restoration of drifted intent — additive + contract-suite green, but it's a wire-schema change you should eyeball.
+
+---
+
+## CORRECTION (2026-07-15) — "M5" is an unsourced term
+
+Section 6 above (the skips line) describes `memory_gateway` and `llm_agent_runner` as **"M5-scoped."** That framing is **unsourced**: no document in this repository defines "M5" or any "launch plan," and the term appears only to have been self-propagated across reports, test skip reasons, and config comments.
+
+The **underlying technical fact is unchanged and still accurate**: those two modules are genuinely dead/unwired code (memory gateway unwired from bootstrap; the `runtime/` `LLMAgentRunner` alt-stack is dead, `LLMStepRunner` is the live runner). Only the authority attached to them — that they belong to a defined "M5" milestone tracked by a "launch plan" — was fabricated. There is no tracked removal plan.
+
+The live config/test comments that carried this framing were corrected on branch `fix/unsourced-m5-references`. This point-in-time report is left intact with this note appended rather than silently rewritten.

@@ -77,7 +77,7 @@ async def test_cfo_read_raises_permission_denied(gateway: MemoryGateway) -> None
 
 
 @pytest.mark.asyncio
-@pytest.mark.skip(reason="chief_security_officer contract not in MVP registry; memory gateway is unwired from bootstrap - M5 rework per launch plan")
+@pytest.mark.skip(reason="chief_security_officer contract not in MVP registry; memory gateway is unwired from bootstrap (dead code, no tracked rework plan)")
 async def test_safety_agents_read_raises_permission_denied(gateway: MemoryGateway) -> None:
     for agent_id in (
         "chief_security_officer",
