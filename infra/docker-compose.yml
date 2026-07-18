@@ -31,6 +31,26 @@ services:
       timeout: 3s
       retries: 10
 
+  # Guardrail policy engine (OPA). Serves the decision policy bundle (../policy)
+  # over HTTP on :8181; the Decision Engine / OPAClient evaluate every action
+  # against it. FAIL-CLOSED SKELETON: the bundle currently denies everything
+  # until real per-class policy content is authored (see ../policy and
+  # docs/04_decision_engine/guardrails.md). Pinned to a specific release so
+  # policy evaluation is reproducible. No Docker healthcheck: the official OPA
+  # image is distroless (no shell/curl), so a CMD/CMD-SHELL probe cannot run
+  # inside it — liveness is the HTTP GET /health endpoint on :8181.
+  opa:
+    image: openpolicyagent/opa:1.18.2
+    command:
+      - "run"
+      - "--server"
+      - "--addr=0.0.0.0:8181"
+      - "--log-level=info"
+      - "/policies"
+    ports: ["8181:8181"]
+    volumes:
+      - ../policy:/policies:ro
+
   # Runs migrations as the ADMIN/superuser role. Migration 0003 creates the
   # non-superuser `skylize_app` role the gateway then connects as.
   migrate:
@@ -56,12 +76,16 @@ services:
       SKYLIZE_DB_URL: postgresql://skylize:${POSTGRES_PASSWORD:-localdev}@postgres:5432/skylize
       SKYLIZE_DB_APP_URL: postgresql://skylize_app:${SKYLIZE_APP_DB_PASSWORD:-appdev}@postgres:5432/skylize
       SKYLIZE_REDIS_URL: redis://redis:6379
+      # Guardrail policy engine. In-cluster DNS name of the opa service above.
+      SKYLIZE_OPA_URL: http://opa:8181
       SKYLIZE_DEV_AUTH: "true"
     ports: ["8000:8000"]
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
       migrate: { condition: service_completed_successfully }
+      # OPA has no healthcheck (distroless image), so gate on start, not health.
+      opa: { condition: service_started }
 
 volumes:
   postgres_data:
