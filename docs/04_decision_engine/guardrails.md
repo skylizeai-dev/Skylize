@@ -22,6 +22,12 @@ that produced it.
 
 OPA is the **policy engine behind the Decision Engine and the Governance
 Authority** ([../02_architecture/tech_stack.md §5](../02_architecture/tech_stack.md#5-how-temporal--langgraph--opa-fit-reconciliation)).
+Per [ADR-0004](../architecture/adr/0004-opa-production-arbiter.md), the
+OPA/Rego Decision Engine (`src/skylize/decision_engine/`) is the designated
+**production** governance arbiter; the inline evaluator
+(`src/skylize/app/decision_engine/`) remains the development and fallback
+implementation until OPA's consumer transport is rebuilt onto the live
+EventBus.
 It does **not** replace the cryptographic `GovernanceToken` chain of trust
 ([../03_agents/agent_governance.md §4](../03_agents/agent_governance.md#4-governance-token)) —
 the token authorizes *that an agent may act at all*; OPA decides *whether this

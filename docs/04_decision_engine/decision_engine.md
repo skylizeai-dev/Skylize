@@ -9,12 +9,17 @@
 ## 1. Purpose
 
 The Decision Engine is the component that turns agent **intent** into authorized
-**outcomes**. Agents reason and propose; the Decision Engine decides. It is the
-only component permitted to emit a terminal `DecisionEvent`
-(`decision.approved` / `decision.rejected` / `decision.deferred_to_human`), and
-therefore the single point where the platform's authority model, policy
-guardrails, scoring, capital limits, and human-in-the-loop rules are applied to
-real actions.
+**outcomes**. Agents reason and propose; the Decision Engine decides. Per
+environment, exactly one Decision Engine implementation — selected by
+`SKYLIZE_DECISION_ENGINE` — is the only component permitted to emit a terminal
+`DecisionEvent` (`decision.approved` / `decision.rejected` /
+`decision.deferred_to_human`), and therefore the single point where the
+platform's authority model, policy guardrails, scoring, capital limits, and
+human-in-the-loop rules are applied to real actions. See
+[ADR-0004](../architecture/adr/0004-opa-production-arbiter.md) for the
+per-environment selection between the OPA/Rego engine (`src/skylize/decision_engine/`,
+production) and the inline evaluator (`src/skylize/app/decision_engine/`,
+development/fallback).
 
 It exists so that autonomy is **safe and accountable**: no spend, no external
 launch, no irreversible action happens without passing one explainable,

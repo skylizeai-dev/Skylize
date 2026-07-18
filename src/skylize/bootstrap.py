@@ -218,6 +218,7 @@ async def build_container(settings: Settings | None = None) -> Container:
     # not use (see decision_engine/constants.py). Fail closed on any other value
     # rather than silently running inline, so a misconfigured environment is a
     # loud startup error, not a surprising fallback.
+    # See ADR-0004: docs/architecture/adr/0004-opa-production-arbiter.md
     if settings.decision_engine != "inline":
         raise RuntimeError(
             f"SKYLIZE_DECISION_ENGINE={settings.decision_engine!r} is not available: "
