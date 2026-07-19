@@ -12,7 +12,6 @@ skylize.schemas.agents.brand
 skylize.schemas.agents.creative
 skylize.schemas.agents.executive
 skylize.schemas.agents.growth
-skylize.schemas.agents.safety
 skylize.schemas.agents.sdr
 skylize.schemas.agents.security
 skylize.schemas.workflow
