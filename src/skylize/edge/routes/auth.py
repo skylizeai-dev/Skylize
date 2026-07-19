@@ -12,7 +12,6 @@ throttling (login attempts, register spam) in a later sprint.
 
 from __future__ import annotations
 
-import re
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -20,14 +19,11 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 from ...app.auth.user_service import DuplicateEmailError, InvalidCredentialsError
 from ...bootstrap import Container
+from ...memory.identity import InvalidIdentifier, validate_identifier
 from ...schemas.base import RequestContext
 from ..deps import get_container, get_current_user
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
-
-# org_id becomes a tenant-isolation key, so it must be a strict slug — no ':' or
-# other separators that could forge a namespace boundary. Fail closed.
-_ORG_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$")
 
 
 # ── request/response models ────────────────────────────────────────────────────
@@ -42,11 +38,15 @@ class RegisterRequest(BaseModel):
     @field_validator("org_id")
     @classmethod
     def _validate_org_id(cls, value: str) -> str:
-        if not _ORG_ID_RE.match(value):
-            raise ValueError(
-                "org_id must be a slug: alphanumerics, '-' or '_', 1–80 chars"
-            )
-        return value
+        # org_id becomes a tenant-isolation key, so it must be a strict slug —
+        # no ':' or other separators that could forge a namespace boundary.
+        # `memory.identity` is the single source of truth for the slug rules;
+        # it only accepts lowercase, so normalize case here (the one place
+        # org_ids are minted) rather than rejecting mixed-case registrations.
+        try:
+            return validate_identifier(value.lower(), field="org_id")
+        except InvalidIdentifier as exc:
+            raise ValueError(str(exc)) from exc
 
 
 class LoginRequest(BaseModel):
