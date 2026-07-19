@@ -87,6 +87,62 @@ services:
       # OPA has no healthcheck (distroless image), so gate on start, not health.
       opa: { condition: service_started }
 
+  # OPA Decision Engine worker — a SEPARATE PROCESS from the gateway, not a
+  # second engine inside it. Per environment exactly one engine emits terminal
+  # `decision.*` events (docs/04_decision_engine/decision_engine.md §2), and
+  # SKYLIZE_DECISION_ENGINE is the interlock: `bootstrap` refuses to build the
+  # inline engine when it reads "opa", and this worker refuses to start unless
+  # it does (src/skylize/decision_engine/worker.py:64-77). Both sides fail
+  # closed, so the two can never double-decide a proposal.
+  #
+  # INERT BY DEFAULT, and deliberately by `profiles:` rather than by the
+  # interlock. `docker compose up` does not start a profiled service at all, so
+  # nothing is scheduled, nothing restart-loops, and no log noise is produced
+  # while the flag is "inline". Relying on the interlock instead would start a
+  # container that crashes on boot every time — inert in effect, alarming in
+  # appearance, and indistinguishable from a real outage. To run it once the
+  # flag flips:
+  #   docker compose -f infra/docker-compose.yml --profile opa-engine up
+  #
+  # NOT READY TO ENABLE. The policy bundle at ../policy is still a fail-closed
+  # placeholder that denies everything (see the `opa` service above), so this
+  # worker would correctly reject every proposal it consumed. This entry exists
+  # so the deployment shape is reviewable and version-controlled, not because
+  # the engine is ready.
+  decision-engine-worker:
+    profiles: ["opa-engine"]
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile
+    command: ["python", "-m", "skylize.decision_engine.worker"]
+    environment:
+      # The interlock. The worker raises RuntimeError on anything but "opa".
+      SKYLIZE_DECISION_ENGINE: opa
+      # Tenants this worker consumes for. `DecisionEngineConsumer.run` raises on
+      # an empty list rather than idling silently (consumer.py:129-133), so this
+      # must name real orgs. JSON-array form, parsed by Settings (config.py:109).
+      SKYLIZE_DECISION_ENGINE_ORG_IDS: ${SKYLIZE_DECISION_ENGINE_ORG_IDS:-["org_local"]}
+      # NOTE the variable name: DecisionEngineSettings reads SKYLIZE_DATABASE_URL
+      # (decision_engine/config.py:30), NOT the SKYLIZE_DB_URL / SKYLIZE_DB_APP_URL
+      # pair the gateway uses (config.py:36-37). They are different settings
+      # classes and the names do not overlap — supplying only SKYLIZE_DB_URL here
+      # would fail pydantic validation at startup, since database_url has no
+      # default. Connects as the RLS-subject app role, like the gateway runtime.
+      SKYLIZE_DATABASE_URL: postgresql://skylize_app:${SKYLIZE_APP_DB_PASSWORD:-appdev}@postgres:5432/skylize
+      SKYLIZE_REDIS_URL: redis://redis:6379
+      SKYLIZE_OPA_URL: http://opa:8181
+      # Required, no defaults (decision_engine/config.py:26-27) — the worker will
+      # not start until these are supplied in the environment or a .env file.
+      # Names only here; never commit values.
+      SKYLIZE_LANGFUSE_PUBLIC_KEY: ${SKYLIZE_LANGFUSE_PUBLIC_KEY}
+      SKYLIZE_LANGFUSE_SECRET_KEY: ${SKYLIZE_LANGFUSE_SECRET_KEY}
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
+      # OPA has no healthcheck (distroless image), so gate on start, not health.
+      opa: { condition: service_started }
+
 volumes:
   postgres_data:
   redis_data:
