@@ -27,6 +27,14 @@ What this consumer adds over the inline engine is only the sink: instead of
 evaluating inline it feeds ``pipeline_fn`` — ``DecisionOrchestrator.process``,
 which runs the six-stage OPA pipeline and durably records the outcome.
 
+TWO INBOUND PATHS, and only one of them decides anything. A proposal goes to
+``pipeline_fn``; a ``governance.human_approval_received`` verdict goes to
+``resume_fn`` (``HITLResumeHandler.resume``) and NEVER to the pipeline — the
+human has already ruled, and re-evaluating would let policy overturn them. The
+branch is an ``isinstance`` check at the top of ``_handle_event``, before the
+addressing filter; ``constants.RESUME_EVENT_TYPES`` keeps those types out of the
+pipeline's AUTHORITY allow-list as an independent backstop.
+
 Two filters, not one, and they answer different questions. This module asks "is
 this event addressed to the engine at all?" and silently ignores anything else
 riding the department channel; the pipeline's AUTHORITY stage then asks "is this
@@ -55,14 +63,20 @@ from ..dal.ports import ProcessedEventStore
 from ..events.bus import EventBus
 from ..events.router import EventRouter
 from ..schemas.base import BaseEvent
+from ..schemas.events.governance import GovernanceHumanApprovalReceived
 from .config import DecisionEngineSettings
 from .constants import ALLOWED_EVENT_TYPES_BY_DEPARTMENT, SUBSCRIBED_DEPARTMENTS
 from .models import DecisionContext, DecisionResult
+from .resume import resume_dedup_key
 
 log = logging.getLogger(__name__)
 
 # ``DecisionOrchestrator.process`` has exactly this shape.
 PipelineFn = Callable[[DecisionContext], Awaitable[DecisionResult]]
+
+# ``HITLResumeHandler.resume`` has exactly this shape. Returns True if this call
+# resolved the decision, False if it was already terminal.
+ResumeFn = Callable[[GovernanceHumanApprovalReceived], Awaitable[bool]]
 
 
 class DecisionEngineConsumer:
@@ -74,12 +88,14 @@ class DecisionEngineConsumer:
         settings: DecisionEngineSettings,
         pipeline_fn: PipelineFn,
         *,
+        resume_fn: ResumeFn | None = None,
         processed: ProcessedEventStore | None = None,
         departments: Iterable[str] = SUBSCRIBED_DEPARTMENTS,
     ) -> None:
         self._bus = bus
         self._settings = settings
         self._pipeline_fn = pipeline_fn
+        self._resume_fn = resume_fn
         self._processed: ProcessedEventStore = processed or InMemoryProcessedEventStore()
         # Sorted so the subscription order — and therefore the consumer names —
         # is stable across restarts rather than following frozenset iteration.
@@ -169,6 +185,13 @@ class DecisionEngineConsumer:
         hard timeout and the publisher's ``ON CONFLICT`` writes make re-running a
         redelivered proposal safe.
         """
+        # Branch BEFORE the proposal path, and before the addressing filter's
+        # proposal semantics apply: a human verdict is not a proposal and must
+        # never touch ``pipeline_fn``. See constants.RESUME_EVENT_TYPES.
+        if isinstance(event, GovernanceHumanApprovalReceived):
+            await self._handle_resume(event)
+            return
+
         if not _is_addressed_to_engine(event):
             log.debug(
                 "decision_engine_event_ignored",
@@ -219,6 +242,58 @@ class DecisionEngineConsumer:
         )
 
 
+    async def _handle_resume(self, event: GovernanceHumanApprovalReceived) -> None:
+        """Apply a human verdict to the decision it was deferred from.
+
+        Deliberately does NOT run the six-stage pipeline: the human already
+        ruled, and re-evaluating would let policy overturn them.
+
+        Two idempotency layers, both keyed on the deterministic ``hitl_id``
+        rather than the verdict event's own ``event_id`` (two publications of
+        the same verdict carry different event_ids): the ``ProcessedEventStore``
+        short-circuit here, and the ``status = 'pending'`` guard inside the
+        handler's UPDATE, which is the durable one.
+        """
+        if self._resume_fn is None:
+            # Fail loudly. Silently dropping a human's verdict would strand the
+            # decision as `pending` forever while the worker looked healthy, so
+            # this raises into the router's retry/DLQ path instead: a resume
+            # event on the wire with no handler wired is a composition bug.
+            raise RuntimeError(
+                "DecisionEngineConsumer received governance.human_approval_received "
+                f"(hitl_id={event.payload.hitl_id}) but no resume_fn is wired; the "
+                "worker must pass HITLResumeHandler.resume (see worker.build_consumer)."
+            )
+
+        key = resume_dedup_key(event.payload.hitl_id)
+        if await self._processed.is_processed(key, org_id=event.tenant_id):
+            log.debug(
+                "decision_engine_resume_duplicate_skipped",
+                extra={"hitl_id": str(event.payload.hitl_id), "tenant_id": event.tenant_id},
+            )
+            return
+
+        resolved = await self._resume_fn(event)
+
+        # Marked only after the terminal outcome is durably enqueued, so a crash
+        # mid-flight redelivers rather than stranding the decision. Marked even
+        # when ``resolved`` is False: the handler found nothing pending, so a
+        # further redelivery has nothing left to do either.
+        await self._processed.mark_processed(
+            key, "resumed" if resolved else "already_resolved", org_id=event.tenant_id
+        )
+        log.info(
+            "decision_engine_resume_processed",
+            extra={
+                "hitl_id": str(event.payload.hitl_id),
+                "decision_id": str(event.payload.decision_id),
+                "tenant_id": event.tenant_id,
+                "approved": event.payload.approved,
+                "resolved": resolved,
+            },
+        )
+
+
 def _is_addressed_to_engine(event: BaseEvent) -> bool:
     """Is this event one the engine is here to decide on?
 
@@ -232,4 +307,4 @@ def _is_addressed_to_engine(event: BaseEvent) -> bool:
     )
 
 
-__all__ = ["DecisionEngineConsumer", "PipelineFn"]
+__all__ = ["DecisionEngineConsumer", "PipelineFn", "ResumeFn"]

@@ -33,11 +33,11 @@ from .capital_dal import CapitalDAL
 from .config import DecisionEngineSettings
 from .constants import (
     ALLOWED_DEPARTMENTS,
-    ALLOWED_EVENT_TYPES_BY_DEPARTMENT,
     APPROVAL_SIGNAL_KEYS,
     AUDIT_EVENT_TYPE_PREFIX,
     HITL_HIGH_RISK_OPPORTUNITY_FLOOR,
     MAX_EVALUATION_TIMEOUT_SECONDS,
+    PROPOSAL_EVENT_TYPES_BY_DEPARTMENT,
     REJECTION_SIGNAL_KEYS,
 )
 from .exceptions import ConflictDetected, EvaluationTimeout, OPAPolicyDenied
@@ -207,7 +207,12 @@ class EvaluationPipeline:
 
     def _stage_authority(self, context: DecisionContext) -> None:
         start = time.monotonic()
-        allowed_types = ALLOWED_EVENT_TYPES_BY_DEPARTMENT.get(
+        # PROPOSAL types, not the full table: a resume event
+        # (`governance.human_approval_received`) is a human's verdict, never a
+        # proposal, and must be REJECTED here if a routing regression ever lets
+        # one reach the pipeline instead of the resume handler. Rejecting is the
+        # safe failure — evaluating it would let policy overturn the human.
+        allowed_types = PROPOSAL_EVENT_TYPES_BY_DEPARTMENT.get(
             context.department, frozenset()
         )
         dept_ok = context.department in ALLOWED_DEPARTMENTS

@@ -90,10 +90,71 @@ async def test_sales_department_campaign_proposal_is_rejected(settings):
 # ---------------------------------------------------------------------------
 
 def test_subscriptions_and_authority_derive_from_one_table():
-    assert constants.SUBSCRIBED_DEPARTMENTS is constants.ALLOWED_DEPARTMENTS
-    assert set(constants.ALLOWED_DEPARTMENTS) == set(
+    """Both projections come from ALLOWED_EVENT_TYPES_BY_DEPARTMENT, nothing else.
+
+    They are no longer identical — `governance` is subscribed (the engine must
+    hear a human's verdict) but not authorized (it never accepts a governance
+    *proposal*). The invariant that matters is that neither is hand-maintained:
+    both are computed from the one table, so a department cannot be authorized
+    without being subscribed, and the gap is exactly the resume-only departments.
+    """
+    assert set(constants.SUBSCRIBED_DEPARTMENTS) == set(
         constants.ALLOWED_EVENT_TYPES_BY_DEPARTMENT
     )
+    # Authority is a subset: you cannot decide for a channel you do not hear.
+    assert set(constants.ALLOWED_DEPARTMENTS) <= set(constants.SUBSCRIBED_DEPARTMENTS)
+    # ...and the difference is exactly the departments with no proposal types.
+    resume_only = {
+        department
+        for department, types in constants.ALLOWED_EVENT_TYPES_BY_DEPARTMENT.items()
+        if not (types - constants.RESUME_EVENT_TYPES)
+    }
+    assert (
+        set(constants.SUBSCRIBED_DEPARTMENTS) - set(constants.ALLOWED_DEPARTMENTS)
+        == resume_only
+    )
+
+
+def test_governance_is_subscribed_but_never_authority_for_a_proposal():
+    """The coupling gate: adding `governance` must drive subscription AND authority.
+
+    Subscription, so a `governance.human_approval_received` verdict reaches the
+    engine at all; authority, so that same type can never be evaluated as a
+    proposal. Both from the one table.
+    """
+    assert "governance" in constants.SUBSCRIBED_DEPARTMENTS
+    assert "governance" in constants.ALLOWED_EVENT_TYPES_BY_DEPARTMENT
+    assert (
+        "governance.human_approval_received"
+        in constants.ALLOWED_EVENT_TYPES_BY_DEPARTMENT["governance"]
+    )
+    # Not authorized to originate a decision.
+    assert "governance" not in constants.ALLOWED_DEPARTMENTS
+    assert constants.PROPOSAL_EVENT_TYPES_BY_DEPARTMENT["governance"] == frozenset()
+
+
+def test_no_resume_type_is_ever_a_proposal_type():
+    """A resume event must not be evaluable by the pipeline, in any department."""
+    for department, types in constants.PROPOSAL_EVENT_TYPES_BY_DEPARTMENT.items():
+        assert not (types & constants.RESUME_EVENT_TYPES), department
+
+
+async def test_authority_rejects_a_resume_event_reaching_the_pipeline(settings):
+    """Backstop: if a routing regression sends a verdict to the pipeline, REJECT.
+
+    Evaluating it would let policy overturn a decision a human already made.
+    """
+    pipeline = _pipeline(settings)
+    ctx = make_decision_context(
+        department="governance", event_type="governance.human_approval_received"
+    )
+
+    result = await pipeline.evaluate(ctx)
+
+    assert result.outcome == DecisionOutcome.REJECTED
+    assert len(result.steps) == 1
+    assert result.steps[0].stage.value == "AUTHORITY"
+    assert result.steps[0].detail["department_allowed"] is False
 
 
 def test_subscribed_event_types_are_the_flattened_table():

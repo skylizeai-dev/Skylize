@@ -33,17 +33,51 @@ ALLOWED_EVENT_TYPES_BY_DEPARTMENT: dict[str, frozenset[str]] = {
             "sales.budget_reallocation_proposed",
         }
     ),
+    # `governance` is the ONE department the engine listens to without ever
+    # accepting a proposal from it: `governance.human_approval_received` is a
+    # human's verdict on a decision this engine already deferred, not a new
+    # request to decide. It is declared here — rather than in a second list —
+    # so the consumer's subscription set stays derived from this one table
+    # (SUBSCRIBED_DEPARTMENTS below), and projected OUT of the AUTHORITY
+    # allow-list for the reason spelled out at RESUME_EVENT_TYPES.
+    "governance": frozenset({"governance.human_approval_received"}),
 }
 
-# The departments the engine serves — STAGE 1 (AUTHORITY), pipeline.py.
-ALLOWED_DEPARTMENTS: frozenset[str] = frozenset(ALLOWED_EVENT_TYPES_BY_DEPARTMENT)
+# Event types that RESUME an already-deferred decision rather than proposing a
+# new one. They ride the consumer's addressing filter (so the resume event is
+# not silently ignored on `evt:{tenant}:governance`) but must never reach the
+# six-stage pipeline: re-evaluating a decision a human has already ruled on
+# would let policy silently overturn the human. `consumer._handle_event`
+# branches these to the resume handler before `pipeline_fn` is ever called;
+# excluding them from AUTHORITY below is the second, independent backstop, so a
+# regression in that branch produces a REJECTED decision rather than a policy
+# verdict that quietly overrides a person.
+RESUME_EVENT_TYPES: frozenset[str] = frozenset({"governance.human_approval_received"})
+
+# The proposal half of the table — what STAGE 1 (AUTHORITY, pipeline.py) may
+# accept. Derived, never hand-maintained, so adding a department or event type
+# above cannot forget to update it.
+PROPOSAL_EVENT_TYPES_BY_DEPARTMENT: dict[str, frozenset[str]] = {
+    department: types - RESUME_EVENT_TYPES
+    for department, types in ALLOWED_EVENT_TYPES_BY_DEPARTMENT.items()
+}
+
+# The departments the engine will accept a PROPOSAL from — STAGE 1 (AUTHORITY).
+# A department whose every declared type is a resume type (today: `governance`)
+# is deliberately absent: the engine serves it, but never decides for it.
+ALLOWED_DEPARTMENTS: frozenset[str] = frozenset(
+    department
+    for department, types in PROPOSAL_EVENT_TYPES_BY_DEPARTMENT.items()
+    if types
+)
 
 # The departments the consumer subscribes to — the rebuilt DecisionEngineConsumer
 # spawns one EventRouter per (tenant, entry), each on `evt:{tenant}:{department}`
-# per the bus's routing key (events/bus.py:27). Identical to ALLOWED_DEPARTMENTS
-# *by construction*, not by coincidence: the engine may only receive what it is
-# authorized to act on, and vice versa.
-SUBSCRIBED_DEPARTMENTS: frozenset[str] = ALLOWED_DEPARTMENTS
+# per the bus's routing key (events/bus.py:27). A SUPERSET of ALLOWED_DEPARTMENTS,
+# and the gap is exactly the resume-only departments: the engine must hear a
+# channel to be resumed on it, without being authorized to originate decisions
+# there. Both sides still project from the one table above, so they cannot drift.
+SUBSCRIBED_DEPARTMENTS: frozenset[str] = frozenset(ALLOWED_EVENT_TYPES_BY_DEPARTMENT)
 
 # The event types the engine is authorized to act on — the REAL wire `type`
 # strings from the versioned schemas (schemas/events/sales.py, creative.py),

@@ -26,10 +26,15 @@ it names ``opa``. It therefore composes its own concretes from
 ``DecisionEngineSettings`` instead of reusing the container, which would be the
 inline engine's.
 
-NOT YET WIRED FOR PRODUCTION. The flag stays ``inline`` until the HITL resume
-path (``governance.human_approval_received``) lands, real Rego replaces the
-placeholder policy, and a live OPA server exists. Until then this entrypoint is
-runnable and tested but deliberately unreachable from the default config.
+Two long-lived tasks, one composition: the consumer serves BOTH inbound paths —
+proposals to the six-stage pipeline, and ``governance.human_approval_received``
+verdicts to ``HITLResumeHandler`` (see ``build_consumer``).
+
+NOT YET WIRED FOR PRODUCTION. The flag stays ``inline`` until real Rego replaces
+the placeholder policy and a live OPA server exists. (The HITL resume path,
+previously listed here as a third blocker, has landed — ``resume.py`` +
+``consumer._handle_resume``.) Until then this entrypoint is runnable and tested
+but deliberately unreachable from the default config.
 """
 
 from __future__ import annotations
@@ -54,6 +59,7 @@ from .orchestrator import DecisionOrchestrator
 from .outbox_poller import OutboxPoller
 from .pipeline import EvaluationPipeline
 from .publisher import DecisionEventPublisher
+from .resume import HITLResumeHandler
 from .scoring import ScoringEngine
 
 log = logging.getLogger("skylize.decision_engine.worker")
@@ -109,7 +115,13 @@ def build_consumer(
     db: Database,
     bus: EventBus,
 ) -> DecisionEngineConsumer:
-    """Bind the transport to the pipeline.
+    """Bind the transport to BOTH inbound paths.
+
+    ``orchestrator.process`` decides proposals; ``HITLResumeHandler.resume``
+    finishes the ones a human was asked about. Wiring both here is what makes
+    subscribing to the ``governance`` channel safe — a consumer that heard a
+    verdict with no resume handler would raise rather than drop it, but a worker
+    that never wires one would just DLQ every human decision.
 
     Idempotency is the durable Pg store, never the in-memory default: a worker
     that forgot its processed set on restart would re-decide every in-flight
@@ -119,6 +131,7 @@ def build_consumer(
         bus,
         de_settings,
         orchestrator.process,
+        resume_fn=HITLResumeHandler(db, de_settings).resume,
         processed=PgProcessedEventStore(db),
     )
 
