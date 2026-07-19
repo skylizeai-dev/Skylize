@@ -8,11 +8,10 @@ per proposal (decision_flow.md §3):
       → hitl_writer.write_escalation(...)    # only on DEFERRED_TO_HUMAN / ESCALATED
 
 ``process`` has the exact ``Callable[[DecisionContext], Awaitable[DecisionResult]]``
-shape ``DecisionEngineConsumer`` expects as its ``pipeline_fn`` — so once the
-consumer's transport is rebuilt onto the EventBus port (the deferred blocker, see
-``constants.py``), wiring is simply::
+shape ``DecisionEngineConsumer`` takes as its ``pipeline_fn``, so the worker wires
+the two in one line (``worker.build_consumer``)::
 
-    consumer = DecisionEngineConsumer(redis, settings, orchestrator.process)
+    consumer = DecisionEngineConsumer(bus, settings, orchestrator.process)
 
 This wrapper owns neither transport (the consumer supplies events) nor the Redis
 relay (the OutboxPoller owns that); it only composes evaluation, persistence, and
