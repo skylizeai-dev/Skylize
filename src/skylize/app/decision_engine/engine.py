@@ -1,7 +1,8 @@
 """
 The Decision Engine consumer/producer (decision_engine.md §2, §3).
 
-It is the single component permitted to emit terminal `decision.*` events. It
+Per environment, exactly one engine emits terminal `decision.*` events, selected
+by `SKYLIZE_DECISION_ENGINE`. This is the inline engine; it
 consumes proposal-bearing business events (`creative.*`, `sales.*`) and human
 verdicts (`governance.human_approval_received`), runs each proposal through the
 six-stage `DecisionEvaluator`, and projects the verdict onto the wire schema:

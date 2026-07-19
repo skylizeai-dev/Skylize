@@ -1,7 +1,8 @@
 """
 The Decision Engine — turns agent *intent* into authorized *outcomes*.
 
-The only component permitted to emit terminal `decision.*` events. It consumes
+Per environment, exactly one engine emits terminal `decision.*` events, selected
+by `SKYLIZE_DECISION_ENGINE`. This is the inline engine; it consumes
 proposals off the bus, runs them through six deterministic evaluation stages
 (authority → policy → scoring → capital → conflict → HITL), and emits exactly
 one terminal outcome per proposal, mirrored to the audit trail.

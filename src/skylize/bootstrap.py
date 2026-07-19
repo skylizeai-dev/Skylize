@@ -226,8 +226,9 @@ async def build_container(settings: Settings | None = None) -> Container:
             "(see skylize/decision_engine/constants.py). Only 'inline' is functional."
         )
 
-    # Decision Engine (business-action authz; the ONLY emitter of terminal
-    # `decision.*` events). Wired behind the CapitalRepository /
+    # Decision Engine (business-action authz; per environment, exactly one
+    # engine emits terminal `decision.*` events, selected by
+    # SKYLIZE_DECISION_ENGINE). Wired behind the CapitalRepository /
     # ProcessedEventStore ports — durable Pg stores on the postgres backend
     # (budget_ledger + decision_processed_events, migration 0011), in-memory
     # defaults on the memory backend. With no configured orgs it is wired but
