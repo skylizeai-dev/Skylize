@@ -60,7 +60,12 @@ def _context(payload: dict) -> DecisionContext:
     return DecisionContext(
         event_id=str(uuid.uuid4()),
         tenant_id="org_test",
-        department="sales",
+        # ADR-0005: campaign proposals are produced by `director_growth`, whose
+        # contract is department="growth". The previous department="sales" pairing
+        # was unreachable in production — `sales` is the SDR channel — and only
+        # went green because this fixture constructs the context directly,
+        # bypassing the transport.
+        department="growth",
         event_type="sales.campaign_proposed",
         payload=payload,
         received_at=datetime.now(timezone.utc),
