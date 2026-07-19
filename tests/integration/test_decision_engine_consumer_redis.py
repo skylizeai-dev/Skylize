@@ -297,28 +297,26 @@ async def test_verdict_on_the_governance_channel_resumes_without_the_pipeline(
 
 
 # ---------------------------------------------------------------------------
-# CHARACTERIZATION: the queued delivery gap, made regression-visible
+# The delivery gap, closed — this was the characterization test that asserted it
 # ---------------------------------------------------------------------------
 
 
-async def test_failed_handler_strands_the_message_in_the_pel_no_redelivery(
-    redis_client,
-):
-    """Documents CURRENT behaviour, which is not the intended behaviour.
+async def test_failed_handler_is_redelivered_then_dlqd(redis_client):
+    """FLIPPED. This test used to assert the gap; it now asserts the fix.
 
-    `RedisEventBus.consume` reads `{stream: ">"}` only and never reclaims
-    (redis_adapter.py:55), so a message whose handler raised is left un-acked in
-    the PEL and is never re-read. The router's retry/DLQ budget therefore cannot
-    be reached (see the delivery-semantics note in router.py).
+    Its previous form pinned the old behaviour — one attempt, message stranded
+    un-acked in the PEL, DLQ empty — and instructed whoever implemented reclaim to
+    rewrite it to assert redelivery and eventual DLQ rather than delete it. This
+    is that rewrite, against the OPA engine on real Redis.
 
-    This test asserts the gap exists, so it FAILS LOUDLY the day reclaim is
-    implemented — at which point it should be rewritten to assert redelivery and
-    eventual DLQ, not deleted. Making the gap executable is the point: it was
-    previously documented as working, and two green tests appeared to confirm it
-    by manufacturing a redelivery the bus cannot produce.
+    Note the previous form would have kept passing by accident: it slept 2s
+    against a 60s reclaim window, so it proved the window had not elapsed, not
+    that redelivery was absent. The window is explicit here for that reason.
     """
     settings = _settings()
-    bus = RedisEventBus(REDIS_URL)
+    # Zero window so the test does not wait 60s; production uses
+    # redis_idle_time_ms and the reclaim path is otherwise identical.
+    bus = RedisEventBus(REDIS_URL, reclaim_min_idle_ms=0)
     attempts: list[str] = []
 
     async def _boom(context: DecisionContext) -> DecisionResult:
@@ -333,21 +331,29 @@ async def test_failed_handler_strands_the_message_in_the_pel_no_redelivery(
         consumer.subscribe(ORG, "growth")
         await bus.publish(_proposal())
 
-        assert await _wait_for(lambda: len(attempts) == 1)
-        # Well past any plausible redelivery interval.
-        await asyncio.sleep(2.0)
+        # ONE publish, redis_max_retries deliveries: every attempt past the first
+        # is the adapter reclaiming the un-acked entry from the group PEL.
+        assert await _wait_for(
+            lambda: len(attempts) >= settings.redis_max_retries
+        ), f"no redelivery: {len(attempts)} attempt(s) after one publish"
 
-        assert len(attempts) == 1, (
-            "CURRENT behaviour is no redelivery. More than one attempt means "
-            "reclaim now exists — rewrite this test to assert retry-then-DLQ."
+        dlq_reached = False
+        for _ in range(200):
+            dlq_reached = (await redis_client.xlen(f"dlq:{ORG}:growth")) > 0
+            if dlq_reached:
+                break
+            await asyncio.sleep(0.05)
+        assert dlq_reached, "retry budget never routed the message to the DLQ"
+
+        assert len(attempts) == settings.redis_max_retries, (
+            f"expected exactly {settings.redis_max_retries} attempts, "
+            f"got {len(attempts)}"
         )
+        # DLQ'd ⇒ acked ⇒ the PEL is clean and the message is not looping.
         pending = await _pending_count(
             redis_client, ORG, "growth", settings.redis_consumer_group
         )
-        assert pending == 1, "the failed message is stranded, unacked, in the PEL"
-
-        dlq = await redis_client.xlen(f"dlq:{ORG}:growth")
-        assert dlq == 0, "and it never reaches the DLQ, because it is never retried"
+        assert pending == 0, "DLQ'd message was left pending in the PEL"
     finally:
         await consumer.stop()
         await bus.close()

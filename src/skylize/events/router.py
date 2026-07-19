@@ -5,27 +5,22 @@ Implements idempotency on `event_id` and, given a redelivering bus, DLQ after
 `dlq_after_retries`. The handler is any async callable taking a typed
 `BaseEvent`. One router instance serves one (department, consumer group).
 
-DELIVERY SEMANTICS — WHAT THIS ACTUALLY DOES TODAY, which is not what
-decision_flow.md §8 specifies. The retry/DLQ budget below is UNREACHABLE against
-the only production bus. `RedisEventBus.consume` reads `{stream: ">"}` — new
-messages only (redis_adapter.py:55) — and there is no XAUTOCLAIM/XPENDING
-anywhere in the adapter, so a message left un-acked by a failing handler is never
-re-read: not by another worker, not by this one after a restart. It sits in the
-PEL forever. `_attempts[event_id]` therefore never exceeds 1, and the
-`>= dlq_after` branch cannot fire for a handler failure.
+DELIVERY SEMANTICS. The retry/DLQ budget below is reachable: `RedisEventBus`
+reclaims its consumer group's stalled PEL entries via XAUTOCLAIM before each
+`">"` read, so a message left un-acked here IS re-delivered once it has been idle
+past the reclaim window. Each redelivery re-enters `_dispatch`, `_attempts` grows,
+and the `>= dlq_after` branch fires on the last attempt.
 
-Effective semantics are at-MOST-once for failures, not at-least-once. Both tests
-covering the DLQ path manufacture the redelivery the bus cannot produce — one
-calls `_dispatch` directly (tests/integration/test_event_router.py:57), the other
-republishes the event (tests/decision_engine/test_consumer.py:324) — so they pass
-without proving the path is reachable.
-
-Closing this needs a durable delivery count on `DeliveredEvent` (bus.py has no
-such field) and a reclaim path on the shared adapter, which would change the
-inline engine's emission behaviour at the same time — it is the sole EventRouter
-consumer besides the OPA engine (app/decision_engine/engine.py:104). That makes
-it a design decision rather than a patch; it is queued, not fixed here. Until it
-lands, do not rely on redelivery for correctness anywhere.
+SCOPE OF THE COUNTER — read this before relying on the budget. `_attempts` lives
+in this router instance's memory, so it counts redeliveries within one process
+lifetime. It does NOT survive a restart, and a second worker reclaiming a dead
+worker's PEL entry starts that event's count at zero. A message that kills every
+worker that touches it therefore retries afresh per process rather than reaching
+the DLQ. Bounding that needs a delivery count carried on `DeliveredEvent`, and
+`bus.py` has no such field — adding one is a port change with its own Kafka/NATS
+portability question, so it is deliberately NOT done here. What is closed is the
+common case: a handler that fails repeatedly against a live worker now exhausts
+its budget and lands in the DLQ instead of stranding silently.
 """
 
 from __future__ import annotations
@@ -87,6 +82,7 @@ class EventRouter:
             assert self._handler is not None
             await self._handler(delivered.event)
             self._seen.add(event_id)
+            self._attempts.pop(event_id, None)  # settled — stop tracking it
             await self._bus.ack(delivered, group=self._group)
         except Exception as exc:  # noqa: BLE001 — router must never crash the loop
             self._attempts[event_id] += 1
@@ -97,7 +93,8 @@ class EventRouter:
             if self._attempts[event_id] >= self._dlq_after:
                 await self._bus.to_dlq(delivered, reason=f"handler_failed: {exc}")
                 await self._bus.ack(delivered, group=self._group)
-            # else: no ack. NOTE this does NOT currently cause a redelivery —
-            # RedisEventBus.consume reads ">" only (redis_adapter.py:55), so the
-            # message stays in the PEL unread and this branch strands it. See
-            # the delivery-semantics note in the module docstring.
+                self._attempts.pop(event_id, None)  # settled into the DLQ
+            # else: no ack — the message stays in the group PEL and the adapter's
+            # reclaim pass re-delivers it once it is idle past the reclaim window
+            # (redis_adapter.RedisEventBus._reclaim), landing back here with
+            # _attempts one higher.

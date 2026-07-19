@@ -16,12 +16,10 @@ in production (``app/decision_engine/engine.py``) — not a second one:
     ``evt:{tenant}:{department}`` — subscriptions derive from
     ``SUBSCRIBED_DEPARTMENTS``, the vocabulary table's own projection, so the
     AUTHORITY allow-list and the subscription set cannot drift apart;
-  - the router's retry/DLQ handling — which does NOT currently deliver
-    at-least-once: the shared Redis adapter reads ``">"`` only and never
-    reclaims, so an un-acked message is stranded in the PEL rather than
-    retried, and ``redis_max_retries`` cannot be reached (redis_adapter.py:55,
-    and the delivery-semantics note in router.py). This is the same gap the
-    KNOWN GAP note below describes, and it is broader than reclaim alone;
+  - the router's retry/DLQ handling, which now does deliver at-least-once: the
+    shared Redis adapter reclaims stalled PEL entries, so an un-acked message is
+    redelivered and ``redis_max_retries`` is reachable (see the delivery
+    semantics note in router.py);
   - idempotency on ``event_id`` through the ``ProcessedEventStore`` port —
     durable on the postgres backend (``decision_processed_events``, migration
     0011), in-memory otherwise. The old Redis ``SETNX`` key is gone with the
@@ -47,24 +45,24 @@ unrelated event on ``evt:{tenant}:growth`` would manufacture a spurious REJECTED
 decision — the inline engine draws the same line with
 ``DecisionProposal.from_event(...) is None``.
 
-KNOWN GAP (inherited, deliberate) — and WIDER than first documented. This note
-used to say only that the router does not XAUTOCLAIM a dead worker's PEL. Audited
-against the adapter, the gap is bigger: ``RedisEventBus.consume`` reads
-``{stream: ">"}`` and nothing else (redis_adapter.py:55), so redelivery does not
-happen at all — not after a crash, not after a handler raises, not on restart of
-the same worker. ``redis_idle_time_ms`` is unused and the router's
-retry-then-DLQ budget is unreachable for handler failures.
+REDELIVERY IS REAL (the KNOWN GAP this note used to describe is closed).
+``RedisEventBus`` reclaims its consumer group's stalled pending entries with
+XAUTOCLAIM before each ``">"`` read, so a message survives a handler that raises,
+a worker that dies, and a restart. ``redis_idle_time_ms`` is the reclaim window
+and is wired through from ``worker.py``; it is no longer dead config.
 
-The old consumer did have a reclaim loop, but it ran against event-type-named
-streams that never existed on the live bus, so it never reclaimed a real message
-either — there is no working prior art to port, only a design to re-derive.
+The fix landed on the SHARED adapter, so the inline engine gained redelivery at
+the same time — that was the owner's explicit call (2026-07-19), on the grounds
+that a governance product must not silently drop decisions. Its one re-emission
+window is benign because ``decision_id`` is derived from the source event rather
+than minted, so a duplicate collapses on ``ON CONFLICT``; see the module docstring
+of app/decision_engine/engine.py.
 
-Deliberately NOT fixed here. The EventRouter and RedisEventBus are shared with
-the inline engine (app/decision_engine/engine.py:104), which is the production
-one; turning on redelivery would change its emission behaviour at the same time
-(a reclaimed message whose owner died between publish and mark_processed would
-re-emit a second terminal decision.*). That, plus the durable delivery count the
-port has no field for, makes it a design decision rather than a task — queued.
+WHAT REMAINS OPEN, deliberately: the router's retry budget counts in process
+memory, so a message that kills every worker touching it retries afresh per
+process instead of converging on the DLQ. Bounding that needs a delivery count on
+``DeliveredEvent``, which is a port change with a Kafka-portability question
+attached — see the note in events/bus.py. Idempotency here does not depend on it.
 """
 
 from __future__ import annotations

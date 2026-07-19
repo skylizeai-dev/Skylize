@@ -11,16 +11,23 @@ six-stage `DecisionEvaluator`, and projects the verdict onto the wire schema:
     decision.conflict_detected    (+ conflict_resolved when a rival was beaten)
     decision.approved | rejected | deferred_to_human   (exactly one terminal)
 
-Every decision also mirrors `audit.action_recorded`. Delivery is *specified* as
-at-least-once, so the engine is idempotent on `event_id` via a
-`ProcessedEventStore`: the same event always yields the same single decision.
+Every decision also mirrors `audit.action_recorded`. Delivery is at-least-once, so
+the engine is idempotent on `event_id` via a `ProcessedEventStore`: the same event
+always yields the same single decision.
 
-That idempotency is correct and must stay, but it is not currently exercised: the
-Redis adapter does not implement at-least-once. It reads ">" only and never
-reclaims (redis_adapter.py:55, and the delivery-semantics note in router.py), so
-an un-acked message is stranded in the PEL rather than retried. Closing that gap
-would begin redelivering to THIS engine — which is the production one — so it is
-a design decision, and queued rather than patched.
+That idempotency is now load-bearing rather than theoretical. The Redis adapter
+reclaims stalled PEL entries (redis_adapter.RedisEventBus._reclaim), so THIS
+engine — the production one — does see redeliveries: after a handler raises, and
+after a worker dies holding an un-acked message.
+
+ONE WINDOW IS NOT COVERED BY `_processed`, and it is benign by construction.
+`_handle_event` emits before it marks processed, so a crash between the two
+re-emits on redelivery. The emitted events are identical, not merely equivalent:
+`decision_id_for(event_id)` derives the id from the source event rather than
+minting a fresh UUID, so the duplicate collapses on the publisher's `ON CONFLICT`
+write instead of creating a second decision. Keep that derivation — reordering
+`_emit` and `mark_processed` would trade this for silently dropping decisions
+whose outcome was never recorded.
 """
 
 from __future__ import annotations

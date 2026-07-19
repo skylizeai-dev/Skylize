@@ -139,6 +139,72 @@ async def test_consumes_from_subscribed_stream() -> None:
     assert bus.published_of_type("decision.approved")
 
 
+class _AckDroppingBus(InMemoryEventBus):
+    """Swallows the first ack — a worker that died after deciding, before acking.
+
+    This is the window PEL reclaim newly exposes on the INLINE engine: before
+    redelivery existed the message simply stranded, so the second delivery below
+    could not happen in production. It can now, which makes this the test that
+    the engine's idempotency actually holds under it.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.dropped = 0
+
+    async def ack(self, delivered, *, group: str) -> None:
+        if self.dropped == 0:
+            self.dropped += 1
+            return  # entry stays pending → the bus redelivers it
+        await super().ack(delivered, group=group)
+
+
+async def test_redelivery_after_a_lost_ack_does_not_decide_twice() -> None:
+    """Inline engine: a redelivered event is short-circuited by ProcessedEventStore."""
+    bus = _AckDroppingBus()
+    processed = InMemoryProcessedEventStore()
+    engine = _engine(bus, processed=processed)
+    await engine.start()
+    engine.subscribe(ORG, "creative")
+    event = _review_event(partition="brief:redeliver")
+    try:
+        await bus.publish(event)
+        await _wait_for(bus, "decision.approved")
+        for _ in range(200):
+            if bus.dropped:
+                break
+            await asyncio.sleep(0.005)
+        await asyncio.sleep(0.05)  # let the redelivery be re-dispatched
+    finally:
+        await engine.stop()
+
+    assert bus.dropped == 1, "the ack was never dropped — redelivery not exercised"
+    # Delivered twice, decided once.
+    assert len(bus.published_of_type("decision.approved")) == 1
+    assert len(bus.published_of_type("decision.evaluated")) == 1
+    assert await processed.is_processed(str(event.event_id), org_id=ORG)
+
+
+async def test_redelivered_decision_keeps_the_same_decision_id() -> None:
+    """The re-emit window is benign because decision_id is derived, not minted.
+
+    If a crash lands between `_emit` and `mark_processed`, redelivery DOES
+    re-emit — but with the identical decision_id, so the duplicate collapses on
+    the publisher's ON CONFLICT write rather than creating a second decision.
+    This is what keeps at-least-once safe for the inline engine.
+    """
+    bus = InMemoryEventBus()
+    await _engine(bus)._handle_event(_ev := _review_event(partition="brief:stable"))
+    first = bus.published_of_type("decision.approved")[0].payload.decision_id
+
+    # The same event redelivered to a FRESH engine (restart: no in-memory dedup).
+    bus2 = InMemoryEventBus()
+    await _engine(bus2)._handle_event(_ev)
+    second = bus2.published_of_type("decision.approved")[0].payload.decision_id
+
+    assert first == second == decision_id_for(_ev.event_id)
+
+
 # -- HITL resume ------------------------------------------------------------
 async def test_human_approval_resumes_to_approved() -> None:
     bus = InMemoryEventBus()

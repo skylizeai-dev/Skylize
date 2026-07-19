@@ -312,31 +312,81 @@ async def test_not_marked_processed_when_the_pipeline_raises(settings):
 
 async def test_repeated_failure_routes_to_the_department_dlq(settings):
     bus = InMemoryEventBus()
+    attempts = 0
 
     async def _boom(context: DecisionContext):
+        nonlocal attempts
+        attempts += 1
         raise RuntimeError("opa unreachable")
 
     consumer = DecisionEngineConsumer(bus, settings, _boom)
     consumer.subscribe(ORG, "growth")
     event = _campaign_proposal()
 
-    # The in-memory bus pops on read, so redelivery is modelled by republishing
-    # the same event_id.
-    #
-    # CAUTION — this fixture is not reachable in production. An unacked Redis PEL
-    # entry does NOT become a republished event: RedisEventBus.consume reads ">"
-    # only and never reclaims (redis_adapter.py:55), so the message is stranded
-    # unread and this DLQ path never fires against the real bus. The test proves
-    # the router's counting logic, NOT that the retry/DLQ budget is reachable.
-    # See the delivery-semantics note in router.py; closing that gap is queued.
-    for _ in range(settings.redis_max_retries):
-        await bus.publish(event)
-        await _settle(lambda: False, ticks=20)
+    # Published ONCE. Every subsequent delivery is a genuine redelivery driven by
+    # the bus: the pipeline raises, the router declines to ack, and the entry
+    # stays in the bus's pending list until the retry budget is spent. The Redis
+    # adapter reaches the same state by reclaiming the group PEL with XAUTOCLAIM,
+    # so unlike the republish loop this replaced, the path under test is the one
+    # production actually takes.
+    await bus.publish(event)
+
+    dlq = bus.dlq[f"dlq:{ORG}:growth"]
+    assert await _settle(lambda: bool(dlq)), "retry budget never reached the DLQ"
 
     await consumer.stop()
-    dlq = bus.dlq[f"dlq:{ORG}:growth"]
     assert len(dlq) == 1
     assert "handler_failed" in dlq[0][2]
+    # settings.redis_max_retries deliveries of one publish — the budget counted
+    # real redeliveries, not republications.
+    assert attempts == settings.redis_max_retries
+
+
+class _AckDroppingBus(InMemoryEventBus):
+    """Swallows the first ack — a worker that died after deciding, before acking.
+
+    PEL reclaim makes that second delivery real in production; before it, the
+    message stranded. This is the test that the OPA engine's idempotency holds
+    under the redelivery the fix introduces.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.dropped = 0
+
+    async def ack(self, delivered, *, group: str) -> None:
+        if self.dropped == 0:
+            self.dropped += 1
+            return  # entry stays pending → the bus redelivers it
+        await super().ack(delivered, group=group)
+
+
+async def test_redelivery_after_a_lost_ack_does_not_run_the_pipeline_twice(settings):
+    """OPA engine: ProcessedEventStore short-circuits the redelivered proposal."""
+    from skylize.dal.memory import InMemoryProcessedEventStore
+
+    bus = _AckDroppingBus()
+    store = InMemoryProcessedEventStore()
+    calls: list[str] = []
+
+    async def _pipeline(context: DecisionContext):
+        calls.append(context.event_id)
+        return make_decision_result(
+            outcome=DecisionOutcome.APPROVED, event_id=context.event_id, tenant_id=ORG
+        )
+
+    consumer = DecisionEngineConsumer(bus, settings, _pipeline, processed=store)
+    consumer.subscribe(ORG, "growth")
+    event = _campaign_proposal()
+    try:
+        await bus.publish(event)
+        assert await _settle(lambda: bool(calls) and bool(bus.dropped))
+        await _settle(lambda: False, ticks=200)  # give the redelivery room to land
+    finally:
+        await consumer.stop()
+
+    assert bus.dropped == 1, "the ack was never dropped — redelivery not exercised"
+    assert calls == [str(event.event_id)], "redelivery re-ran the pipeline"
 
 
 # ---------------------------------------------------------------------------

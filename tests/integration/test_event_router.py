@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import suppress
 from uuid import uuid4
 
 from skylize.events.bus import DeliveredEvent
@@ -43,28 +45,76 @@ async def test_dispatch_calls_handler_and_is_idempotent() -> None:
 
 
 async def test_failing_handler_routes_to_dlq_after_retries() -> None:
-    """The router's retry counting — NOT proof the budget is reachable.
+    """The retry budget is reachable THROUGH THE BUS, not by hand.
 
-    This calls `_dispatch` directly three times, bypassing the bus. No bus in
-    this repo produces that second dispatch: RedisEventBus.consume reads ">"
-    only and never reclaims (redis_adapter.py:55), so a failing handler's
-    message is stranded in the PEL and this DLQ branch never fires in
-    production. Asserts the logic is correct for when redelivery exists; see the
-    delivery-semantics note in router.py. Closing that gap is queued.
+    This used to call `_dispatch` directly three times, which proved the counting
+    arithmetic but not that anything could ever produce the second dispatch. It
+    now publishes ONCE and lets `router.run()` consume: the handler raises, the
+    router declines to ack, and the bus redelivers the un-acked entry from its
+    pending list until the budget is spent and the router DLQs it. The Redis
+    adapter reaches the same state via XAUTOCLAIM over the group PEL.
     """
     bus = InMemoryEventBus()
     router = EventRouter(bus, group="cg:test", dlq_after_retries=3)
+    attempts: list[str] = []
 
     async def boom(ev) -> None:
+        attempts.append(str(ev.event_id))
         raise RuntimeError("handler failure")
 
     router.on_event(boom)
     event = _event()
-    delivered = _delivered(event)
 
-    for _ in range(3):
-        await router._dispatch(delivered)
+    task = asyncio.create_task(router.run(tenant_id="org_1", department="creative"))
+    try:
+        await bus.publish(event)  # published once — every later delivery is a retry
+        dlq = bus.dlq["dlq:org_1:creative"]
+        for _ in range(200):
+            if dlq:
+                break
+            await asyncio.sleep(0.01)
+    finally:
+        router.stop()
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
 
-    dlq = bus.dlq["dlq:org_1:creative"]
-    assert len(dlq) == 1
+    assert len(dlq) == 1, "retry budget never exhausted into the DLQ"
     assert "handler_failed" in dlq[0][2]
+    # Three deliveries of ONE publish: the budget counted actual redeliveries.
+    assert attempts == [str(event.event_id)] * 3
+
+
+async def test_redelivery_does_not_double_process_a_successful_event() -> None:
+    """Redelivery must not resurrect work the handler already completed.
+
+    The safety counterpart to the test above: a handler that succeeds gets acked,
+    leaves the pending list, and is never handed back — so enabling redelivery
+    does not turn every success into a duplicate.
+    """
+    bus = InMemoryEventBus()
+    router = EventRouter(bus, group="cg:test")
+    calls: list[str] = []
+
+    async def handler(ev) -> None:
+        calls.append(str(ev.event_id))
+
+    router.on_event(handler)
+    event = _event()
+
+    task = asyncio.create_task(router.run(tenant_id="org_1", department="creative"))
+    try:
+        await bus.publish(event)
+        for _ in range(200):
+            if calls:
+                break
+            await asyncio.sleep(0.01)
+        # Give the consume loop ample opportunity to redeliver if ack failed.
+        await asyncio.sleep(0.1)
+    finally:
+        router.stop()
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+    assert calls == [str(event.event_id)]

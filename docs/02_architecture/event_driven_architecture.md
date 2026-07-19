@@ -304,6 +304,25 @@ chain so a proposal → decision → action is fully traceable.
   scaling.
 - **Idempotency:** consumers must be idempotent on `event_id` (at-least-once
   delivery means a message can be redelivered after a crash before ACK).
+- **Reclaim is rate-bounded, not age-bounded.** `RedisEventBus.consume` runs one
+  bounded `XAUTOCLAIM` batch before each `">"` read, so the first start after
+  reclaim was introduced drains whatever had accumulated in the PEL steadily
+  rather than as a single flood. There is deliberately **no age ceiling**: an
+  "ignore entries older than X" rule would silently abandon decisions sitting in
+  the PEL, which is the exact failure reclaim exists to prevent. Most of a
+  first-start backlog is cheap to drain anyway — entries whose outcome was
+  already recorded are short-circuited by the consumer's `ProcessedEventStore`
+  and acked without re-running the pipeline. Entries that were never processed
+  *are* processed, which is the point of the change.
+- **Staleness is a policy question, not a transport one.** A proposal reclaimed
+  long after publication is decided on its merits, because the transport has no
+  basis for judging whether age invalidates it. If a department needs proposals
+  to expire, that belongs in the pipeline's own stages (as `hitl_expiry_hours`
+  already does for deferred decisions), not in the bus.
+- **The reclaim window is not a retry interval.** `redis_idle_time_ms` (60s)
+  says how long a message must look abandoned before a peer may take it. Setting
+  it near zero would let a sibling steal messages from a healthy worker
+  mid-flight, turning every delivery into a duplicate.
 
 ---
 
