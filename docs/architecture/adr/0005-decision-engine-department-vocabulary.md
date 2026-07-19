@@ -1,7 +1,7 @@
 # ADR 0005 — Decision Engine Department Vocabulary: An Event's Category Is Not Its Department Channel
 
-**Status:** Proposed — resolution pending. Decision (1) below is binding on acceptance *and in the interim*.
-**Date:** 2026-07-17
+**Status:** **Accepted — Alternative A** (2026-07-19, human owner). Decision (1)'s hard gate is released **for the vocabulary condition only**; the other flag-flip blockers listed under *Consequences* (transport rebuild, `hitl_id` reconciliation, HITL resume path, live OPA + real Rego) remain in force, so `SKYLIZE_DECISION_ENGINE` stays `"inline"`.
+**Date:** 2026-07-17 (accepted 2026-07-19)
 **Deciders:** Principal AI Infrastructure Engineer, human owner
 **Related:** [../../04_decision_engine/decision_engine.md](../../04_decision_engine/decision_engine.md) · [../../04_decision_engine/decision_flow.md](../../04_decision_engine/decision_flow.md) · [../../02_architecture/event_driven_architecture.md](../../02_architecture/event_driven_architecture.md) · `src/skylize/decision_engine/constants.py:31-49` · `src/skylize/decision_engine/pipeline.py:193-223` · `src/skylize/contracts/mvp/growth.py:17` · `src/skylize/contracts/mvp/sdr.py:17,39` · `src/skylize/events/bus.py:27` · `src/skylize/schemas/base.py:57` · commits `c04b5651` (the glue + the deferred-rebuild note), `3dd4dd71`
 
@@ -100,7 +100,7 @@ No producer for `sales.campaign_proposed` has been written yet. Whoever writes i
 
 ## Alternatives considered
 
-- **A. Replace the prefix derivation with an explicit `department → event-type` table. (Recommended.)**
+- **A. Replace the prefix derivation with an explicit `department → event-type` table. (Recommended — ✅ ACCEPTED 2026-07-19, implemented in `constants.py`.)**
   ```python
   ALLOWED_EVENT_TYPES_BY_DEPARTMENT = {
       "creative": frozenset({"creative.review_requested"}),
