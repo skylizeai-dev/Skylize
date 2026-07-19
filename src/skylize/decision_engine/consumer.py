@@ -1,257 +1,235 @@
-"""Decision Engine Redis Streams consumer.
+"""Decision Engine consumer — the OPA engine's transport onto the EventBus port.
 
-Implements at-least-once delivery with idempotency, retry tracking,
-XAUTOCLAIM-based reclaim of stuck messages, and DLQ routing.
-Architecture: event_driven_architecture.md §7, §9.
+Rebuilt per ADR-0005 (accepted 2026-07-19). The previous implementation drove
+``redis.asyncio`` directly against globally-named, event-type-keyed streams
+(``SUBSCRIBED_STREAMS``) that never existed on the live bus: ``RedisEventBus``
+keys every event as ``evt:{tenant}:{department}`` and the engine does not know
+the tenant set a priori. That made the consumer untestable against a real bus
+and unwireable at the composition root.
+
+This is deliberately the SAME transport the canonical inline engine already runs
+in production (``app/decision_engine/engine.py``) — not a second one:
+
+  - the ``EventBus`` port, never a Redis client, so the Kafka/NATS swap stays an
+    adapter change (event_driven_architecture.md §2);
+  - one ``EventRouter`` per (tenant, department) pair, each consuming
+    ``evt:{tenant}:{department}`` — subscriptions derive from
+    ``SUBSCRIBED_DEPARTMENTS``, the vocabulary table's own projection, so the
+    AUTHORITY allow-list and the subscription set cannot drift apart;
+  - at-least-once delivery with DLQ after ``redis_max_retries`` attempts, which
+    the router owns;
+  - idempotency on ``event_id`` through the ``ProcessedEventStore`` port —
+    durable on the postgres backend (``decision_processed_events``, migration
+    0011), in-memory otherwise. The old Redis ``SETNX`` key is gone with the
+    Redis client.
+
+What this consumer adds over the inline engine is only the sink: instead of
+evaluating inline it feeds ``pipeline_fn`` — ``DecisionOrchestrator.process``,
+which runs the six-stage OPA pipeline and durably records the outcome.
+
+Two filters, not one, and they answer different questions. This module asks "is
+this event addressed to the engine at all?" and silently ignores anything else
+riding the department channel; the pipeline's AUTHORITY stage then asks "is this
+proposal authorized?" and REJECTS what fails. Without the first filter every
+unrelated event on ``evt:{tenant}:growth`` would manufacture a spurious REJECTED
+decision — the inline engine draws the same line with
+``DecisionProposal.from_event(...) is None``.
+
+KNOWN GAP (inherited, deliberate): the router does not XAUTOCLAIM messages
+stranded in a dead worker's PEL, so ``redis_idle_time_ms`` is now unused. The
+old consumer had a reclaim loop, but only against streams that did not exist.
+Matching the proven inline transport was preferred over inventing a third one;
+reclaim belongs in the bus adapter, where both engines would gain it at once.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable, Sequence
+from contextlib import suppress
 from datetime import datetime, timezone
-from typing import Any, cast
 
-import redis.asyncio as aioredis
-from pydantic import ValidationError
-
+from ..dal.memory import InMemoryProcessedEventStore
+from ..dal.ports import ProcessedEventStore
+from ..events.bus import EventBus
+from ..events.router import EventRouter
 from ..schemas.base import BaseEvent
-from ..schemas.events import EVENT_REGISTRY
 from .config import DecisionEngineSettings
-from .constants import SUBSCRIBED_STREAMS
-from .exceptions import DecisionEngineError
+from .constants import ALLOWED_EVENT_TYPES_BY_DEPARTMENT, SUBSCRIBED_DEPARTMENTS
 from .models import DecisionContext, DecisionResult
 
 log = logging.getLogger(__name__)
 
-# Single JSON field used by RedisEventBus; fallback to flat dict if absent.
-_EVENT_FIELD = "event"
-
-
-def _utcnow() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _decode_fields(fields: dict[str, str]) -> BaseEvent | None:
-    """Decode a stream entry's fields dict into a typed BaseEvent.
-
-    Tries the single-field JSON envelope first (RedisEventBus format), then
-    falls back to treating the flat fields dict as the event payload.
-    """
-    raw = fields.get(_EVENT_FIELD)
-    if raw is not None:
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError:
-            return None
-    else:
-        data = dict(fields)
-
-    event_type = data.get("type")
-    if not event_type:
-        return None
-    model = EVENT_REGISTRY.get(event_type)
-    if model is None:
-        return None
-    try:
-        return model.model_validate(data)
-    except ValidationError:
-        return None
+# ``DecisionOrchestrator.process`` has exactly this shape.
+PipelineFn = Callable[[DecisionContext], Awaitable[DecisionResult]]
 
 
 class DecisionEngineConsumer:
+    """Consumes department channels and feeds each proposal to ``pipeline_fn``."""
+
     def __init__(
         self,
-        redis: aioredis.Redis,
+        bus: EventBus,
         settings: DecisionEngineSettings,
-        pipeline_fn: Callable[[DecisionContext], Awaitable[DecisionResult]],
+        pipeline_fn: PipelineFn,
+        *,
+        processed: ProcessedEventStore | None = None,
+        departments: Iterable[str] = SUBSCRIBED_DEPARTMENTS,
     ) -> None:
-        self._redis = redis
+        self._bus = bus
         self._settings = settings
         self._pipeline_fn = pipeline_fn
+        self._processed: ProcessedEventStore = processed or InMemoryProcessedEventStore()
+        # Sorted so the subscription order — and therefore the consumer names —
+        # is stable across restarts rather than following frozenset iteration.
+        self._departments: tuple[str, ...] = tuple(sorted(departments))
         self._group = settings.redis_consumer_group
-        self._consumer = settings.redis_consumer_name
+        self._routers: list[EventRouter] = []
+        self._tasks: list[asyncio.Task[None]] = []
 
-    async def ensure_consumer_group(self) -> None:
-        """Create consumer groups for all subscribed streams, idempotently."""
-        for stream in SUBSCRIBED_STREAMS:
-            try:
-                await self._redis.xgroup_create(stream, self._group, id="$", mkstream=True)
-                log.info("consumer_group_created", extra={"stream": stream, "group": self._group})
-            except aioredis.ResponseError as exc:
-                if "BUSYGROUP" not in str(exc):
-                    raise
+    # -- lifecycle ----------------------------------------------------------
 
-    async def run(self) -> None:
-        """Main loop: poll + reclaim idle until cancelled."""
-        log.info("decision_engine_consumer_starting", extra={"consumer": self._consumer})
-        try:
-            while True:
-                try:
-                    await self._poll()
-                    await self._reclaim_idle()
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    log.exception(
-                        "decision_engine_consumer_error_sleeping",
-                        extra={"sleep_seconds": 5},
-                    )
-                    await asyncio.sleep(5)
-        except asyncio.CancelledError:
-            log.info("decision_engine_consumer_shutdown", extra={"consumer": self._consumer})
+    async def start(self, subscriptions: Sequence[tuple[str, str]] | None = None) -> None:
+        """Begin consuming. Each subscription is an ``(org_id, department)`` pair."""
+        for org_id, department in subscriptions or []:
+            self.subscribe(org_id, department)
 
-    async def _poll(self) -> None:
-        """XREADGROUP > to claim new messages from all subscribed streams."""
-        streams_arg: dict[str, str] = {s: ">" for s in SUBSCRIBED_STREAMS}
-        resp = cast(
-            list[tuple[str, list[tuple[str, dict[str, str]]]]],
-            await self._redis.xreadgroup(
-                self._group,
-                self._consumer,
-                streams_arg,
-                count=self._settings.redis_batch_size,
-                block=2000,
-            ),
-        )
-        if not resp:
-            return
-        for stream, entries in resp:
-            for msg_id, fields in entries:
-                await self._process_message(stream, msg_id, fields)
-
-    async def _process_message(
-        self,
-        stream: str,
-        msg_id: str,
-        fields: dict[str, str],
-    ) -> None:
-        """Deserialize, deduplicate, run pipeline, ack or retry/DLQ."""
-        event = _decode_fields(fields)
-        if event is None:
-            log.warning(
-                "decision_engine_schema_rejected",
-                extra={"stream": stream, "msg_id": msg_id},
+    def subscribe(self, tenant_id: str, department: str | None = None) -> None:
+        """Spawn consumer task(s) for a tenant (all served departments if None)."""
+        departments = [department] if department is not None else list(self._departments)
+        for dept in departments:
+            router = EventRouter(
+                self._bus,
+                group=self._group,
+                # Host-qualified so two worker replicas never share a Redis
+                # consumer name (each would inherit the other's PEL entries).
+                consumer=f"{self._settings.redis_consumer_name}-{tenant_id}-{dept}",
+                dlq_after_retries=self._settings.redis_max_retries,
             )
-            await self._redis.xack(stream, self._group, msg_id)
-            await self._send_to_dlq(stream, msg_id, fields, ValueError("schema_rejected"))
+            router.on_event(self._handle_event)
+            self._routers.append(router)
+            self._tasks.append(
+                asyncio.create_task(router.run(tenant_id=tenant_id, department=dept))
+            )
+            log.info(
+                "decision_engine_subscribed",
+                extra={"tenant_id": tenant_id, "department": dept, "group": self._group},
+            )
+
+    async def run(self, org_ids: Sequence[str]) -> None:
+        """Subscribe every ``org × served department`` pair and serve until cancelled.
+
+        The blocking entrypoint a worker process awaits (see ``worker.py``).
+        Raises on empty ``org_ids`` rather than idling silently: a dedicated
+        consumer process with nothing to consume is a misconfiguration, and a
+        worker that looks healthy while proposals pile up unread is worse than
+        one that refuses to start.
+        """
+        if not org_ids:
+            raise RuntimeError(
+                "DecisionEngineConsumer.run called with no org_ids: set "
+                "SKYLIZE_DECISION_ENGINE_ORG_IDS to the tenants this worker serves."
+            )
+        await self.start(
+            [(org_id, dept) for org_id in org_ids for dept in self._departments]
+        )
+        log.info(
+            "decision_engine_consumer_started",
+            extra={
+                "orgs": len(org_ids),
+                "departments": list(self._departments),
+                "subscriptions": len(self._tasks),
+            },
+        )
+        try:
+            await asyncio.gather(*self._tasks)
+        finally:
+            await self.stop()
+
+    async def stop(self) -> None:
+        """Graceful shutdown: stop routers and cancel their consume tasks."""
+        for router in self._routers:
+            router.stop()
+        for task in self._tasks:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+        self._tasks.clear()
+        self._routers.clear()
+        log.info("decision_engine_consumer_shutdown")
+
+    # -- dispatch -----------------------------------------------------------
+
+    async def _handle_event(self, event: BaseEvent) -> None:
+        """Evaluate one consumed event, or ignore it if it is not ours.
+
+        Exceptions propagate on purpose: the router turns them into a no-ACK
+        redelivery and, past ``redis_max_retries``, a DLQ route. The pipeline's
+        hard timeout and the publisher's ``ON CONFLICT`` writes make re-running a
+        redelivered proposal safe.
+        """
+        if not _is_addressed_to_engine(event):
+            log.debug(
+                "decision_engine_event_ignored",
+                extra={
+                    "event_id": str(event.event_id),
+                    "event_type": event.type,
+                    "department": event.department,
+                },
+            )
             return
 
-        event_id = str(event.event_id)
-
-        # Idempotency: SETNX with 24 h TTL
-        idempotency_key = f"decision_engine:processed:{event_id}"
-        claimed = await self._redis.set(idempotency_key, 1, nx=True, ex=86400)
-        if not claimed:
+        key = str(event.event_id)
+        if await self._processed.is_processed(key, org_id=event.tenant_id):
             log.debug(
                 "decision_engine_duplicate_skipped",
-                extra={"event_id": event_id, "stream": stream, "msg_id": msg_id},
+                extra={"event_id": key, "tenant_id": event.tenant_id},
             )
-            await self._redis.xack(stream, self._group, msg_id)
             return
 
         context = DecisionContext(
-            event_id=event_id,
+            event_id=key,
             tenant_id=event.tenant_id,
             department=event.department,
             event_type=event.type,
-            payload=event.model_dump(),
+            # mode="json" so the payload is JSON-native all the way down: it is
+            # POSTed verbatim to OPA (httpx's json= uses the stdlib encoder, which
+            # raises on a UUID) and written to hitl_queue.proposal_json.
+            payload=event.model_dump(mode="json"),
             received_at=datetime.now(timezone.utc),
         )
 
-        try:
-            await self._pipeline_fn(context)
-            await self._redis.xack(stream, self._group, msg_id)
-            log.info(
-                "decision_engine_message_processed",
-                extra={"event_id": event_id, "stream": stream},
-            )
-        except DecisionEngineError as exc:
-            await self._handle_retry(stream, msg_id, fields, event_id, exc)
-        except Exception as exc:
-            await self._handle_retry(stream, msg_id, fields, event_id, exc)
+        result = await self._pipeline_fn(context)
 
-    async def _handle_retry(
-        self,
-        stream: str,
-        msg_id: str,
-        fields: dict[str, str],
-        event_id: str,
-        error: Exception,
-    ) -> None:
-        retry_key = f"decision_engine:retries:{event_id}"
-        count = await self._redis.hincrby(retry_key, "count", 1)
-        await self._redis.expire(retry_key, 86400)
-        log.warning(
-            "decision_engine_processing_error",
+        # Marked only after the outcome is durably recorded, so a crash mid-flight
+        # redelivers rather than silently dropping the proposal.
+        await self._processed.mark_processed(
+            key, result.outcome.value, org_id=event.tenant_id
+        )
+        log.info(
+            "decision_engine_message_processed",
             extra={
-                "event_id": event_id,
-                "stream": stream,
-                "msg_id": msg_id,
-                "error": str(error),
-                "error_type": type(error).__name__,
-                "retry_count": count,
-                "max_retries": self._settings.redis_max_retries,
+                "event_id": key,
+                "tenant_id": event.tenant_id,
+                "department": event.department,
+                "event_type": event.type,
+                "outcome": result.outcome.value,
             },
         )
-        if count >= self._settings.redis_max_retries:
-            await self._send_to_dlq(stream, msg_id, fields, error)
-        # else: do NOT ack — message stays in PEL for re-delivery
 
-    async def _reclaim_idle(self) -> None:
-        """XAUTOCLAIM messages stuck in dead consumers' PELs."""
-        for stream in SUBSCRIBED_STREAMS:
-            try:
-                result = await self._redis.xautoclaim(
-                    stream,
-                    self._group,
-                    self._consumer,
-                    self._settings.redis_idle_time_ms,
-                    start_id="0-0",
-                    count=50,
-                )
-                # redis-py >= 4.3 returns (next_id, entries, deleted_ids)
-                entries: list[tuple[str, dict[str, str]]]
-                if isinstance(result, (list, tuple)) and len(result) >= 2:
-                    entries = result[1]
-                else:
-                    continue
-                for msg_id, fields in entries:
-                    await self._process_message(stream, msg_id, fields)
-            except aioredis.ResponseError:
-                # XAUTOCLAIM unavailable on Redis < 6.2; skip silently.
-                log.debug("xautoclaim_unavailable", extra={"stream": stream})
 
-    async def _send_to_dlq(
-        self,
-        stream: str,
-        msg_id: str,
-        fields: dict[str, str],
-        error: Exception,
-    ) -> None:
-        """Route a failed message to the DLQ stream and ACK it."""
-        dlq_entry: dict[str, Any] = {
-            "stream": stream,
-            "msg_id": msg_id,
-            "error": str(error),
-            "error_type": type(error).__name__,
-            "fields": json.dumps(fields),
-            "failed_at": _utcnow(),
-        }
-        await self._redis.xadd(
-            self._settings.redis_dlq_stream,
-            cast("dict[Any, Any]", {k: str(v) for k, v in dlq_entry.items()}),
-        )
-        await self._redis.xack(stream, self._group, msg_id)
-        log.error(
-            "decision_engine_dlq_routed",
-            extra={
-                "stream": stream,
-                "msg_id": msg_id,
-                "dlq": self._settings.redis_dlq_stream,
-                "error": str(error),
-                "error_type": type(error).__name__,
-            },
-        )
+def _is_addressed_to_engine(event: BaseEvent) -> bool:
+    """Is this event one the engine is here to decide on?
+
+    Keyed off the ADR-0005 table directly, so a department gains or loses
+    coverage in exactly one place. Note this checks the pairing, not membership
+    of two flat lists: an event type is addressed to the engine only on the
+    department that owns it.
+    """
+    return event.type in ALLOWED_EVENT_TYPES_BY_DEPARTMENT.get(
+        event.department, frozenset()
+    )
+
+
+__all__ = ["DecisionEngineConsumer", "PipelineFn"]

@@ -233,18 +233,27 @@ async def build_container(settings: Settings | None = None) -> Container:
 
     closers.append(_stop_subscriber)
 
-    # Engine selection (SKYLIZE_DECISION_ENGINE). Only the inline engine is
-    # wired. The OPA-backed decision_engine package is not selectable yet — its
-    # consumer transport still assumes a Redis taxonomy the live EventBus does
-    # not use (see decision_engine/constants.py). Fail closed on any other value
-    # rather than silently running inline, so a misconfigured environment is a
-    # loud startup error, not a surprising fallback.
+    # Engine selection (SKYLIZE_DECISION_ENGINE). This composition root wires the
+    # inline engine and only the inline engine. The OPA-backed decision_engine
+    # package is now a separate worker PROCESS
+    # (`python -m skylize.decision_engine.worker`), not an alternative wiring
+    # here — its consumer was rebuilt onto the EventBus port per ADR-0005, but it
+    # owns its own Postgres/Redis/OPA concretes and is selected by the same flag
+    # from the other side (`worker.require_opa_engine`).
+    #
+    # So the guard stays, and it is now an interlock rather than a
+    # not-implemented notice: exactly one engine per environment may emit
+    # terminal `decision.*` events (decision_engine.md §2). Under 'opa' the API
+    # process must NOT also run inline, and failing closed here is what stops it.
+    # The flag remains 'inline' everywhere until the OPA engine's HITL resume
+    # path, real Rego, and a live OPA server land.
     # See ADR-0004: docs/architecture/adr/0004-opa-production-arbiter.md
     if settings.decision_engine != "inline":
         raise RuntimeError(
-            f"SKYLIZE_DECISION_ENGINE={settings.decision_engine!r} is not available: "
-            "the OPA decision engine's consumer is not wired to the EventBus yet "
-            "(see skylize/decision_engine/constants.py). Only 'inline' is functional."
+            f"SKYLIZE_DECISION_ENGINE={settings.decision_engine!r}: this process wires "
+            "only the inline engine. The OPA engine runs as its own worker "
+            "(python -m skylize.decision_engine.worker) and is not production-ready "
+            "(no HITL resume path, no real Rego, no live OPA server)."
         )
 
     # Decision Engine (business-action authz; per environment, exactly one

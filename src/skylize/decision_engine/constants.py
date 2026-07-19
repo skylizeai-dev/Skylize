@@ -38,10 +38,11 @@ ALLOWED_EVENT_TYPES_BY_DEPARTMENT: dict[str, frozenset[str]] = {
 # The departments the engine serves — STAGE 1 (AUTHORITY), pipeline.py.
 ALLOWED_DEPARTMENTS: frozenset[str] = frozenset(ALLOWED_EVENT_TYPES_BY_DEPARTMENT)
 
-# The departments the consumer subscribes to — one `evt:{tenant}:{department}`
-# stream per entry, per the bus's routing key (events/bus.py:27). Identical to
-# ALLOWED_DEPARTMENTS *by construction*, not by coincidence: the engine may only
-# receive what it is authorized to act on, and vice versa.
+# The departments the consumer subscribes to — the rebuilt DecisionEngineConsumer
+# spawns one EventRouter per (tenant, entry), each on `evt:{tenant}:{department}`
+# per the bus's routing key (events/bus.py:27). Identical to ALLOWED_DEPARTMENTS
+# *by construction*, not by coincidence: the engine may only receive what it is
+# authorized to act on, and vice versa.
 SUBSCRIBED_DEPARTMENTS: frozenset[str] = ALLOWED_DEPARTMENTS
 
 # The event types the engine is authorized to act on — the REAL wire `type`
@@ -54,26 +55,13 @@ SUBSCRIBED_EVENT_TYPES: list[str] = sorted(
     for event_type in types
 )
 
-# Redis stream keys the consumer reads.
-#
-# TRANSPORT MISMATCH (deferred rebuild): the live RedisEventBus keys every event
-# as `evt:{tenant}:{department}`, per-tenant (events/bus.py) — NOT by event-type
-# name, and the engine does not know the tenant set a priori. Consuming the real
-# bus therefore requires rebuilding DecisionEngineConsumer onto the EventBus port
-# with a per-(org, department) subscription, exactly as the canonical inline
-# engine already does (app/decision_engine/engine.py). Until that lands the
-# consumer is NOT started at the composition root; these logical identifiers only
-# stand in for the still-isolated consumer unit tests. Keying and the AUTHORITY
-# allow-list are now separate concerns — this list no longer doubles as the
-# event-type vocabulary (see SUBSCRIBED_EVENT_TYPES above).
-#
-# ADR-0005 directs that this alias be DELETED (not re-pointed) as part of the
-# transport rebuild — stream keys are `evt:{tenant}:{department}`, never
-# event-type names, so SUBSCRIBED_DEPARTMENTS is what the rebuilt consumer will
-# key on. It is left in place here only because deleting it means rewriting
-# DecisionEngineConsumer, which is the gated rebuild itself; this change stays
-# confined to the vocabulary.
-SUBSCRIBED_STREAMS: list[str] = list(SUBSCRIBED_EVENT_TYPES)
+# NOTE: the `SUBSCRIBED_STREAMS` alias that used to sit here is GONE, as ADR-0005
+# directed. It aliased the event-type list as if those were Redis stream keys;
+# stream keys are `evt:{tenant}:{department}`, never event-type names, so it
+# addressed streams that do not exist on the live bus. The consumer now derives
+# its subscriptions from SUBSCRIBED_DEPARTMENTS and lets the bus build the key.
+# Do not reintroduce it: nothing outside a stream-key builder should name a
+# stream, and the only stream-key builder is `events/bus.py:stream_name`.
 
 # STAGE 5 (CONFLICT): payload keys that signal an intent to approve vs reject.
 # A payload carrying at least one key from EACH set is internally contradictory
