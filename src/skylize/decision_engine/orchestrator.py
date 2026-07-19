@@ -15,9 +15,16 @@ the two in one line (``worker.build_consumer``)::
 
 This wrapper owns neither transport (the consumer supplies events) nor the Redis
 relay (the OutboxPoller owns that); it only composes evaluation, persistence, and
-escalation. Exceptions propagate unchanged so the consumer's at-least-once
-retry/DLQ path engages — the pipeline's own timeout and the publisher's
-idempotent (``ON CONFLICT``) writes make a redelivery safe to re-run.
+escalation. Exceptions propagate unchanged so the consumer's retry/DLQ path
+engages, and the pipeline's own timeout plus the publisher's idempotent
+(``ON CONFLICT``) writes make a redelivery safe to re-run.
+
+Safe to re-run, but note it is not currently re-run at all: the shared Redis
+adapter never redelivers an un-acked message (redis_adapter.py:55, and the
+delivery-semantics note in router.py), so a proposal whose evaluation raises is
+stranded rather than retried. Propagating is still right — it is what a working
+retry path will need, and swallowing would hide the failure entirely — but do not
+read this as a claim that failures are recovered today.
 """
 
 from __future__ import annotations

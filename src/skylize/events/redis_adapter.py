@@ -2,8 +2,18 @@
 Redis Streams implementation of the EventBus port (event_driven_architecture.md §2).
 
 One stream per department channel per tenant (`evt:{tenant}:{department}`),
-consumer groups for at-least-once delivery, paired DLQ. Behind the EventBus port
-so a future Kafka/NATS migration is an adapter swap.
+consumer groups, paired DLQ. Behind the EventBus port so a future Kafka/NATS
+migration is an adapter swap.
+
+NOT at-least-once, despite the consumer group. `consume` reads `{stream: ">"}`
+only — new messages — and this adapter issues no XAUTOCLAIM, XCLAIM or XPENDING
+anywhere, so nothing ever re-reads a message left un-acked by a failing handler.
+It remains in the PEL, unread, permanently: at-MOST-once for failures. The DLQ
+here is only reached on the decode path (`_raw_to_dlq`, schema_rejected) and by
+an explicit `to_dlq` call, never by the router's retry budget, which cannot count
+past one delivery. See the delivery-semantics note in router.py. Queued as a
+design decision, not a patch — reclaim on this shared adapter would change the
+inline engine's behaviour simultaneously.
 """
 
 from __future__ import annotations

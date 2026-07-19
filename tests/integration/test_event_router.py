@@ -43,6 +43,15 @@ async def test_dispatch_calls_handler_and_is_idempotent() -> None:
 
 
 async def test_failing_handler_routes_to_dlq_after_retries() -> None:
+    """The router's retry counting — NOT proof the budget is reachable.
+
+    This calls `_dispatch` directly three times, bypassing the bus. No bus in
+    this repo produces that second dispatch: RedisEventBus.consume reads ">"
+    only and never reclaims (redis_adapter.py:55), so a failing handler's
+    message is stranded in the PEL and this DLQ branch never fires in
+    production. Asserts the logic is correct for when redelivery exists; see the
+    delivery-semantics note in router.py. Closing that gap is queued.
+    """
     bus = InMemoryEventBus()
     router = EventRouter(bus, group="cg:test", dlq_after_retries=3)
 

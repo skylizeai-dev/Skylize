@@ -11,9 +11,16 @@ six-stage `DecisionEvaluator`, and projects the verdict onto the wire schema:
     decision.conflict_detected    (+ conflict_resolved when a rival was beaten)
     decision.approved | rejected | deferred_to_human   (exactly one terminal)
 
-Every decision also mirrors `audit.action_recorded`. Delivery is at-least-once,
-so the engine is idempotent on `event_id` via a `ProcessedEventStore`: the same
-event always yields the same single decision.
+Every decision also mirrors `audit.action_recorded`. Delivery is *specified* as
+at-least-once, so the engine is idempotent on `event_id` via a
+`ProcessedEventStore`: the same event always yields the same single decision.
+
+That idempotency is correct and must stay, but it is not currently exercised: the
+Redis adapter does not implement at-least-once. It reads ">" only and never
+reclaims (redis_adapter.py:55, and the delivery-semantics note in router.py), so
+an un-acked message is stranded in the PEL rather than retried. Closing that gap
+would begin redelivering to THIS engine — which is the production one — so it is
+a design decision, and queued rather than patched.
 """
 
 from __future__ import annotations

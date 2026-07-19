@@ -321,7 +321,14 @@ async def test_repeated_failure_routes_to_the_department_dlq(settings):
     event = _campaign_proposal()
 
     # The in-memory bus pops on read, so redelivery is modelled by republishing
-    # the same event_id — which is what an unacked Redis PEL entry becomes.
+    # the same event_id.
+    #
+    # CAUTION — this fixture is not reachable in production. An unacked Redis PEL
+    # entry does NOT become a republished event: RedisEventBus.consume reads ">"
+    # only and never reclaims (redis_adapter.py:55), so the message is stranded
+    # unread and this DLQ path never fires against the real bus. The test proves
+    # the router's counting logic, NOT that the retry/DLQ budget is reachable.
+    # See the delivery-semantics note in router.py; closing that gap is queued.
     for _ in range(settings.redis_max_retries):
         await bus.publish(event)
         await _settle(lambda: False, ticks=20)

@@ -80,9 +80,17 @@ class HITLResumeHandler:
         """Drive one deferred decision to its terminal outcome.
 
         Returns True if this call resolved the decision, False if it was already
-        resolved (a redelivery). Raising, not swallowing, is deliberate: the
-        router turns an exception into a retry and eventually a DLQ route, and a
-        lost human verdict is worse than a redelivered one.
+        resolved (a redelivery). Raising, not swallowing, is deliberate: a lost
+        human verdict is worse than a redelivered one, and the router's DLQ at
+        least makes the failure visible.
+
+        Be precise about what that buys today, though: the shared Redis adapter
+        does not redeliver an un-acked message (redis_adapter.py:55, and the
+        delivery-semantics note in router.py), so a raise here strands the verdict
+        in the PEL rather than retrying it. The decision stays `pending` and a
+        human can re-issue the verdict — which this handler is idempotent against
+        — but nothing recovers it automatically. That is a known, queued gap in
+        the transport, not something this handler can fix.
         """
         payload = event.payload
         outcome = "approved" if payload.approved else "rejected"

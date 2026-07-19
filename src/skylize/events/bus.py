@@ -67,6 +67,13 @@ class EventBus(Protocol):
       - stamp `occurred_at`, enforce `correlation_id` and `partition_key`;
       - per-`partition_key` ordering; at-least-once delivery (consumers idempotent
         on `event_id`).
+
+    The last invariant is SPECIFIED BUT NOT UPHELD by the Redis adapter, which is
+    the only production implementation: it reads `">"` only and never reclaims,
+    so an un-acked message is never redelivered (redis_adapter.py:55, and the
+    delivery-semantics note in router.py). Consumers are correctly idempotent, so
+    nothing is double-processed — but nothing is retried either. Do not read this
+    docstring as evidence the guarantee holds.
     """
 
     async def publish(self, event: BaseEvent) -> str:

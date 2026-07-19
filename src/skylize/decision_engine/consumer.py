@@ -16,8 +16,12 @@ in production (``app/decision_engine/engine.py``) — not a second one:
     ``evt:{tenant}:{department}`` — subscriptions derive from
     ``SUBSCRIBED_DEPARTMENTS``, the vocabulary table's own projection, so the
     AUTHORITY allow-list and the subscription set cannot drift apart;
-  - at-least-once delivery with DLQ after ``redis_max_retries`` attempts, which
-    the router owns;
+  - the router's retry/DLQ handling — which does NOT currently deliver
+    at-least-once: the shared Redis adapter reads ``">"`` only and never
+    reclaims, so an un-acked message is stranded in the PEL rather than
+    retried, and ``redis_max_retries`` cannot be reached (redis_adapter.py:55,
+    and the delivery-semantics note in router.py). This is the same gap the
+    KNOWN GAP note below describes, and it is broader than reclaim alone;
   - idempotency on ``event_id`` through the ``ProcessedEventStore`` port —
     durable on the postgres backend (``decision_processed_events``, migration
     0011), in-memory otherwise. The old Redis ``SETNX`` key is gone with the
@@ -43,11 +47,24 @@ unrelated event on ``evt:{tenant}:growth`` would manufacture a spurious REJECTED
 decision — the inline engine draws the same line with
 ``DecisionProposal.from_event(...) is None``.
 
-KNOWN GAP (inherited, deliberate): the router does not XAUTOCLAIM messages
-stranded in a dead worker's PEL, so ``redis_idle_time_ms`` is now unused. The
-old consumer had a reclaim loop, but only against streams that did not exist.
-Matching the proven inline transport was preferred over inventing a third one;
-reclaim belongs in the bus adapter, where both engines would gain it at once.
+KNOWN GAP (inherited, deliberate) — and WIDER than first documented. This note
+used to say only that the router does not XAUTOCLAIM a dead worker's PEL. Audited
+against the adapter, the gap is bigger: ``RedisEventBus.consume`` reads
+``{stream: ">"}`` and nothing else (redis_adapter.py:55), so redelivery does not
+happen at all — not after a crash, not after a handler raises, not on restart of
+the same worker. ``redis_idle_time_ms`` is unused and the router's
+retry-then-DLQ budget is unreachable for handler failures.
+
+The old consumer did have a reclaim loop, but it ran against event-type-named
+streams that never existed on the live bus, so it never reclaimed a real message
+either — there is no working prior art to port, only a design to re-derive.
+
+Deliberately NOT fixed here. The EventRouter and RedisEventBus are shared with
+the inline engine (app/decision_engine/engine.py:104), which is the production
+one; turning on redelivery would change its emission behaviour at the same time
+(a reclaimed message whose owner died between publish and mark_processed would
+re-emit a second terminal decision.*). That, plus the durable delivery count the
+port has no field for, makes it a design decision rather than a task — queued.
 """
 
 from __future__ import annotations
@@ -257,8 +274,9 @@ class DecisionEngineConsumer:
         if self._resume_fn is None:
             # Fail loudly. Silently dropping a human's verdict would strand the
             # decision as `pending` forever while the worker looked healthy, so
-            # this raises into the router's retry/DLQ path instead: a resume
-            # event on the wire with no handler wired is a composition bug.
+            # this raises into the router instead: a resume event on the wire
+            # with no handler wired is a composition bug, and a raise at least
+            # logs and (past the budget, once redelivery exists) DLQs it.
             raise RuntimeError(
                 "DecisionEngineConsumer received governance.human_approval_received "
                 f"(hitl_id={event.payload.hitl_id}) but no resume_fn is wired; the "
