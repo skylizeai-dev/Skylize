@@ -68,12 +68,18 @@ class EventBus(Protocol):
       - per-`partition_key` ordering; at-least-once delivery (consumers idempotent
         on `event_id`).
 
-    The last invariant is SPECIFIED BUT NOT UPHELD by the Redis adapter, which is
-    the only production implementation: it reads `">"` only and never reclaims,
-    so an un-acked message is never redelivered (redis_adapter.py:55, and the
-    delivery-semantics note in router.py). Consumers are correctly idempotent, so
-    nothing is double-processed — but nothing is retried either. Do not read this
-    docstring as evidence the guarantee holds.
+    The last invariant is upheld by both implementations. The Redis adapter
+    reclaims its group's stalled pending entries before each read, and the
+    in-memory bus redelivers from its own pending list; an un-acked message comes
+    back either way, which is why consumer idempotency on `event_id` is a
+    requirement rather than a courtesy.
+
+    The port carries no delivery count. A consumer therefore cannot tell a first
+    delivery from a fifth, and the retry budget that uses one (`EventRouter`)
+    counts in process memory and resets on restart — see the scope note in
+    router.py. Adding a count here is a real option but a real port change:
+    Redis, NATS and SQS all expose one natively while Kafka has no equivalent, so
+    it would be a field some adapter must fake.
     """
 
     async def publish(self, event: BaseEvent) -> str:

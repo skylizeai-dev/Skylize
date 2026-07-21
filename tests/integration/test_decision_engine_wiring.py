@@ -41,6 +41,51 @@ async def _wait_for(bus, type_: str, n: int = 1) -> None:
     raise AssertionError(f"timed out waiting for {n}x {type_}")
 
 
+async def test_flag_off_wires_the_inline_engine_with_reclaim_enabled() -> None:
+    """FLAG OFF (SKYLIZE_DECISION_ENGINE unset ⇒ 'inline') — asserted, not assumed.
+
+    PEL reclaim lives on the SHARED adapter, so it changes the inline engine too
+    even though the flag is untouched. Two things must hold and both are checked
+    here rather than inferred: the default flag still wires the inline engine (no
+    accidental flip), and the bus it gets has a non-zero reclaim window — a zero
+    window would let a sibling steal messages from a healthy worker mid-flight.
+    """
+    from skylize.events.redis_adapter import (
+        DEFAULT_RECLAIM_MIN_IDLE_MS,
+        RedisEventBus,
+    )
+
+    settings = Settings(backend="memory")
+    assert settings.decision_engine == "inline", "the flag default moved"
+
+    c = await build_container(settings)
+    try:
+        assert c.decision_engine is not None  # inline engine, as before
+    finally:
+        await c.aclose()
+
+    # The postgres backend hands the inline engine this adapter with no reclaim
+    # override, so the default IS the inline engine's effective window.
+    assert DEFAULT_RECLAIM_MIN_IDLE_MS == 60_000
+    bus = RedisEventBus("redis://localhost:6379")
+    assert bus._reclaim_min_idle_ms == DEFAULT_RECLAIM_MIN_IDLE_MS
+    assert bus._reclaim_batch > 0, "a zero batch would silently disable reclaim"
+    await bus.close()
+
+
+async def test_opa_worker_wires_the_idle_knob_that_was_dead_config() -> None:
+    """`redis_idle_time_ms` is now load-bearing, not unused config.
+
+    It named the reclaim window all along but nothing read it. Guard that the
+    worker's bus actually carries it, so the knob cannot rot back into a no-op.
+    """
+    import inspect
+
+    from skylize.decision_engine import worker
+
+    assert "reclaim_min_idle_ms=de_settings.redis_idle_time_ms" in inspect.getsource(worker)
+
+
 async def test_engine_idle_by_default() -> None:
     c = await build_container(Settings(backend="memory"))
     try:

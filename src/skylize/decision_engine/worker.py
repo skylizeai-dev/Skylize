@@ -156,7 +156,12 @@ async def run(settings: Settings | None = None) -> None:
         )
         closers.append(redis.aclose)
 
-        bus = RedisEventBus(de_settings.redis_url)
+        # redis_idle_time_ms is the PEL reclaim window: how long a delivered-but-
+        # unacked message must sit before another pass re-delivers it.
+        bus = RedisEventBus(
+            de_settings.redis_url,
+            reclaim_min_idle_ms=de_settings.redis_idle_time_ms,
+        )
         closers.append(bus.close)
 
         opa = OPAClient(de_settings)

@@ -84,13 +84,12 @@ class HITLResumeHandler:
         human verdict is worse than a redelivered one, and the router's DLQ at
         least makes the failure visible.
 
-        Be precise about what that buys today, though: the shared Redis adapter
-        does not redeliver an un-acked message (redis_adapter.py:55, and the
-        delivery-semantics note in router.py), so a raise here strands the verdict
-        in the PEL rather than retrying it. The decision stays `pending` and a
-        human can re-issue the verdict — which this handler is idempotent against
-        — but nothing recovers it automatically. That is a known, queued gap in
-        the transport, not something this handler can fix.
+        That now buys real recovery: the shared Redis adapter reclaims un-acked
+        PEL entries, so a raise here is retried once the idle window elapses and,
+        past the router's budget, routed to the DLQ. A transient failure resolves
+        itself; a persistent one becomes visible instead of stranding the verdict
+        silently. This handler is idempotent against the redelivery either way —
+        the `status = 'pending'` guard in the UPDATE is the durable half.
         """
         payload = event.payload
         outcome = "approved" if payload.approved else "rejected"

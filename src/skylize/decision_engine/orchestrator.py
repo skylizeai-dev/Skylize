@@ -19,12 +19,11 @@ escalation. Exceptions propagate unchanged so the consumer's retry/DLQ path
 engages, and the pipeline's own timeout plus the publisher's idempotent
 (``ON CONFLICT``) writes make a redelivery safe to re-run.
 
-Safe to re-run, but note it is not currently re-run at all: the shared Redis
-adapter never redelivers an un-acked message (redis_adapter.py:55, and the
-delivery-semantics note in router.py), so a proposal whose evaluation raises is
-stranded rather than retried. Propagating is still right — it is what a working
-retry path will need, and swallowing would hide the failure entirely — but do not
-read this as a claim that failures are recovered today.
+Safe to re-run, and now actually re-run: the shared Redis adapter reclaims stalled
+PEL entries (redis_adapter.RedisEventBus._reclaim), so a proposal whose evaluation
+raises is redelivered once its idle window elapses and retried until the router's
+budget routes it to the DLQ. Propagating rather than swallowing is what makes that
+path engage at all.
 """
 
 from __future__ import annotations
