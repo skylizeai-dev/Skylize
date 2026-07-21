@@ -15,11 +15,12 @@ accidentally approved something, which must never happen.
 
 SCOPE — what these do NOT cover. Both tests exercise the HAPPY transport path: a
 server that answers 200 with a parseable body. The fail-closed branches that
-matter most under failure — timeout, unreachable host, non-200, malformed body,
-non-dict result (opa_client.py:93, :97, :111, :118, :124) — are covered only by
-unit tests using mock transports (test_opa_client.py). No fail-closed path in
-this client has ever been exercised against a real OPA process, because no OPA
-server has been stood up. Treat that as untested-against-reality, not as proven.
+matter most under failure — timeout (opa_client.py:108), unreachable (:112),
+non-200 (:126), malformed body (:133), non-object envelope (:144), non-dict
+result (:153) — are covered only by unit tests using mock transports
+(test_opa_client.py). No fail-closed path in this client has ever been exercised
+against a real OPA process, because no OPA server has been stood up. Treat that
+as untested-against-reality, not as proven.
 """
 from __future__ import annotations
 

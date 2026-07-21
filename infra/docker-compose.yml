@@ -91,9 +91,10 @@ services:
   # second engine inside it. Per environment exactly one engine emits terminal
   # `decision.*` events (docs/04_decision_engine/decision_engine.md §2), and
   # SKYLIZE_DECISION_ENGINE is the interlock: `bootstrap` refuses to build the
-  # inline engine when it reads "opa", and this worker refuses to start unless
-  # it does (src/skylize/decision_engine/worker.py:64-77). Both sides fail
-  # closed, so the two can never double-decide a proposal.
+  # inline engine when it reads "opa" (src/skylize/bootstrap.py:251), and this
+  # worker refuses to start unless it does
+  # (src/skylize/decision_engine/worker.py:78-83). Both sides fail closed, so
+  # the two can never double-decide a proposal.
   #
   # INERT BY DEFAULT, and deliberately by `profiles:` rather than by the
   # interlock. `docker compose up` does not start a profiled service at all, so
@@ -119,8 +120,8 @@ services:
       # The interlock. The worker raises RuntimeError on anything but "opa".
       SKYLIZE_DECISION_ENGINE: opa
       # Tenants this worker consumes for. `DecisionEngineConsumer.run` raises on
-      # an empty list rather than idling silently (consumer.py:129-133), so this
-      # must name real orgs. JSON-array form, parsed by Settings (config.py:109).
+      # an empty list rather than idling silently (consumer.py:160-163), so this
+      # must name real orgs. JSON-array form, parsed by Settings (config.py:113).
       SKYLIZE_DECISION_ENGINE_ORG_IDS: ${SKYLIZE_DECISION_ENGINE_ORG_IDS:-["org_local"]}
       # NOTE the variable name: DecisionEngineSettings reads SKYLIZE_DATABASE_URL
       # (decision_engine/config.py:30), NOT the SKYLIZE_DB_URL / SKYLIZE_DB_APP_URL
