@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from typing import Any
 
@@ -88,6 +89,20 @@ class OPAClient:
         """
         body = {"input": self._build_input(context, scoring_result)}
 
+        # httpx's `json=` uses the stdlib encoder, which raises TypeError on a raw
+        # UUID/datetime. That escapes as a bare TypeError rather than a denial,
+        # which contradicts this class's fail-closed contract. The sole production
+        # producer already hands us a JSON-native payload (consumer.py:239, locked
+        # by tests/decision_engine/test_consumer.py:207), so this is defence in
+        # depth for a second producer, not a live bug — but "unreachable today"
+        # is not a reason to let the contract be false.
+        try:
+            json.dumps(body)
+        except (TypeError, ValueError) as exc:
+            raise OPAPolicyDenied(
+                self._policy_path, "OPA input is not JSON-serializable — fail-closed"
+            ) from exc
+
         try:
             response = await self._client.post(self._url, json=body)
         except httpx.TimeoutException as exc:
@@ -114,12 +129,26 @@ class OPAClient:
             )
 
         try:
-            result = response.json().get("result") or {}
+            body_doc = response.json()
         except ValueError as exc:
             # Malformed 200 body must not be read as an allow.
             raise OPAPolicyDenied(
                 self._policy_path, "OPA returned malformed response — fail-closed"
             ) from exc
+
+        # A 200 whose top-level document is valid JSON but not an object (a list,
+        # string or number) has no `.get`. Before this guard that raised a bare
+        # AttributeError out of `evaluate`, escaping the fail-closed contract
+        # entirely — the caller saw a crash, not a denial. The isinstance check
+        # further down guards the `result` VALUE; this one guards the envelope.
+        if not isinstance(body_doc, dict):
+            raise OPAPolicyDenied(
+                self._policy_path,
+                f"OPA response body was {type(body_doc).__name__}, expected an object "
+                "— fail-closed",
+            )
+
+        result = body_doc.get("result") or {}
 
         if not isinstance(result, dict):
             # A bare scalar (e.g. `opa_policy_path` misconfigured to a leaf

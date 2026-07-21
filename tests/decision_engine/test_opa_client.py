@@ -1,13 +1,17 @@
 """Tests for OPAClient."""
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import uuid4
 
 import httpx
 import pytest
 
 from skylize.decision_engine.exceptions import OPAPolicyDenied
+from skylize.decision_engine.models import DecisionContext
 from skylize.decision_engine.opa_client import OPAClient
+from skylize.schemas.events.sales import SalesCampaignProposed
 
 from .conftest import make_decision_context, make_scoring_result
 
@@ -293,3 +297,141 @@ async def test_non_dict_result_fails_closed(settings):
         with pytest.raises(OPAPolicyDenied):
             await client.evaluate(ctx)
     await client.close()
+
+
+# ---------------------------------------------------------------------------
+# Response-body handling driven through a REAL httpx transport.
+#
+# The tests above stub `resp.json` with a MagicMock, so httpx's own decoding
+# never executes and the malformed-body branch (opa_client.py `except ValueError`)
+# could not be reached by any of them. These use httpx.MockTransport instead: the
+# client parses bytes off a real response the way it will against a real OPA
+# server, which is the only way these branches get exercised at all.
+# ---------------------------------------------------------------------------
+
+def _transport_client(settings, body: bytes | str, status: int = 200) -> OPAClient:
+    """An OPAClient whose transport returns `body` verbatim, decoded by httpx."""
+    client = _client(settings)
+
+    def _handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            status, content=body, headers={"content-type": "application/json"}
+        )
+
+    client._client = httpx.AsyncClient(transport=httpx.MockTransport(_handler))
+    return client
+
+
+async def test_body_that_is_not_json_at_all_fails_closed(settings):
+    """A 200 carrying non-JSON bytes must deny, not raise the decoder's error."""
+    client = _transport_client(settings, b"this is not json")
+
+    with pytest.raises(OPAPolicyDenied) as exc_info:
+        await client.evaluate(make_decision_context())
+
+    assert "malformed" in exc_info.value.denial_reason.lower()
+    await client.close()
+
+
+@pytest.mark.parametrize(
+    ("body", "kind"),
+    [(b"[1, 2, 3]", "list"), (b'"allowed"', "str"), (b"42", "int")],
+)
+async def test_top_level_non_object_body_fails_closed(settings, body, kind):
+    """Valid JSON that is not an object has no `.get`.
+
+    This raised a bare AttributeError out of `evaluate` before the envelope
+    guard existed — a crash rather than a denial, which is precisely the
+    fail-closed contract the class docstring promises. A misrouted proxy or an
+    OPA path returning a bare array is enough to produce one.
+    """
+    client = _transport_client(settings, body)
+
+    with pytest.raises(OPAPolicyDenied) as exc_info:
+        await client.evaluate(make_decision_context())
+
+    assert kind in exc_info.value.denial_reason
+    await client.close()
+
+
+async def test_non_serializable_input_fails_closed(settings):
+    """A payload the stdlib encoder cannot render denies instead of raising.
+
+    Unreachable from today's only producer, which hands over a JSON-native
+    payload (consumer.py:239, locked by test_consumer.py:207). Kept because the
+    fail-closed contract is unconditional, and a second producer would otherwise
+    turn a policy evaluation into a TypeError.
+    """
+    ctx = make_decision_context()
+    ctx.payload["amount"] = uuid4()  # raw UUID — stdlib json cannot encode it
+    client = _transport_client(settings, b'{"result": {"allow": true}}')
+
+    with pytest.raises(OPAPolicyDenied) as exc_info:
+        await client.evaluate(ctx)
+
+    assert "serializable" in exc_info.value.denial_reason.lower()
+    await client.close()
+
+
+# ---------------------------------------------------------------------------
+# CHARACTERIZATION — asserts a KNOWN-WRONG behaviour, deliberately.
+#
+# This test documents a gap; it does not endorse it. When the input contract is
+# settled it MUST be rewritten to assert the correct shape, exactly as the bus
+# redelivery characterization test was flipped once reclaim landed.
+# ---------------------------------------------------------------------------
+
+async def test_real_event_loses_its_spend_fields_before_reaching_opa(settings):
+    """The amount OPA needs to police spend never reaches OPA.
+
+    `consumer.py:229-240` builds `DecisionContext.payload` from
+    `event.model_dump(mode="json")` — the WHOLE envelope — so the business
+    fields live one level down under `payload["payload"]`. `_build_input`
+    filters `context.payload` against SAFE_PAYLOAD_KEYS at the TOP level only
+    (opa_client.py:61-65), so `campaign_id`, `channel`, `currency` and
+    `proposed_budget_minor_units` are all dropped. What survives is the
+    envelope's own two policy-relevant fields.
+
+    guardrails.md §4 names `amount` among the inputs OPA reads. No event in the
+    tracked vocabulary has a field called `amount` at all — the spend-bearing
+    field is `proposed_budget_minor_units`, and it is not in SAFE_PAYLOAD_KEYS.
+    Closing this needs the amount/currency model that
+    docs/04_decision_engine/policy_inputs §0.2 marks [OWNER-DECISION-REQUIRED]
+    (minor units vs major, USD-only vs multi-currency), so it is characterized
+    here rather than guessed at.
+
+    The pre-existing allowlist test (`test_input_document_excludes_pii_fields`)
+    passes a FLAT payload, a shape no producer emits — which is why this gap
+    survived having a green test over the very function that causes it.
+    """
+    event = SalesCampaignProposed(
+        tenant_id="org_x",
+        partition_key="campaign:c1",
+        department="growth",
+        correlation_id=uuid4(),
+        payload=SalesCampaignProposed.Payload(
+            campaign_id="c1",
+            channel="meta",
+            proposed_budget_minor_units=250_000,
+            currency="USD",
+            objective="conversions",
+        ),
+    )
+    # Exactly what consumer.py:229-240 constructs.
+    ctx = DecisionContext(
+        event_id=str(event.event_id),
+        tenant_id=event.tenant_id,
+        department=event.department,
+        event_type=event.type,
+        payload=event.model_dump(mode="json"),
+        received_at=datetime.now(timezone.utc),
+    )
+
+    forwarded = _client(settings)._build_input(ctx, None)["payload"]
+
+    # The spend decision's own inputs: all absent.
+    for dropped in ("campaign_id", "channel", "currency", "proposed_budget_minor_units"):
+        assert dropped not in forwarded, f"{dropped} unexpectedly reached OPA"
+
+    # What OPA actually receives today.
+    assert set(forwarded) == {"authority_level", "governance_token_id"}
