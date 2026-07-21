@@ -45,6 +45,11 @@ PR → lint + type-check + unit tests → build image (pinned, SBOM, signed)
 - **Contract gate:** the build fails if any `AgentContract` is invalid or any
   event schema / OPA policy breaks compatibility
   ([coding_standards.md §7](./coding_standards.md#7-testing)).
+  > **The OPA-policy half of this gate does not exist (verified 2026-07-21).**
+  > Searching `.github/` for `opa` or `rego` returns zero matches, and
+  > `.github/workflows/ci.yml:20-35` has no policy step, so no policy can fail any
+  > build today. The `AgentContract` and event-schema halves do run. See
+  > `docs/08_operations/opa_staging_bring_up.md`.
 - **Rolling deploys** with health checks; governance and DB-migration steps are
   ordered and reversible.
 

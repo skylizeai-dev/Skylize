@@ -65,6 +65,11 @@ match the org-chart docs and contract registry.
   regressions.
 - A schema/contract/policy that doesn't load or breaks compatibility **fails the
   build**.
+  > **Not true of policy yet (verified 2026-07-21).** No Rego test exists —
+  > `policy/` holds seven `.rego` files and no `*_test.rego` — and no CI job
+  > references OPA or Rego (`grep -rni 'opa\|rego' .github/` returns nothing).
+  > A broken policy fails nothing today. The schema and `AgentContract` halves of
+  > this bullet do hold.
 - Tenant-isolation tests assert 0 cross-`org_id` access.
 
 ## 8. Observability in code

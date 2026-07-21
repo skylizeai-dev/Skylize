@@ -23,9 +23,18 @@ A request is authorized only if it passes all three:
 1. Human RBAC        — may this user/tenant request this at all?     (edge/service)
 2. Agent contract    — static capability of the acting agent          (registry)
 3. Governance token  — per-run narrowing + live governance state      (proxy/adapters)
-       ∩  evaluated against OPA guardrails (this specific action)      (decision engine)
+       ∩  evaluated against guardrails (this specific action)          (decision engine)
        =  permitted
 ```
+
+> **Status of the guardrail step (verified 2026-07-21).** That fourth line is
+> enforced today by **hard-coded Python**, not by OPA. The wired engine's policy
+> stage is `src/skylize/app/decision_engine/evaluator.py:216`, described in its own
+> docstring as "the MVP stand-in for OPA Rego"; it holds no OPA client and makes no
+> HTTP call. OPA becomes the arbiter only when `SKYLIZE_DECISION_ENGINE` is flipped
+> to `opa` (`src/skylize/config.py:107`, default `"inline"`), which is blocked on
+> owner-approved policy content and a live server — see
+> `docs/08_operations/opa_staging_bring_up.md`.
 
 ## 3. Layer 1 — Human RBAC
 
@@ -103,7 +112,7 @@ Anything above an agent's row escalates via `escalation_path`; anything matching
 | Webhook signature | edge |
 | Contract resolution / authority | orchestrator + decision engine |
 | Token validation | tool proxy + every adapter |
-| OPA guardrail | decision engine |
+| Guardrail evaluation (inline Python today; OPA once the flag flips) | decision engine |
 | Tenant isolation | DAL (RLS/namespacing) |
 | Kill switch / suspension | governance authority, respected everywhere |
 

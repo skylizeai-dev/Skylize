@@ -108,6 +108,24 @@ outranked by hierarchy), matching conflict-resolution rule 2
 
 ## 6. Versioning, testing, and audit
 
+> **This section describes the TARGET contract, not the current build (verified
+> 2026-07-21).** None of the three bullets below is in force yet. Stated plainly so
+> nobody reads a green CI run as evidence that policy is being tested:
+>
+> - **No Rego test exists.** `policy/` contains exactly seven `.rego` files and no
+>   `*_test.rego`; no file under `policy/` contains a `test_` rule.
+> - **No CI job touches OPA or Rego.** Searching `.github/` for `opa` or `rego`
+>   returns zero matches. The steps in `.github/workflows/ci.yml:20-35` are ruff,
+>   lint-imports, forbidden-imports, module-importability, orphan-modules, mypy and
+>   pytest — there is no policy step, so nothing about a policy can block the build.
+> - **No policy emits `policy_version`.** Searching `policy/` for `policy_version`
+>   returns no matches, so the replay property below cannot hold today. The client
+>   tolerates the absence and only logs a warning
+>   (`src/skylize/decision_engine/opa_client.py:176-186`).
+>
+> These become true when real policy content is authored — which is gated on owner
+> approval of `policy_inputs.md`. See `docs/08_operations/opa_staging_bring_up.md`.
+
 - Policies are **versioned**; every decision records the exact `policy_version`,
   so a past decision can be re-evaluated under the policy that was in force
   (replay/compliance).
