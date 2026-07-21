@@ -12,6 +12,14 @@ The placeholder policy bundle (``policy/``) is FAIL-CLOSED: it denies everything
 until real per-class policy content is authored. These tests therefore assert
 DENY, never allow — a live ``allow=true`` here would mean the skeleton
 accidentally approved something, which must never happen.
+
+SCOPE — what these do NOT cover. Both tests exercise the HAPPY transport path: a
+server that answers 200 with a parseable body. The fail-closed branches that
+matter most under failure — timeout, unreachable host, non-200, malformed body,
+non-dict result (opa_client.py:93, :97, :111, :118, :124) — are covered only by
+unit tests using mock transports (test_opa_client.py). No fail-closed path in
+this client has ever been exercised against a real OPA process, because no OPA
+server has been stood up. Treat that as untested-against-reality, not as proven.
 """
 from __future__ import annotations
 
@@ -56,12 +64,12 @@ async def test_live_opa_reachable_and_fail_closed_on_default_path() -> None:
     """
     client = OPAClient(_settings("skylize/decision/allow"))
     try:
-        allow, _deny_reasons = await client.evaluate(make_decision_context())
+        result = await client.evaluate(make_decision_context())
     finally:
         await client.close()
 
     # Real deny from a live OPA process — not a mock. Must never be True.
-    assert allow is False
+    assert result.allow is False
 
 
 async def test_live_opa_returns_real_deny_object_on_package_path() -> None:
@@ -73,10 +81,10 @@ async def test_live_opa_returns_real_deny_object_on_package_path() -> None:
     """
     client = OPAClient(_settings("skylize/decision"))
     try:
-        allow, deny_reasons = await client.evaluate(make_decision_context())
+        result = await client.evaluate(make_decision_context())
     finally:
         await client.close()
 
-    assert allow is False
-    assert deny_reasons, "expected placeholder deny_reasons from the live bundle"
-    assert any("PLACEHOLDER" in reason for reason in deny_reasons)
+    assert result.allow is False
+    assert result.deny_reasons, "expected placeholder deny_reasons from the live bundle"
+    assert any("PLACEHOLDER" in reason for reason in result.deny_reasons)
