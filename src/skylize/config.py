@@ -88,8 +88,12 @@ class Settings(BaseSettings):
     dlq_after_retries: int = 5
 
     # Which Decision Engine the composition root wires (SKYLIZE_DECISION_ENGINE).
-    #   "inline" (default) — app/decision_engine, the canonical port-based engine
-    #                        and the sole emitter of terminal decision.* events.
+    # Exclusivity is per-environment and flag-selected, never universal: whichever
+    # engine this setting names is the sole emitter of terminal decision.* events
+    # for that environment (ADR-0004 §Decision 2,
+    # docs/architecture/adr/0004-opa-production-arbiter.md:37).
+    #   "inline" (default) — app/decision_engine, the canonical port-based engine;
+    #                        the sole emitter while this flag selects it.
     #   "opa"              — the OPA-backed decision_engine package, which runs as
     #                        its own worker process
     #                        (python -m skylize.decision_engine.worker), not as an
