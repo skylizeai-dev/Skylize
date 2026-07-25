@@ -2,6 +2,27 @@
 
 Ranked by what unblocks the most.
 
+## [RESOLVED 2026-07-25] MemoryService embed/upsert paths unscreened by LLMContentGate (HIGH)
+- Originally flagged as an out-of-scope note in SESSION_B_REPORT.md ("MemoryService
+  ... has its own `_index_to_qdrant → upsert_vector` path that is not screened by
+  LLMContentGate"), not previously carried into this file as a tracked item.
+- Enumeration found **2** embed/upsert paths in `MemoryService`, both reachable only
+  through `commit()`: (1) `commit → _index_to_qdrant → QdrantAdapter.upsert_vector`,
+  (2) `commit → Mem0Adapter-equivalent client.add()`. `self._repo.write` (Postgres)
+  does not embed content at write time, so it is not an embed/upsert path under this
+  finding's own definition and is out of scope.
+- Fix: `MemoryService.commit()` now calls `LLMContentGate.check(text)` as its first
+  action — the single choke point both paths pass through, so neither is bypassable
+  by a future caller. Fails closed (any exception, violation or gate error,
+  propagates and blocks the write) with a structured `memory.commit.gate_rejected`
+  log (org_id + namespace, no content) on violation, matching the fail-closed
+  pattern already used by `GuardedLLMGateway` and `KnowledgeIngestionService`.
+- Tests: `tests/unit/test_memory_service.py` — 6 new tests (2 per-path rejection,
+  gate-error-fails-closed, gate-passes-writes, no-content-in-log, and a bypass
+  regression guard asserting the gate is actually invoked before either store).
+- Files: src/skylize/memory/service.py, tests/unit/test_memory_service.py
+- Commit: fix(memory): enforce LLMContentGate on all vector upsert paths (HIGH)
+
 ## Session A addendum (2026-07-15, branch `feat/durable-governance`)
 
 RESOLVED: #1 (Pg stores) is done — durable PgCapitalRepository +

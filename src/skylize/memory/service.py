@@ -5,7 +5,10 @@ Coordinates:
   2. Postgres FTS fallback (via MemoryRepository)
   3. Event emission for memory.recall_served / memory.committed / memory.invalidated
 
-Import constraints (import-linter): may import dal/, events/, schemas/ — NOT agents/, app/, adapters/.
+Import constraints (import-linter): may import dal/, events/, schemas/ — NOT agents/, app/.
+`adapters/llm/content_gate` is the documented exception (no import-linter contract
+forbids it; `knowledge_ingestion.py` in this same package already imports it) —
+needed here to screen content before it reaches an embed/upsert path.
 """
 
 from __future__ import annotations
@@ -18,6 +21,7 @@ from uuid import UUID, uuid4
 
 import structlog
 
+from ..adapters.llm.content_gate import GuardrailViolation, LLMContentGate
 from ..errors import MemoryWriteError
 from ..events.bus import EventBus
 from ..schemas.events.memory import (
@@ -70,12 +74,14 @@ class MemoryService:
         embedding_fn: EmbeddingFn,
         bus: EventBus | None = None,
         qdrant_adapter: Any = None,  # QdrantAdapter (optional, avoids cross-layer import)
+        content_gate: LLMContentGate | None = None,
     ) -> None:
         self._repo: _MemoryRepoPort = repo
         self._mem0 = mem0_client
         self._embed_fn = embedding_fn
         self._bus = bus
         self._qdrant = qdrant_adapter
+        self._gate = content_gate or LLMContentGate()
 
     # ------------------------------------------------------------------
     # recall — primary: Qdrant vector search; fallback: Postgres FTS
@@ -187,6 +193,25 @@ class MemoryService:
         agent_id: str = "system",
         supersede_entry_id: UUID | None = None,
     ) -> UUID:
+        # Screen before either embed/upsert path this method can reach — the
+        # Qdrant background index (_index_to_qdrant → upsert_vector) and the
+        # Mem0 add() call below both embed `text` for later semantic recall
+        # into agent context, so both are indirect-injection vectors. This is
+        # the single choke point both paths pass through and neither can
+        # bypass; any exception here (violation or gate failure) propagates
+        # unhandled, so the write fails closed like the gate does everywhere
+        # else it's wired (KnowledgeIngestionService, GuardedLLMGateway).
+        try:
+            self._gate.check(text)
+        except GuardrailViolation as exc:
+            log.warning(
+                "memory.commit.gate_rejected",
+                org_id=org_id,
+                namespace=namespace,
+                signals=exc.signals,
+            )
+            raise
+
         entry_id = uuid4()
         content_hash = hashlib.sha256(text.encode()).hexdigest()
 
