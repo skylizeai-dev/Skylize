@@ -6,11 +6,25 @@ not the skylize_app tenant-scoped role) because it must scan ALL tenants'
 unpublished rows in a single query. RLS is bypassed by design here;
 no other module does this.
 
-Redis stream IDs must be monotonically increasing per stream.
-outbox_row_id format ``{unix_ms}-{seq}`` satisfies this constraint as long
-as the system clock does not go backward. If XADD returns a ResponseError
-containing "ID specified is equal to or smaller than", a previous poller
-instance already published the row — treat as idempotent success.
+Stream IDs are SERVER-GENERATED. Each row is relayed with ``XADD <stream> *``,
+so Redis assigns a strictly-increasing ``{ms}-{seq}`` id itself — monotonic by
+construction, with no possibility of two rows colliding on an id. The row's
+``outbox_row_id`` is NOT used as the stream id; it is only a unique row key.
+
+Why not a client-minted id? An explicit ``{unix_ms}-{seq}`` id (the previous
+scheme) collided whenever two rows were created in the same millisecond, and
+XADD rejected the later one with "ID ... is equal or smaller than the target
+stream top item". That error was being classified as idempotent success and the
+row marked published WITHOUT ever reaching the stream — silent decision-event
+loss. With server-generated ids the error cannot occur, so a row is marked
+published ONLY after a successful XADD returns an id (proving the entry exists);
+any XADD error means "not appended" → retry, never mark published.
+
+At-least-once is preserved, not exactly-once: a crash between XADD and the
+``published_at`` stamp re-relays the row on recovery (a second stream entry with
+the SAME ``event_id``). That is the bus's documented contract — consumers of the
+decision channel are idempotent on ``event_id`` (see events/bus.py) — and it
+matches how the live inline engine already publishes here via RedisEventBus.
 """
 
 from __future__ import annotations
@@ -30,8 +44,6 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-_MONOTONE_ID_ERROR = "ID specified is equal to or smaller than"
-
 
 class OutboxPoller:
     """Polls decision_outbox and XADDs rows to Redis streams.
@@ -40,7 +52,7 @@ class OutboxPoller:
     skylize.org_id set), which means the RLS policy on decision_outbox does
     NOT apply. This is intentional — the poller is a system-level relay that
     must see all tenants' rows. No tenant data filtering happens here; the
-    stream_key already encodes the tenant (``evt:{tenant_id}:decisions``).
+    stream_key already encodes the tenant (``evt:{tenant_id}:decision``).
     """
 
     def __init__(
@@ -119,37 +131,19 @@ class OutboxPoller:
         fields = {k: str(v) for k, v in _flatten_for_stream(payload_dict).items()}
         fields["event_type"] = row["event_type"]
 
+        # Server-generated id (``XADD <stream> *``): Redis assigns a
+        # strictly-increasing id, so the relay is monotonic by construction and
+        # two rows can never collide. row_id (``outbox_row_id``) is deliberately
+        # NOT passed as the id — it is only a unique row key.
         try:
-            await self._redis.xadd(
-                stream_key,
-                fields,
-                id=row_id,
-            )
+            stream_id = await self._redis.xadd(stream_key, fields)
         except ResponseError as exc:
-            err_msg = str(exc)
-            if _MONOTONE_ID_ERROR in err_msg:
-                # Previous poller instance already published this row — idempotent success.
-                log.debug(
-                    "outbox_row_already_published",
-                    extra={"outbox_row_id": row_id, "tenant_id": tenant_id},
-                )
-                await self._mark_published(db_id)
-                return
-
             log.warning(
                 "outbox_xadd_redis_error",
-                extra={"outbox_row_id": row_id, "tenant_id": tenant_id, "error": err_msg},
+                extra={"outbox_row_id": row_id, "tenant_id": tenant_id, "error": str(exc)},
                 exc_info=True,
             )
-            new_retry = row["retry_count"] + 1
-            if new_retry >= self.max_retry_count:
-                log.error(
-                    "outbox_row_max_retries_exceeded",
-                    extra={"outbox_row_id": row_id, "tenant_id": tenant_id, "retry_count": new_retry},
-                )
-                await self._mark_failed(db_id, new_retry)
-            else:
-                await self._increment_retry(db_id, new_retry)
+            await self._retry_or_fail(db_id, row["retry_count"], row_id=row_id, tenant_id=tenant_id)
             return
         except Exception:
             log.warning(
@@ -157,22 +151,43 @@ class OutboxPoller:
                 extra={"outbox_row_id": row_id, "tenant_id": tenant_id},
                 exc_info=True,
             )
-            new_retry = row["retry_count"] + 1
-            if new_retry >= self.max_retry_count:
-                log.error(
-                    "outbox_row_max_retries_exceeded",
-                    extra={"outbox_row_id": row_id, "tenant_id": tenant_id, "retry_count": new_retry},
-                )
-                await self._mark_failed(db_id, new_retry)
-            else:
-                await self._increment_retry(db_id, new_retry)
+            await self._retry_or_fail(db_id, row["retry_count"], row_id=row_id, tenant_id=tenant_id)
             return
 
+        # A successful XADD returns the server-assigned id, which proves the entry
+        # is on the stream. ONLY now is it safe to mark the row published — an
+        # errored XADD (handled above) never reaches here, so a row is never
+        # marked published without a verified stream entry.
         await self._mark_published(db_id)
         log.debug(
             "outbox_row_published",
-            extra={"outbox_row_id": row_id, "tenant_id": tenant_id, "stream_key": stream_key},
+            extra={
+                "outbox_row_id": row_id,
+                "tenant_id": tenant_id,
+                "stream_key": stream_key,
+                "stream_id": stream_id,
+            },
         )
+
+    async def _retry_or_fail(
+        self, db_id: Any, current_retry: int, *, row_id: str, tenant_id: str
+    ) -> None:
+        """Increment the retry counter, or stamp ``failed_at`` once it is spent.
+
+        The single settlement path for every XADD error. A row is NEVER marked
+        published here: an event that did not reach the stream must be re-relayed
+        (or, past the budget, left visible as failed), not silently settled. This
+        is the invariant whose violation was the silent-loss defect.
+        """
+        new_retry = current_retry + 1
+        if new_retry >= self.max_retry_count:
+            log.error(
+                "outbox_row_max_retries_exceeded",
+                extra={"outbox_row_id": row_id, "tenant_id": tenant_id, "retry_count": new_retry},
+            )
+            await self._mark_failed(db_id, new_retry)
+        else:
+            await self._increment_retry(db_id, new_retry)
 
     async def _mark_published(self, db_id: Any) -> None:
         async with self._db.admin_session() as conn:

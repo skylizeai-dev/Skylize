@@ -18,10 +18,8 @@ class DecisionEngineSettings(BaseSettings):
     redis_url: str = "redis://localhost:6379"
     redis_consumer_group: str = "cg:decision_engine"
     redis_consumer_name: str = socket.gethostname()
-    redis_dlq_stream: str = "evt:dlq:decision_engine"
     redis_idle_time_ms: int = 60000
     redis_max_retries: int = 3
-    redis_batch_size: int = 10
 
     langfuse_public_key: str
     langfuse_secret_key: str

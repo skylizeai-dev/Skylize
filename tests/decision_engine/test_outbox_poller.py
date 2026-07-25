@@ -62,7 +62,8 @@ def _poller(
 
 
 # ---------------------------------------------------------------------------
-# Happy path: unpublished row → XADD called with explicit outbox_row_id → published_at set
+# Happy path: unpublished row → XADD with a SERVER-generated id (no explicit
+# row id) → published_at set
 # ---------------------------------------------------------------------------
 
 async def test_happy_path_xadd_and_marks_published(settings):
@@ -71,16 +72,18 @@ async def test_happy_path_xadd_and_marks_published(settings):
 
     conn.fetch.return_value = [row]
     conn.execute = AsyncMock()
-    redis.xadd = AsyncMock(return_value="1700000000000-0001")
+    redis.xadd = AsyncMock(return_value="1700000000000-5")
 
     await poller._poll_and_publish()
 
     redis.xadd.assert_awaited_once()
-    call_kwargs = redis.xadd.call_args
-    # explicit id passed
-    assert call_kwargs.kwargs.get("id") == "1700000000000-0001" or (
-        len(call_kwargs.args) >= 3 and call_kwargs.args[2] == "1700000000000-0001"
-    ) or call_kwargs.kwargs.get("id") == "1700000000000-0001"
+    call = redis.xadd.call_args
+    # The relay must NOT pin the client-minted outbox_row_id as the stream id —
+    # doing so is what let same-millisecond rows collide and vanish. XADD is
+    # called with only (stream_key, fields); Redis assigns the id via '*'.
+    assert "id" not in call.kwargs, "poller must not pass an explicit stream id"
+    assert len(call.args) == 2, "poller must call xadd(stream_key, fields) only"
+    assert "1700000000000-0001" not in call.args, "row id must not be the stream id"
 
     # published_at set
     conn.execute.assert_awaited()
@@ -89,31 +92,34 @@ async def test_happy_path_xadd_and_marks_published(settings):
 
 
 # ---------------------------------------------------------------------------
-# Idempotent: XADD ResponseError "ID specified is equal to or smaller"
-# → published_at set, retry_count NOT incremented
+# Regression guard (in-file): a monotone-id-style XADD ResponseError must NOT be
+# treated as idempotent success. The old code marked such rows published WITHOUT
+# relaying them — the silent-loss defect. Any XADD error → retry, never publish.
 # ---------------------------------------------------------------------------
 
-async def test_monotone_id_error_marks_published_not_increments_retry(settings):
+async def test_monotone_id_error_is_not_treated_as_published(settings):
     poller, conn, redis = _poller()
     row = _make_row(outbox_row_id="1700000000000-0001", retry_count=0)
 
     conn.fetch.return_value = [row]
     conn.execute = AsyncMock()
+    # The exact wording the deleted misclassification branch keyed on.
     redis.xadd = AsyncMock(side_effect=ResponseError(
         "ID specified is equal to or smaller than the target ID"
     ))
 
     await poller._poll_and_publish()
 
-    # published_at marked — execute called with UPDATE SET published_at
     conn.execute.assert_awaited()
-    update_sql = conn.execute.call_args.args[0]
-    assert "published_at" in update_sql
-
-    # retry_count NOT incremented (no retry update)
+    # No UPDATE may set published_at — the event never reached the stream.
     for call in conn.execute.call_args_list:
-        sql = call.args[0]
-        assert "retry_count" not in sql or "published_at" in sql
+        assert "published_at" not in call.args[0], (
+            "an errored XADD must never mark the row published"
+        )
+    # It must instead be retried (retry_count incremented, below max).
+    update_sql = conn.execute.call_args.args[0]
+    assert "retry_count" in update_sql
+    assert "failed_at" not in update_sql
 
 
 # ---------------------------------------------------------------------------

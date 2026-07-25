@@ -6,15 +6,20 @@ Create Date: 2026-06-24
 
 Transactional outbox for decision events. Rows are written in the same DB
 transaction as the decision record; a separate relay process reads unpublished
-rows and XADDs them to Redis streams, then stamps published_at.
+rows and XADDs them to Redis streams (with a SERVER-generated stream id), then
+stamps published_at.
 
 outbox_row_id format: {unix_ms}-{last_4_digits_of_outbox_uuid_int}
 
-  Redis stream IDs require the format "{milliseconds}-{sequence}". Using the
-  last 4 decimal digits of the UUID integer as the sequence component gives a
-  monotonically-increasing, collision-resistant composite that satisfies Redis
-  without a separate sequence counter. Compute at INSERT time (before the row
-  is written), store in outbox_row_id, and pass verbatim as the XADD ID.
+  This is a UNIQUE row key (the column is NOT NULL UNIQUE), NOT the Redis stream
+  id. It is NOT monotonic and NOT collision-resistant as an ordering key: the
+  sequence component is (uuid.int % 10000), so two rows minted in the same
+  millisecond order arbitrarily relative to each other. It exists only to give
+  each outbox row a stable, unique, human-readable handle. The relay assigns the
+  actual stream id via "XADD <stream> *" (Redis mints a strictly-increasing
+  {ms}-{seq}), which is monotonic by construction with no collision — so
+  outbox_row_id is never passed as the XADD id. Delivery is at-least-once and
+  consumers of the decision channel dedupe on event_id (see events/bus.py).
 
   Example: uuid=550e8400-e29b-41d4-a716-446655440000  → int last 4 = 0000
            unix_ms=1719187200000                       → row_id = 1719187200000-0000

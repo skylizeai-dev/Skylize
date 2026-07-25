@@ -84,10 +84,13 @@ def _new_outbox_row_id() -> tuple[str, UUID]:
     """Return ``(outbox_row_id, id)`` for a new ``decision_outbox`` row.
 
     ``outbox_row_id`` format ``{unix_ms}-{last_4_digits_of_uuid_int}`` (migration
-    0009): a monotonic-enough, collision-resistant Redis stream id computed at
-    INSERT time and passed verbatim to XADD by the OutboxPoller. The returned
-    UUID is stored in the ``id`` column and supplies the sequence component, so
-    the two stay consistent.
+    0009) is a UNIQUE row key (``decision_outbox.outbox_row_id`` is ``NOT NULL
+    UNIQUE``), NOT a Redis stream id: it is neither monotonic nor collision-free
+    (the 4-digit component is ``uuid.int % 10000``, so two rows minted in the
+    same millisecond can order arbitrarily). The OutboxPoller relays each row
+    with a SERVER-generated stream id (``XADD * ``) and never uses this value as
+    the id. The returned UUID is stored in the ``id`` column and supplies the
+    sequence component, so the two stay consistent.
     """
     row_uuid = uuid4()
     seq = f"{row_uuid.int % 10000:04d}"
