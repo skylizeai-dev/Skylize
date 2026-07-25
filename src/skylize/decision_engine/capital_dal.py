@@ -21,6 +21,8 @@ from decimal import Decimal
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    import asyncpg
+
     from skylize.dal.connection import Database
 
 from skylize.decision_engine.config import DecisionEngineSettings
@@ -66,19 +68,38 @@ class CapitalDAL:
         Used only for reserve floor calculation; returns 0 if no rows exist.
         """
         async with self._db.tenant_session(tenant_id) as conn:
-            row = await conn.fetchrow(
-                """
-                SELECT COALESCE(SUM(ceiling), 0) AS total
-                FROM budget_ledger
-                WHERE scope LIKE 'department:%'
-                  AND period = (
-                      SELECT MAX(period)
-                      FROM budget_ledger
-                      WHERE scope LIKE 'department:%'
-                  )
-                """,
-            )
+            return await self._total_org_budget_on_conn(conn)
+
+    @staticmethod
+    async def _total_org_budget_on_conn(conn: "asyncpg.Connection") -> Decimal:
+        """SUM(ceiling) over the most-recent-period department scopes, on an EXISTING
+        tenant-bound connection.  Returns 0 when no rows exist.  Shared by the stage-4
+        ceiling read and the transactional reservation so both derive the reserve
+        floor from the identical figure (ceilings are human-set and stable across a
+        decision, so this needs no row lock)."""
+        row = await conn.fetchrow(
+            """
+            SELECT COALESCE(SUM(ceiling), 0) AS total
+            FROM budget_ledger
+            WHERE scope LIKE 'department:%'
+              AND period = (
+                  SELECT MAX(period)
+                  FROM budget_ledger
+                  WHERE scope LIKE 'department:%'
+              )
+            """,
+        )
         return Decimal(row["total"]) if row else Decimal(0)
+
+    def _reserve_floor(self, total_org_budget: Decimal) -> Decimal:
+        """reserve_floor = total_org_budget × capital_reserve_floor_pct, quantized to
+        whole minor units.  The single definition of the floor, applied identically by
+        the stage-4 ceiling check and the reservation guard so the two can never
+        disagree on the spendable boundary — only on concurrency, which the
+        reservation's row lock resolves."""
+        return (
+            total_org_budget * Decimal(str(self._settings.capital_reserve_floor_pct))
+        ).quantize(Decimal("1"))
 
     async def check_capital_ceiling(
         self,
@@ -97,9 +118,7 @@ class CapitalDAL:
         available_budget = await self.get_available_budget(tenant_id, department)
         total_budget = await self._get_total_org_budget(tenant_id)
 
-        reserve_floor = (
-            total_budget * Decimal(str(self._settings.capital_reserve_floor_pct))
-        ).quantize(Decimal("1"))
+        reserve_floor = self._reserve_floor(total_budget)
         spendable = available_budget - reserve_floor
 
         ceiling_pct = (
@@ -145,3 +164,101 @@ class CapitalDAL:
             if value is not None:
                 return Decimal(str(value))
         return None
+
+    # -- write path: transactional reservation (capital_allocation.md §4) -------
+
+    async def reserve_committed(
+        self, conn: "asyncpg.Connection", department: str, amount: Decimal
+    ) -> bool:
+        """Atomically reserve *amount* (minor units) against ``committed`` for the
+        department's most-recent-period ledger row, ON AN EXISTING tenant-bound
+        transaction (*conn* from ``Database.tenant_session``).
+
+        The row is taken with ``SELECT ... FOR UPDATE``, so concurrent reservations
+        against the same scope SERIALIZE on the row lock and re-read ``committed``
+        after the prior holder commits — no two proposals can jointly overshoot the
+        ceiling.  Returns True and increments ``committed`` when the reservation fits
+        within ``spendable = (ceiling − committed) − reserve_floor`` (the identical
+        boundary the stage-4 check uses); returns False and writes nothing when it
+        would breach, or when no ledger row exists for the scope (FAIL CLOSED —
+        capital_allocation.md §7).  Never raises on the breach path; the caller
+        converts a False into a deferral (SPEND_OVER_CEILING).
+
+        Money is Decimal throughout; the BIGINT column takes ``int(amount)`` (minor
+        units are integral by contract).  RLS: *conn* is already bound to the tenant
+        via ``SET LOCAL skylize.org_id``, so this can only touch that tenant's rows.
+        """
+        scope = f"department:{department}"
+        row = await conn.fetchrow(
+            """
+            SELECT ledger_id, ceiling, committed
+            FROM budget_ledger
+            WHERE scope = $1
+            ORDER BY period DESC
+            LIMIT 1
+            FOR UPDATE
+            """,
+            scope,
+        )
+        if row is None:
+            return False  # no ceiling configured for scope → fail closed → defer
+
+        total_org_budget = await self._total_org_budget_on_conn(conn)
+        reserve_floor = self._reserve_floor(total_org_budget)
+        available = Decimal(row["ceiling"]) - Decimal(row["committed"])
+        spendable = available - reserve_floor
+        if amount > spendable:
+            return False
+
+        await conn.execute(
+            """
+            UPDATE budget_ledger
+            SET committed = committed + $1, updated_at = now()
+            WHERE ledger_id = $2
+            """,
+            int(amount),
+            row["ledger_id"],
+        )
+        return True
+
+    async def release_committed(
+        self, conn: "asyncpg.Connection", department: str, amount: Decimal
+    ) -> Decimal:
+        """Reverse a reservation: decrement ``committed`` by *amount* (minor units) on
+        the department's most-recent-period ledger row, floored at ``spent`` so the
+        ``spent <= committed`` invariant (migration 0001 CHECK) always holds.  Returns
+        the new ``committed`` as Decimal; a no-op (returns 0) when no ledger row
+        exists.  Row-locked, tenant-bound like ``reserve_committed``.
+
+        This is the reversal primitive a settlement / compensation consumer must call
+        when an approved spend's execution fails, so ``committed`` is not a ratchet.
+        NO caller wires it yet — that consumer is out of scope for this change and is
+        tracked in DECISIONS_PENDING.md; the primitive exists (and is tested) so the
+        reservation is reversible the moment that consumer lands.
+        """
+        scope = f"department:{department}"
+        row = await conn.fetchrow(
+            """
+            SELECT ledger_id, committed, spent
+            FROM budget_ledger
+            WHERE scope = $1
+            ORDER BY period DESC
+            LIMIT 1
+            FOR UPDATE
+            """,
+            scope,
+        )
+        if row is None:
+            return Decimal(0)
+
+        new_committed = max(int(row["committed"]) - int(amount), int(row["spent"]))
+        await conn.execute(
+            """
+            UPDATE budget_ledger
+            SET committed = $1, updated_at = now()
+            WHERE ledger_id = $2
+            """,
+            new_committed,
+            row["ledger_id"],
+        )
+        return Decimal(new_committed)

@@ -61,13 +61,18 @@ class DecisionOrchestrator:
         """Evaluate one proposal and durably record its outcome.
 
         1. Evaluate through the six-stage pipeline.
-        2. Persist the decision + enqueue its event (transactional outbox).
-        3. On DEFERRED_TO_HUMAN / ESCALATED, write a hitl_queue escalation —
-           skipped if a pending record already exists for this event + tenant
-           (idempotent on redelivery).
+        2. Persist the decision + enqueue its event (transactional outbox). For an
+           APPROVED spend this ALSO reserves against the budget ledger in the same
+           transaction; if the reservation cannot secure the ceiling headroom the
+           publisher returns the outcome CONVERTED to DEFERRED_TO_HUMAN
+           (SPEND_OVER_CEILING) — reservation and decision commit or roll back as one.
+        3. On the EFFECTIVE DEFERRED_TO_HUMAN / ESCALATED, write a hitl_queue
+           escalation — skipped if a pending record already exists for this event +
+           tenant (idempotent on redelivery).
 
-        Returns the ``DecisionResult``. Raising, not swallowing, is deliberate:
-        the consumer translates an exception into a retry / DLQ.
+        Returns the EFFECTIVE ``DecisionResult`` (possibly converted at step 2).
+        Raising, not swallowing, is deliberate: the consumer translates an exception
+        into a retry / DLQ.
         """
         result = await self._pipeline.evaluate(context)
 
@@ -81,9 +86,13 @@ class DecisionOrchestrator:
             else None
         )
 
-        await self._publisher.publish_outcome(result, hitl_id)
+        # The publisher may convert an over-ceiling approval to a deferral, so the
+        # escalation decision below keys off the EFFECTIVE result it returns, not the
+        # pre-reservation one. hitl_id is re-derived from the (unchanged) decision_id,
+        # so it matches the id the publisher wrote into the converted event.
+        effective = await self._publisher.publish_outcome(result, hitl_id)
 
-        if result.outcome in _ESCALATION_OUTCOMES:
+        if effective.outcome in _ESCALATION_OUTCOMES:
             already = await self._hitl_writer.check_duplicate_escalation(
                 context.event_id, context.tenant_id
             )
@@ -91,24 +100,26 @@ class DecisionOrchestrator:
                 log.info(
                     "decision_escalation_deduplicated",
                     extra={
-                        "decision_id": result.decision_id,
+                        "decision_id": effective.decision_id,
                         "tenant_id": context.tenant_id,
                         "event_id": context.event_id,
                     },
                 )
             else:
-                await self._hitl_writer.write_escalation(context, result, hitl_id)
+                await self._hitl_writer.write_escalation(
+                    context, effective, hitl_id_for(effective.decision_id)
+                )
 
         log.info(
             "decision_processed",
             extra={
-                "decision_id": result.decision_id,
+                "decision_id": effective.decision_id,
                 "tenant_id": context.tenant_id,
                 "event_id": context.event_id,
-                "outcome": result.outcome.value,
+                "outcome": effective.outcome.value,
             },
         )
-        return result
+        return effective
 
 
 __all__ = ["DecisionOrchestrator"]

@@ -23,19 +23,23 @@ import json
 import logging
 import time
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from decimal import Decimal
+from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
 import asyncpg
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
+from skylize.decision_engine.capital_dal import CapitalDAL
 from skylize.decision_engine.config import DecisionEngineSettings
 from skylize.decision_engine.exceptions import DecisionEngineError
 from skylize.decision_engine.models import (
     DecisionOutcome,
     DecisionResult,
+    EvaluationStage,
     EvaluationStepRecord,
 )
+from skylize.decision_engine.pipeline import hitl_id_for
 from skylize.schemas.events.decision import (
     DecisionApproved,
     DecisionDeferredToHuman,
@@ -63,6 +67,17 @@ _OUTCOME_TO_DB: dict[DecisionOutcome, str] = {
     DecisionOutcome.ESCALATED: "deferred_to_human",
 }
 
+# Reverse of _OUTCOME_TO_DB, for reconstructing the already-persisted outcome on a
+# redelivery no-op (the reserving path reads decisions.outcome back rather than
+# re-deciding). ESCALATED is unreachable here — the reserving path only runs for an
+# APPROVED result — so "deferred_to_human" maps to DEFERRED_TO_HUMAN.
+_DB_TO_OUTCOME: dict[str, DecisionOutcome] = {
+    "approved": DecisionOutcome.APPROVED,
+    "rejected": DecisionOutcome.REJECTED,
+    "deferred_to_human": DecisionOutcome.DEFERRED_TO_HUMAN,
+    "conflict_resolved": DecisionOutcome.DEFERRED_TO_HUMAN,
+}
+
 # outcome → owning department channel → stream key ``evt:{tenant}:{department}``.
 # Terminal decision.* events ride the canonical ``decision`` channel (matching
 # the inline engine, which publishes DecisionApproved/Rejected/DeferredToHuman
@@ -76,8 +91,75 @@ _OUTCOME_TO_DEPARTMENT: dict[DecisionOutcome, str] = {
 }
 
 
-def _strip_none(d: dict) -> dict:
+def _strip_none(d: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in d.items() if v is not None}
+
+
+def _advisory_key(decision_id: str) -> int:
+    """Deterministic signed 64-bit key for ``pg_advisory_xact_lock`` derived from a
+    decision_id.  Serialises concurrent deliveries of the SAME decision so the
+    reservation is exactly-once per decision even if the consumer's idempotency
+    guard is bypassed (e.g. a crash between the durable write and mark_processed).
+    A 64-bit collision would merely make two unrelated decisions take turns —
+    harmless, never incorrect."""
+    low64 = UUID(decision_id).int & 0xFFFFFFFFFFFFFFFF
+    return low64 - 0x10000000000000000 if low64 >= 0x8000000000000000 else low64
+
+
+def _spend_over_ceiling_reason(result: DecisionResult) -> str:
+    amount = result.capital.requested_amount if result.capital is not None else Decimal(0)
+    department = _extract_department(result)
+    return (
+        f"SPEND_OVER_CEILING: budget reservation for {amount} minor units could not "
+        f"be secured for scope department:{department} — concurrent commitments "
+        f"consumed the ceiling headroom before this proposal could reserve; deferred "
+        f"to the human owner"
+    )
+
+
+def _convert_to_spend_over_ceiling(result: DecisionResult) -> DecisionResult:
+    """Turn an APPROVED result into DEFERRED_TO_HUMAN because the transactional
+    reservation lost the race for the ceiling headroom (capital_allocation.md §2:
+    over a ceiling → deferred, SPEND_OVER_CEILING).  Appends an append-only CAPITAL
+    step recording the reservation failure so the escalation reason the HITL writer
+    derives reflects the deferral, not the stale stage-4 pass."""
+    reason = _spend_over_ceiling_reason(result)
+    step = EvaluationStepRecord(
+        stage=EvaluationStage.CAPITAL,
+        passed=False,
+        outcome=DecisionOutcome.DEFERRED_TO_HUMAN,
+        detail={
+            "escalation_reason": reason,
+            "reservation_outcome": "spend_over_ceiling",
+            "requested_amount": (
+                str(result.capital.requested_amount)
+                if result.capital is not None
+                else None
+            ),
+            "scope": f"department:{_extract_department(result)}",
+        },
+        duration_ms=0.0,
+        timestamp=datetime.now(timezone.utc),
+    )
+    return result.model_copy(
+        update={
+            "outcome": DecisionOutcome.DEFERRED_TO_HUMAN,
+            "final_reason": reason,
+            "steps": [*result.steps, step],
+        }
+    )
+
+
+def _persisted_effective(result: DecisionResult, row: asyncpg.Record) -> DecisionResult:
+    """Rebuild the effective result from an already-persisted decisions row (redelivery
+    no-op): the outcome the FIRST delivery durably recorded, so the orchestrator's
+    HITL decision keys off the true persisted state, not this re-evaluation."""
+    outcome = _DB_TO_OUTCOME.get(row["outcome"], result.outcome)
+    if outcome is result.outcome:
+        return result
+    return result.model_copy(
+        update={"outcome": outcome, "final_reason": row["outcome_reason"] or result.final_reason}
+    )
 
 
 def _new_outbox_row_id() -> tuple[str, UUID]:
@@ -194,7 +276,7 @@ def _find_rejecting_stage(result: DecisionResult) -> str:
     return "unknown"
 
 
-def _build_proposal_json(result: DecisionResult) -> dict:
+def _build_proposal_json(result: DecisionResult) -> dict[str, Any]:
     return {
         "event_id": result.event_id,
         "outcome": result.outcome.value,
@@ -211,7 +293,7 @@ def _build_proposal_json(result: DecisionResult) -> dict:
     }
 
 
-def _build_score_json(result: DecisionResult) -> dict | None:
+def _build_score_json(result: DecisionResult) -> dict[str, Any] | None:
     if result.scoring is None:
         return None
     return {
@@ -237,13 +319,21 @@ class DecisionEventPublisher:
         self,
         db: "Database",
         settings: DecisionEngineSettings,
+        *,
+        capital_dal: CapitalDAL | None = None,
     ) -> None:
         self._db = db
         self._settings = settings
+        # The reservation runs inside THIS publisher's decisions-row transaction
+        # (capital_allocation.md §4), so the CapitalDAL is invoked with the
+        # tenant_session connection and never opens its own. Defaults to one over the
+        # same db so existing wiring — DecisionEventPublisher(db, settings) — is
+        # unchanged.
+        self._capital = capital_dal if capital_dal is not None else CapitalDAL(db, settings)
 
     async def publish_outcome(
         self, result: DecisionResult, hitl_id: UUID | None = None
-    ) -> None:
+    ) -> DecisionResult:
         """Persist the decision and enqueue its event in one transaction.
 
         Validation happens before any I/O; an invalid outbound payload raises and
@@ -255,12 +345,27 @@ class DecisionEventPublisher:
         ``hitl_id``, when the outcome is DEFERRED_TO_HUMAN, must be the same id
         the orchestrator passes to ``HITLQueueWriter.write_escalation`` — minted
         once upstream so the event payload and the ``hitl_queue`` row agree.
+
+        Returns the EFFECTIVE result. It equals *result* on every path except one:
+        an APPROVED spend whose transactional reservation cannot secure the ceiling
+        headroom is converted to DEFERRED_TO_HUMAN (SPEND_OVER_CEILING), and the
+        converted result is returned so the orchestrator raises the human ticket
+        instead of routing an over-ceiling spend to an adapter.
         """
         event_type = _OUTCOME_TO_EVENT_TYPE.get(result.outcome)
         if event_type is None:
             raise DecisionEngineError(
                 f"No event_type mapping for outcome {result.outcome!r}"
             )
+
+        # An APPROVED proposal that actually moves budget reserves against the ledger
+        # transactionally with its decisions row, and may convert to a deferral if the
+        # reservation loses the race. That path needs the connection in hand for the
+        # reservation, so it is handled separately; every other outcome (and an
+        # approval with no capital ask) takes the plain single-CTE write below,
+        # unchanged.
+        if result.outcome is DecisionOutcome.APPROVED and result.capital is not None:
+            return await self._publish_reserving(result, hitl_id)
 
         payload = await self._validate_outbound(
             event_type, await self._build_outbound_payload(result, hitl_id)
@@ -270,44 +375,8 @@ class DecisionEventPublisher:
         outbox_row_id, outbox_id = _new_outbox_row_id()
 
         async with self._db.tenant_session(result.tenant_id) as conn:
-            await conn.execute(
-                """
-                WITH new_decision AS (
-                    INSERT INTO decisions (
-                        decision_id, org_id, correlation_id, causation_event_id,
-                        partition_key, proposing_agent, authority_level, action_kind,
-                        proposal_json, outcome, outcome_reason, score_json,
-                        governance_token_id, resolved_at, created_at
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-                    ON CONFLICT (decision_id) DO NOTHING
-                    RETURNING decision_id
-                )
-                INSERT INTO decision_outbox (
-                    id, tenant_id, stream_key, event_type, payload, outbox_row_id
-                )
-                SELECT $16, $2, $17, $18, $19::jsonb, $20
-                FROM new_decision
-                """,
-                UUID(result.decision_id),
-                result.tenant_id,
-                _extract_correlation_id(result),
-                _extract_causation_id(result),
-                _extract_partition_key(result),
-                _extract_proposing_agent(result),
-                _extract_authority_level(result),
-                _extract_action_kind(result),
-                json.dumps(_build_proposal_json(result), default=str),
-                _OUTCOME_TO_DB[result.outcome],
-                result.final_reason,
-                json.dumps(_build_score_json(result), default=str) if result.scoring else None,
-                _extract_governance_token_id(result),
-                result.evaluated_at,
-                result.evaluated_at,
-                outbox_id,
-                stream_key,
-                event_type,
-                json.dumps(payload, default=str),
-                outbox_row_id,
+            await self._write_decision_and_outbox(
+                conn, result, event_type, payload, stream_key, outbox_row_id, outbox_id
             )
 
         log.info(
@@ -320,6 +389,134 @@ class DecisionEventPublisher:
                 "stream_key": stream_key,
                 "outbox_row_id": outbox_row_id,
             },
+        )
+        return result
+
+    async def _publish_reserving(
+        self, result: DecisionResult, hitl_id: UUID | None = None
+    ) -> DecisionResult:
+        """Persist an APPROVED spend proposal, reserving against the budget ledger in
+        the SAME transaction as its decisions row (capital_allocation.md §4).
+
+        If the reservation cannot secure the ceiling headroom the outcome is converted
+        to DEFERRED_TO_HUMAN (SPEND_OVER_CEILING) and NOTHING is committed against the
+        ledger — reservation and decision commit or roll back together. Idempotent per
+        ``decision_id``: a redelivery whose decision is already persisted reserves
+        nothing and enqueues nothing, so ``committed`` never double-counts even in the
+        crash window the consumer's ``ProcessedEventStore`` guard leaves open.
+        """
+        if result.capital is None:  # defensive: only the APPROVED+capital branch calls this
+            raise DecisionEngineError("_publish_reserving requires a capital check result")
+
+        async with self._db.tenant_session(result.tenant_id) as conn:
+            # Serialise concurrent deliveries of THIS decision, then no-op if a prior
+            # delivery already persisted it — making the reservation exactly-once
+            # independent of the upstream idempotency guard.
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock($1)", _advisory_key(result.decision_id)
+            )
+            existing = await conn.fetchrow(
+                "SELECT outcome, outcome_reason FROM decisions WHERE decision_id = $1",
+                UUID(result.decision_id),
+            )
+            if existing is not None:
+                log.info(
+                    "decision_reservation_skipped_already_persisted",
+                    extra={
+                        "decision_id": result.decision_id,
+                        "tenant_id": result.tenant_id,
+                        "persisted_outcome": existing["outcome"],
+                    },
+                )
+                return _persisted_effective(result, existing)
+
+            reserved = await self._capital.reserve_committed(
+                conn, _extract_department(result), result.capital.requested_amount
+            )
+            effective = result if reserved else _convert_to_spend_over_ceiling(result)
+            effective_hitl_id = (
+                hitl_id
+                if effective.outcome is DecisionOutcome.APPROVED
+                else hitl_id_for(effective.decision_id)
+            )
+            event_type = _OUTCOME_TO_EVENT_TYPE[effective.outcome]
+            department = _OUTCOME_TO_DEPARTMENT[effective.outcome]
+            stream_key = f"evt:{effective.tenant_id}:{department}"
+            payload = await self._validate_outbound(
+                event_type,
+                await self._build_outbound_payload(effective, effective_hitl_id),
+            )
+            outbox_row_id, outbox_id = _new_outbox_row_id()
+            await self._write_decision_and_outbox(
+                conn, effective, event_type, payload, stream_key, outbox_row_id, outbox_id
+            )
+
+        log.info(
+            "decision_persisted_to_outbox",
+            extra={
+                "decision_id": effective.decision_id,
+                "tenant_id": effective.tenant_id,
+                "outcome": effective.outcome.value,
+                "event_type": event_type,
+                "stream_key": stream_key,
+                "outbox_row_id": outbox_row_id,
+                "reserved": reserved,
+            },
+        )
+        return effective
+
+    async def _write_decision_and_outbox(
+        self,
+        conn: "asyncpg.Connection",
+        result: DecisionResult,
+        event_type: str,
+        payload: dict[str, Any],
+        stream_key: str,
+        outbox_row_id: str,
+        outbox_id: UUID,
+    ) -> None:
+        """Write the ``decisions`` row and its ``decision_outbox`` row in the caller's
+        transaction — one CTE, ``ON CONFLICT (decision_id) DO NOTHING`` so the outbox
+        row is enqueued only when the decision is newly inserted. Shared by the plain
+        and the reserving publish paths so the persisted shape is identical."""
+        await conn.execute(
+            """
+            WITH new_decision AS (
+                INSERT INTO decisions (
+                    decision_id, org_id, correlation_id, causation_event_id,
+                    partition_key, proposing_agent, authority_level, action_kind,
+                    proposal_json, outcome, outcome_reason, score_json,
+                    governance_token_id, resolved_at, created_at
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+                ON CONFLICT (decision_id) DO NOTHING
+                RETURNING decision_id
+            )
+            INSERT INTO decision_outbox (
+                id, tenant_id, stream_key, event_type, payload, outbox_row_id
+            )
+            SELECT $16, $2, $17, $18, $19::jsonb, $20
+            FROM new_decision
+            """,
+            UUID(result.decision_id),
+            result.tenant_id,
+            _extract_correlation_id(result),
+            _extract_causation_id(result),
+            _extract_partition_key(result),
+            _extract_proposing_agent(result),
+            _extract_authority_level(result),
+            _extract_action_kind(result),
+            json.dumps(_build_proposal_json(result), default=str),
+            _OUTCOME_TO_DB[result.outcome],
+            result.final_reason,
+            json.dumps(_build_score_json(result), default=str) if result.scoring else None,
+            _extract_governance_token_id(result),
+            result.evaluated_at,
+            result.evaluated_at,
+            outbox_id,
+            stream_key,
+            event_type,
+            json.dumps(payload, default=str),
+            outbox_row_id,
         )
 
     async def mirror_audit_step(
@@ -378,14 +575,16 @@ class DecisionEventPublisher:
                 f"audit_log insert failed for stage {step.stage.value}: {exc}"
             ) from exc
 
-    async def _validate_outbound(self, event_type: str, payload: dict) -> dict:
+    async def _validate_outbound(
+        self, event_type: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
         """Validate payload against its Pydantic v2 schema and strip None values.
 
         Raises DecisionEngineError on validation failure — never publish invalid events.
         For governance.human_escalation_raised (no typed schema yet) runs a
         structural check (required keys present, all values serialisable) instead.
         """
-        decision_event_map: dict[str, type] = {
+        decision_event_map: dict[str, type[BaseModel]] = {
             "decision.approved": DecisionApproved,
             "decision.rejected": DecisionRejected,
             "decision.deferred_to_human": DecisionDeferredToHuman,
@@ -423,12 +622,12 @@ class DecisionEventPublisher:
 
     async def _build_outbound_payload(
         self, result: DecisionResult, hitl_id: UUID | None = None
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Build the outbound payload dict (before validation)."""
         outcome = result.outcome
 
         if outcome == DecisionOutcome.APPROVED:
-            event = DecisionApproved(
+            event: BaseModel = DecisionApproved(
                 tenant_id=result.tenant_id,
                 partition_key=result.decision_id,
                 department=_extract_department(result),

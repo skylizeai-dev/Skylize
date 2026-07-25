@@ -2,6 +2,45 @@
 
 Ranked by what unblocks the most.
 
+## [GAP — HIGH] Budget reservation has no release/settlement consumer (2026-07-25, branch `feat/capital-budget-reservation`)
+
+Context: `feat(capital): transactional budget reservation on the OPA decision path`
+landed the WRITE side of budget-capped execution. An APPROVED spend on the OPA engine
+now reserves against `budget_ledger.committed` inside the same transaction as its
+`decisions` row (`DecisionEventPublisher._publish_reserving` →
+`CapitalDAL.reserve_committed`, `SELECT ... FOR UPDATE` + guard, converting an
+over-ceiling approval to `DEFERRED_TO_HUMAN` / SPEND_OVER_CEILING). Before this,
+`committed` was never written on any decision path — the ceiling was read but never
+reserved against, so concurrent proposals could jointly overshoot.
+
+What remains OPEN, deliberately, and why `committed` will otherwise ratchet upward:
+
+- **No release trigger is wired.** `committed` is incremented on approval but nothing
+  decrements it. The reversal PRIMITIVE exists and is tested — `CapitalDAL.release_committed`
+  (row-locked, floored at `spent` so `spent <= committed` holds) — but NO caller invokes
+  it. The trigger belongs to a settlement / compensation consumer: on
+  adapter execution failure (the approved spend never actually happened) it must
+  `release_committed`; there is no such consumer today. Until it lands, every approved
+  spend permanently raises `committed`, so a tenant's spendable headroom only shrinks and
+  will eventually lock out all further spend. **This is the highest-priority follow-up.**
+- **Human-rejection release is N/A by construction, not by omission.** In this engine only
+  an APPROVED outcome reserves; a `DEFERRED_TO_HUMAN` decision reserves nothing, so a human
+  rejecting a deferral has nothing to release. (Framings that assume reservation-before-human
+  do not apply to the OPA path, where approval is autonomous and terminal.)
+- **Settlement (`committed → spent`) is OUT OF SCOPE** for this change (explicit terminal
+  scope). Adapters (Meta/TikTok/Stripe) emit settlement events that would reconcile `spent`
+  against `committed`; that reconciliation, and the drift → `director_risk` review path
+  (capital_allocation.md §4), are unbuilt. `release_committed` is the primitive that
+  settlement/compensation will build on.
+
+Need from owner: green-light to build the settlement/compensation consumer (who owns it —
+`director_treasury` per capital_allocation.md §8?) and confirmation that accruing `committed`
+with no release is acceptable ONLY until that consumer exists (self-demo, no live spend today).
+
+Files: src/skylize/decision_engine/capital_dal.py (reserve_committed / release_committed),
+src/skylize/decision_engine/publisher.py (_publish_reserving),
+tests/integration/test_capital_reservation.py.
+
 ## [RESOLVED 2026-07-25] MemoryService embed/upsert paths unscreened by LLMContentGate (HIGH)
 - Originally flagged as an out-of-scope note in SESSION_B_REPORT.md ("MemoryService
   ... has its own `_index_to_qdrant → upsert_vector` path that is not screened by
