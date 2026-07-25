@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from redis.exceptions import ResponseError
 
-from skylize.decision_engine.outbox_poller import OutboxPoller, _flatten_for_stream
+from skylize.decision_engine.outbox_poller import OutboxPoller
 
 
 def _make_row(
@@ -126,29 +126,6 @@ async def test_dict_payload_processed_without_json_parse(settings):
     await poller._poll_and_publish()
 
     redis.xadd.assert_awaited_once()
-
-
-# ---------------------------------------------------------------------------
-# _flatten_for_stream: nested dicts and lists
-# ---------------------------------------------------------------------------
-
-def test_flatten_for_stream_nested_dict():
-    data = {"outer": {"inner": "val"}}
-    flat = _flatten_for_stream(data)
-    assert flat["outer.inner"] == "val"
-    assert "outer.inner" in flat
-
-
-def test_flatten_for_stream_list():
-    data = {"items": [1, 2, 3]}
-    flat = _flatten_for_stream(data)
-    assert flat["items"] == "[1, 2, 3]"
-
-
-def test_flatten_for_stream_primitive():
-    flat = _flatten_for_stream({"n": 42, "s": "hello"})
-    assert flat["n"] == 42
-    assert flat["s"] == "hello"
 
 
 # ---------------------------------------------------------------------------

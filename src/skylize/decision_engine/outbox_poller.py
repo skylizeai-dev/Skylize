@@ -30,6 +30,7 @@ matches how the live inline engine already publishes here via RedisEventBus.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
@@ -43,6 +44,14 @@ if TYPE_CHECKING:
     from skylize.dal.connection import Database
 
 log = logging.getLogger(__name__)
+
+# The single stream field the bus decoder reads. RedisEventBus.publish writes the
+# inline engine's events as ``{"event": <envelope JSON>}`` and RedisEventBus._decode
+# reads exactly ``fields["event"]`` (events/redis_adapter.py: ``_FIELD``). The relay
+# MUST use the same field name so an OPA-relayed event decodes identically to an
+# inline one — this is the wire contract we converge onto, mirrored here rather than
+# imported because ``decision_engine`` must not depend on the ``events`` adapter.
+_ENVELOPE_FIELD = "event"
 
 
 class OutboxPoller:
@@ -116,7 +125,6 @@ class OutboxPoller:
         payload_str = row["payload"]
 
         # Deserialize payload — stored as JSONB string from asyncpg
-        import json
         try:
             payload_dict = json.loads(payload_str) if isinstance(payload_str, str) else payload_str
         except (ValueError, TypeError) as exc:
@@ -127,9 +135,19 @@ class OutboxPoller:
             await self._mark_failed(db_id, row["retry_count"])
             return
 
-        # Flatten payload for Redis stream fields (XADD expects flat key-value pairs)
-        fields = {k: str(v) for k, v in _flatten_for_stream(payload_dict).items()}
-        fields["event_type"] = row["event_type"]
+        # Emit the CANONICAL bus envelope, byte-for-byte the shape the inline engine
+        # publishes: a single ``event`` field holding the whole envelope as JSON. The
+        # publisher already stored a full BaseEvent envelope (``event.model_dump``) in
+        # ``decision_outbox.payload`` (see publisher._build_outbound_payload), so the
+        # relay only re-serialises it — it does NOT flatten, and it adds NO synthetic
+        # ``event_type`` field. RedisEventBus._decode reads ``fields["event"]``,
+        # json.loads it, resolves the model by the envelope's own ``type`` and
+        # model_validates; a flattened row or an extra top-level field decodes to
+        # None (the envelope is ``extra="forbid"``), which is the wire break this
+        # relay exists to close. ``event_id`` rides inside the envelope untouched, so
+        # consumer-side dedupe on it survives the round trip. Re-encoding a dict that
+        # json.loads produced cannot fail, so no new error path is introduced here.
+        fields = {_ENVELOPE_FIELD: json.dumps(payload_dict, default=str)}
 
         # Server-generated id (``XADD <stream> *``): Redis assigns a
         # strictly-increasing id, so the relay is monotonic by construction and
@@ -225,18 +243,3 @@ class OutboxPoller:
                 "SELECT COUNT(*) AS n FROM decision_outbox WHERE failed_at IS NOT NULL"
             )
         return int(row["n"]) if row else 0
-
-
-def _flatten_for_stream(payload: dict, prefix: str = "") -> dict[str, Any]:
-    """Recursively flatten nested dict to dot-separated keys for Redis stream fields."""
-    out: dict[str, Any] = {}
-    for k, v in payload.items():
-        full_key = f"{prefix}.{k}" if prefix else k
-        if isinstance(v, dict):
-            out.update(_flatten_for_stream(v, full_key))
-        elif isinstance(v, list):
-            import json as _json
-            out[full_key] = _json.dumps(v)
-        else:
-            out[full_key] = v
-    return out

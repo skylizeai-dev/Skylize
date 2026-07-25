@@ -80,6 +80,19 @@ class FakeStreamRedis:
         return list(self.streams[name])
 
 
+def _event_id_of(fields: dict) -> str:
+    """Read event_id off a relayed stream entry.
+
+    The relay emits the CANONICAL bus envelope — a single ``event`` field holding
+    the whole envelope JSON (wire parity with the inline engine), not flattened
+    top-level fields. ``event_id`` therefore lives INSIDE that envelope, exactly
+    where RedisEventBus._decode and consumer-side dedupe read it. These delivery-
+    property tests assert on ``event_id``, so they resolve it the same way a real
+    consumer would rather than reaching for a flat field that no longer exists.
+    """
+    return str(json.loads(fields["event"])["event_id"])
+
+
 def _poller(redis, rows, *, batch_size: int = 500, max_retry_count: int = 3):
     """Wire a real OutboxPoller to ``redis`` and a conn whose fetch yields ``rows``.
 
@@ -163,7 +176,7 @@ async def test_same_millisecond_burst_all_arrive_on_stream():
     arrived = redis.entries(stream_key)
     # Property: no loss — all N events are on the stream.
     assert len(arrived) == N, f"expected {N} events on stream, got {len(arrived)}"
-    assert {f["event_id"] for _, f in arrived} == set(event_ids)
+    assert {_event_id_of(f) for _, f in arrived} == set(event_ids)
     # And every one was marked published (published implies on-stream, see test 2).
     assert _published_db_ids(conn) == {r["id"] for r in rows}
 
@@ -189,7 +202,7 @@ async def test_no_row_marked_published_without_stream_entry():
     await poller._poll_and_publish()
 
     on_stream_event_ids = {
-        f["event_id"] for key in (ok_key, down_key) for _, f in redis.entries(key)
+        _event_id_of(f) for key in (ok_key, down_key) for _, f in redis.entries(key)
     }
     published = _published_db_ids(conn)
 
@@ -242,7 +255,7 @@ async def test_crash_mid_publish_is_at_least_once_and_dedupe_collapses():
     assert 1 in _published_db_ids(conn)
 
     entries = redis.entries(stream_key)
-    event_ids_on_stream = [f["event_id"] for _, f in entries]
+    event_ids_on_stream = [_event_id_of(f) for _, f in entries]
     # At-least-once at the relay: a physical duplicate exists after recovery...
     assert len(entries) == 2
     # ...but every entry carries the SAME event_id, so the bus's consumer-side
