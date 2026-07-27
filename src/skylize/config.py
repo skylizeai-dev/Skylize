@@ -154,6 +154,16 @@ class Settings(BaseSettings):
     llm_model_fast: str = "claude-haiku-4-5-20251001"
     llm_model_reasoning: str = "claude-opus-4-6"
 
+    # LLM egress retry policy — shared by BOTH the generate (sync) and
+    # generate_with_tools (async) egress paths. All bounds live here (no magic
+    # numbers in the adapter). 429 honours Retry-After when present, else uses
+    # jittered exponential backoff; 5xx uses jittered exponential backoff; both
+    # are bounded by llm_retry_max_attempts. 400/401 are never retried.
+    llm_retry_max_attempts: int = 3        # total attempts per call (initial + retries)
+    llm_retry_base_delay_seconds: float = 1.0   # exponential backoff base (attempt 1)
+    llm_retry_max_delay_seconds: float = 30.0   # cap on any single backoff sleep
+    llm_retry_jitter_seconds: float = 0.5       # max random jitter added to each backoff
+
     # Pricing per 1M tokens in USD (configurable so ops can update without redeploy)
     llm_price_sonnet_in: float = 3.0
     llm_price_sonnet_out: float = 15.0

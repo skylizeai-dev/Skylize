@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+import logging
+from unittest.mock import AsyncMock, MagicMock, call, patch
 from uuid import uuid4
 
 import anthropic
@@ -11,12 +12,14 @@ import pytest
 
 from skylize.adapters.llm.anthropic_adapter import AnthropicAdapter
 from skylize.adapters.llm.gateway import (
+    LLMAuthenticationError,
     LLMContentBlock,
     LLMGenerateRequest,
     LLMGenerateResponse,
     LLMGenerateWithToolsRequest,
     LLMMessage,
     LLMProviderUnavailable,
+    LLMRateLimited,
     TokenBudgetExceeded,
 )
 from skylize.config import Settings
@@ -117,9 +120,21 @@ def _tools_request(**kwargs: object) -> LLMGenerateWithToolsRequest:
     return LLMGenerateWithToolsRequest(**defaults)  # type: ignore[arg-type]
 
 
-def _httpx_response(status: int) -> httpx.Response:
+def _httpx_response(status: int, headers: dict[str, str] | None = None) -> httpx.Response:
     dummy = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
-    return httpx.Response(status, request=dummy)
+    return httpx.Response(status, request=dummy, headers=headers)
+
+
+def _status_error(status: int, headers: dict[str, str] | None = None) -> anthropic.APIStatusError:
+    """A provider status error at `status` (429/5xx/etc.) for retry-policy tests."""
+    cls: type[anthropic.APIStatusError] = anthropic.APIStatusError
+    if status == 429:
+        cls = anthropic.RateLimitError
+    elif status == 401:
+        cls = anthropic.AuthenticationError
+    elif status == 400:
+        cls = anthropic.BadRequestError
+    return cls(message=f"status {status}", response=_httpx_response(status, headers), body={})
 
 
 def _patch_sync_client(adapter: AnthropicAdapter, side_effect: object) -> MagicMock:
@@ -187,88 +202,206 @@ async def test_unknown_model_raises_value_error() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Retry logic — 500 → 1s wait → retry once
+# Retry policy — attempt counts + delay sequences, for BOTH egress paths.
+#
+# All tests pin the Settings-driven bounds explicitly and patch random.uniform
+# to 0.0 so the jittered backoff sequence is deterministic and assertable.
 # ---------------------------------------------------------------------------
 
+# Deterministic backoff: base=1.0, so attempt 1 sleeps 1.0, attempt 2 sleeps 2.0.
+_RETRY_SETTINGS: dict[str, object] = {
+    "llm_retry_max_attempts": 3,
+    "llm_retry_base_delay_seconds": 1.0,
+    "llm_retry_max_delay_seconds": 30.0,
+    "llm_retry_jitter_seconds": 0.5,
+}
 
-async def test_500_retries_once_then_succeeds() -> None:
-    adapter = _make_adapter()
-    req = _request()
 
-    error_500 = anthropic.APIStatusError(
-        message="internal server error",
-        response=_httpx_response(500),
-        body={},
+def _no_jitter():
+    return patch("skylize.adapters.llm.anthropic_adapter.random.uniform", return_value=0.0)
+
+
+def _patch_sleep():
+    return patch(
+        "skylize.adapters.llm.anthropic_adapter.asyncio.sleep", new_callable=AsyncMock
     )
-    mock_resp = _mock_anthropic_response()
+
+
+# -- sync (generate) egress -------------------------------------------------
+
+
+async def test_generate_retries_500_with_backoff_sequence_then_succeeds() -> None:
+    adapter = _make_adapter(**_RETRY_SETTINGS)
+    req = _request()
+    ok = _mock_anthropic_response()
 
     with patch("skylize.adapters.llm.anthropic_adapter.anthropic.Anthropic") as mock_cls:
-        mock_cls.return_value.messages.create.side_effect = [error_500, mock_resp]
-        with patch("skylize.adapters.llm.anthropic_adapter.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        mock_cls.return_value.messages.create.side_effect = [
+            _status_error(500), _status_error(500), ok,
+        ]
+        with _no_jitter(), _patch_sleep() as mock_sleep:
             result = await adapter.generate(req)
 
     assert result.text == "World"
-    mock_sleep.assert_called_once_with(1)
+    assert mock_cls.return_value.messages.create.call_count == 3   # attempt count
+    assert mock_sleep.call_args_list == [call(1.0), call(2.0)]     # delay sequence
 
 
-async def test_500_retry_also_fails_raises_provider_unavailable() -> None:
-    adapter = _make_adapter()
+async def test_generate_500_exhausts_raises_provider_unavailable() -> None:
+    adapter = _make_adapter(**_RETRY_SETTINGS)
     req = _request()
 
-    error_500 = anthropic.APIStatusError(
-        message="internal server error",
-        response=_httpx_response(500),
-        body={},
-    )
-
     with patch("skylize.adapters.llm.anthropic_adapter.anthropic.Anthropic") as mock_cls:
-        mock_cls.return_value.messages.create.side_effect = [error_500, error_500]
-        with patch("skylize.adapters.llm.anthropic_adapter.asyncio.sleep", new_callable=AsyncMock):
+        mock_cls.return_value.messages.create.side_effect = [_status_error(500)] * 3
+        with _no_jitter(), _patch_sleep() as mock_sleep:
             with pytest.raises(LLMProviderUnavailable):
                 await adapter.generate(req)
 
+    assert mock_cls.return_value.messages.create.call_count == 3   # bounded
+    assert mock_sleep.call_count == 2                              # one fewer than attempts
 
-async def test_non_retryable_400_raises_immediately_no_retry() -> None:
-    adapter = _make_adapter()
+
+async def test_generate_429_is_retried_then_succeeds() -> None:
+    adapter = _make_adapter(**_RETRY_SETTINGS)
     req = _request()
-
-    error_400 = anthropic.BadRequestError(
-        message="bad request",
-        response=_httpx_response(400),
-        body={},
-    )
+    ok = _mock_anthropic_response()
 
     with patch("skylize.adapters.llm.anthropic_adapter.anthropic.Anthropic") as mock_cls:
-        mock_cls.return_value.messages.create.side_effect = [error_400]
-        with pytest.raises(anthropic.BadRequestError):
-            await adapter.generate(req)
-        # Only 1 call — no retry
-        assert mock_cls.return_value.messages.create.call_count == 1
+        mock_cls.return_value.messages.create.side_effect = [_status_error(429), ok]
+        with _no_jitter(), _patch_sleep() as mock_sleep:
+            result = await adapter.generate(req)
+
+    assert result.text == "World"
+    assert mock_cls.return_value.messages.create.call_count == 2
+    mock_sleep.assert_called_once_with(1.0)   # backoff (no Retry-After header)
 
 
-async def test_generate_with_tools_retries_500_once_then_succeeds() -> None:
-    """The async (tools) egress is routed through the SAME retry helper as the
-    sync egress, so a 5xx is retried once there too (both wrapped identically)."""
-    adapter = _make_adapter()
+async def test_generate_429_honours_retry_after_header() -> None:
+    adapter = _make_adapter(**_RETRY_SETTINGS)
+    req = _request()
+    ok = _mock_anthropic_response()
+
+    with patch("skylize.adapters.llm.anthropic_adapter.anthropic.Anthropic") as mock_cls:
+        mock_cls.return_value.messages.create.side_effect = [
+            _status_error(429, {"retry-after": "7"}), ok,
+        ]
+        with _no_jitter(), _patch_sleep() as mock_sleep:
+            result = await adapter.generate(req)
+
+    assert result.text == "World"
+    mock_sleep.assert_called_once_with(7.0)   # Retry-After honoured, not backoff
+
+
+async def test_generate_429_exhausts_raises_rate_limited() -> None:
+    adapter = _make_adapter(llm_retry_max_attempts=2, llm_retry_base_delay_seconds=1.0,
+                            llm_retry_max_delay_seconds=30.0, llm_retry_jitter_seconds=0.5)
+    req = _request()
+
+    with patch("skylize.adapters.llm.anthropic_adapter.anthropic.Anthropic") as mock_cls:
+        mock_cls.return_value.messages.create.side_effect = [_status_error(429)] * 2
+        with _no_jitter(), _patch_sleep() as mock_sleep:
+            with pytest.raises(LLMRateLimited):
+                await adapter.generate(req)
+
+    assert mock_cls.return_value.messages.create.call_count == 2
+    assert mock_sleep.call_count == 1
+
+
+async def test_generate_400_not_retried() -> None:
+    adapter = _make_adapter(**_RETRY_SETTINGS)
+    req = _request()
+
+    with patch("skylize.adapters.llm.anthropic_adapter.anthropic.Anthropic") as mock_cls:
+        mock_cls.return_value.messages.create.side_effect = [_status_error(400)]
+        with _patch_sleep() as mock_sleep:
+            with pytest.raises(anthropic.BadRequestError):
+                await adapter.generate(req)
+
+    assert mock_cls.return_value.messages.create.call_count == 1   # no retry
+    mock_sleep.assert_not_called()
+
+
+async def test_generate_401_fails_closed_and_leaks_no_key_material(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """401 fails closed as LLMAuthenticationError with NO key material reaching
+    the exception string, log records, or emitted trace attributes."""
+    secret = "sk-KEYMATERIAL-DO-NOT-LEAK"
+    mock_span = MagicMock()
+    mock_tracer = MagicMock()
+    mock_tracer.start_span.return_value = mock_span
+
+    adapter = _make_adapter(tracer=mock_tracer, anthropic_api_key=secret, **_RETRY_SETTINGS)
+    req = _request()
+
+    with caplog.at_level(logging.DEBUG, logger="skylize"):
+        with patch("skylize.adapters.llm.anthropic_adapter.anthropic.Anthropic") as mock_cls:
+            mock_cls.return_value.messages.create.side_effect = [_status_error(401)]
+            with _patch_sleep() as mock_sleep:
+                with pytest.raises(LLMAuthenticationError) as ei:
+                    await adapter.generate(req)
+
+    # Failed closed immediately, no retry.
+    assert mock_cls.return_value.messages.create.call_count == 1
+    mock_sleep.assert_not_called()
+
+    # No key in the exception string (nor a chained SDK cause carrying it).
+    assert secret not in str(ei.value)
+    assert ei.value.__cause__ is None
+    # No key in any log record.
+    assert all(secret not in rec.getMessage() for rec in caplog.records)
+    # No key in any emitted trace attribute.
+    span_args = " ".join(str(c) for c in mock_span.set_attribute.call_args_list)
+    assert secret not in span_args
+
+
+# -- async (generate_with_tools) egress -------------------------------------
+
+
+async def test_generate_with_tools_retries_500_with_backoff_sequence_then_succeeds() -> None:
+    adapter = _make_adapter(**_RETRY_SETTINGS)
     req = _tools_request()
-
-    error_500 = anthropic.APIStatusError(
-        message="internal server error",
-        response=_httpx_response(500),
-        body={},
-    )
-    mock_create = AsyncMock(side_effect=[error_500, _mock_tools_response()])
+    mock_create = AsyncMock(side_effect=[_status_error(500), _status_error(500),
+                                         _mock_tools_response()])
 
     with patch("skylize.adapters.llm.anthropic_adapter.anthropic.AsyncAnthropic") as mock_cls:
         mock_cls.return_value.messages.create = mock_create
-        with patch(
-            "skylize.adapters.llm.anthropic_adapter.asyncio.sleep", new_callable=AsyncMock
-        ) as mock_sleep:
+        with _no_jitter(), _patch_sleep() as mock_sleep:
+            result = await adapter.generate_with_tools(req, tools=[])
+
+    assert result.text == "World"
+    assert mock_create.call_count == 3                            # attempt count
+    assert mock_sleep.call_args_list == [call(1.0), call(2.0)]    # delay sequence
+
+
+async def test_generate_with_tools_429_is_retried_then_succeeds() -> None:
+    adapter = _make_adapter(**_RETRY_SETTINGS)
+    req = _tools_request()
+    mock_create = AsyncMock(side_effect=[_status_error(429), _mock_tools_response()])
+
+    with patch("skylize.adapters.llm.anthropic_adapter.anthropic.AsyncAnthropic") as mock_cls:
+        mock_cls.return_value.messages.create = mock_create
+        with _no_jitter(), _patch_sleep() as mock_sleep:
             result = await adapter.generate_with_tools(req, tools=[])
 
     assert result.text == "World"
     assert mock_create.call_count == 2
-    mock_sleep.assert_called_once_with(1)
+    mock_sleep.assert_called_once_with(1.0)
+
+
+async def test_generate_with_tools_400_not_retried() -> None:
+    adapter = _make_adapter(**_RETRY_SETTINGS)
+    req = _tools_request()
+    mock_create = AsyncMock(side_effect=[_status_error(400)])
+
+    with patch("skylize.adapters.llm.anthropic_adapter.anthropic.AsyncAnthropic") as mock_cls:
+        mock_cls.return_value.messages.create = mock_create
+        with _patch_sleep() as mock_sleep:
+            with pytest.raises(anthropic.BadRequestError):
+                await adapter.generate_with_tools(req, tools=[])
+
+    assert mock_create.call_count == 1
+    mock_sleep.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

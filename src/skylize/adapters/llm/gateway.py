@@ -79,6 +79,21 @@ class LLMProviderUnavailable(Exception):
     available the error propagates so the caller can degrade gracefully."""
 
 
+class LLMRateLimited(Exception):
+    """Raised when a provider keeps returning 429 after the bounded retry budget
+    is exhausted (Retry-After honoured when present, else jittered exponential
+    backoff). Distinct from LLMProviderUnavailable so callers can back off on
+    rate limits separately from provider outages."""
+
+
+class LLMAuthenticationError(Exception):
+    """Raised on a 401 from the provider — fail closed immediately, no retry.
+
+    The message is static and carries NO key material; the originating SDK
+    exception is deliberately not chained, so no credential can leak into the
+    exception string, a log record, or an emitted event via this path."""
+
+
 class LLMGenerateRequest(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 

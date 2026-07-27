@@ -4,10 +4,13 @@ AnthropicAdapter — live LLM backend via the Anthropic Python SDK.
 Used when SKYLIZE_ANTHROPIC_API_KEY is present. Logical model names map to
 concrete Anthropic model IDs via Settings (llm_model_default / fast /
 reasoning). The adapter refuses over-budget calls BEFORE any provider egress,
-retries a 5xx once (1s pause) then raises LLMProviderUnavailable, accounts
-cost in USD micros from Settings prices, and optionally reports every
-generation to Langfuse and OpenTelemetry — observability failures never fail
-the call, and prompt text is never logged.
+wraps BOTH egress paths (generate + generate_with_tools) in one bounded retry
+policy (Settings-driven: 429 honours Retry-After else jittered backoff → then
+LLMRateLimited; 5xx jittered backoff → then LLMProviderUnavailable; 400 /
+context overflow re-raised immediately; 401 fails closed with no key material
+in the error, logs, or events), accounts cost in USD micros from Settings
+prices, and optionally reports every generation to Langfuse and OpenTelemetry —
+observability failures never fail the call, and prompt text is never logged.
 """
 
 from __future__ import annotations
@@ -15,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any, TypeVar
 from uuid import UUID
@@ -23,12 +27,14 @@ import anthropic
 from pydantic import BaseModel
 
 from .gateway import (
+    LLMAuthenticationError,
     LLMContentBlock,
     LLMGenerateRequest,
     LLMGenerateResponse,
     LLMGenerateWithToolsRequest,
     LLMMessage,
     LLMProviderUnavailable,
+    LLMRateLimited,
     LLMUsage,
     TokenBudgetExceeded,
 )
@@ -148,6 +154,11 @@ class AnthropicAdapter:
         self._base_url = base_url or str(getattr(settings, "anthropic_base_url", "") or "")
         self._langfuse = langfuse_client
         self._tracer = tracer
+        # Retry policy bounds (from Settings; no magic numbers in the helper body).
+        self._retry_max_attempts = int(getattr(settings, "llm_retry_max_attempts", 3))
+        self._retry_base_delay = float(getattr(settings, "llm_retry_base_delay_seconds", 1.0))
+        self._retry_max_delay = float(getattr(settings, "llm_retry_max_delay_seconds", 30.0))
+        self._retry_jitter = float(getattr(settings, "llm_retry_jitter_seconds", 0.5))
         # Strict logical -> concrete map; unknown logical names fail loudly so a
         # typo never silently lands on the wrong (priced) model.
         self._model_map: dict[str, str] = {
@@ -192,8 +203,40 @@ class AnthropicAdapter:
                 f"tokens_used_so_far={request.tokens_used_so_far or 0})"
             )
 
+    @staticmethod
+    def _parse_retry_after(exc: anthropic.APIStatusError) -> float | None:
+        """The provider's Retry-After (seconds) if present and numeric, else None.
+
+        Only the delta-seconds form is honoured; an HTTP-date value falls through
+        to backoff (returns None). Never raises.
+        """
+        try:
+            header = exc.response.headers.get("retry-after")
+        except Exception:  # noqa: BLE001 — a malformed response must not break retry
+            return None
+        if header is None:
+            return None
+        try:
+            value = float(header)
+        except (TypeError, ValueError):
+            return None
+        return value if value >= 0 else None
+
+    def _retry_delay(self, attempt: int, exc: anthropic.APIStatusError) -> float:
+        """Seconds to sleep before the next attempt (1-indexed `attempt`).
+
+        429 honours Retry-After when present (capped at the max delay); otherwise
+        both 429 and 5xx use jittered exponential backoff bounded by the max delay.
+        """
+        if exc.response.status_code == 429:
+            retry_after = self._parse_retry_after(exc)
+            if retry_after is not None:
+                return min(retry_after, self._retry_max_delay)
+        backoff = min(self._retry_base_delay * (2 ** (attempt - 1)), self._retry_max_delay)
+        return backoff + random.uniform(0.0, self._retry_jitter)
+
     async def _call_with_retry(self, invoke: Callable[[], Awaitable[Any]]) -> Any:
-        """One retry on 5xx after a 1s pause; 4xx raises immediately.
+        """Retry an already-bound provider call uniformly across egress paths.
 
         Client-agnostic: `invoke` is a zero-argument callable returning a FRESH
         awaitable for the provider call. The sync egress (generate) binds it
@@ -201,21 +244,45 @@ class AnthropicAdapter:
         (generate_with_tools) binds anthropic.AsyncAnthropic.messages.create
         directly. Both paths share this one reliability wrapper regardless of
         client type, so the two egresses are wrapped identically.
+
+        Policy (all bounds from Settings):
+          * 401 — fail closed immediately as LLMAuthenticationError; the message
+            carries no key material and the SDK exception is not chained.
+          * 429 — honour Retry-After, else jittered exponential backoff; bounded
+            attempts; then LLMRateLimited.
+          * >=500 — jittered exponential backoff; bounded attempts; then
+            LLMProviderUnavailable.
+          * other 4xx (incl. 400 / context overflow) — re-raise the provider's
+            typed error immediately, no retry.
         """
-        try:
-            return await invoke()
-        except anthropic.APIStatusError as exc:
-            if exc.response.status_code < 500:
-                raise
-            await asyncio.sleep(1)
+        last_exc: anthropic.APIStatusError | None = None
+        for attempt in range(1, self._retry_max_attempts + 1):
             try:
                 return await invoke()
-            except anthropic.APIStatusError as retry_exc:
-                if retry_exc.response.status_code < 500:
+            except anthropic.APIStatusError as exc:
+                status = exc.response.status_code
+                if status == 401:
+                    # Fail closed. Static message, no chaining (`from None`) so no
+                    # credential can reach the exception string, logs, or events.
+                    raise LLMAuthenticationError(
+                        "anthropic authentication failed (401)"
+                    ) from None
+                if status != 429 and status < 500:
+                    # 400 / context overflow and other non-retryable 4xx.
                     raise
-                raise LLMProviderUnavailable(
-                    f"anthropic unavailable after retry: {retry_exc}"
-                ) from retry_exc
+                last_exc = exc
+                if attempt >= self._retry_max_attempts:
+                    break
+                await asyncio.sleep(self._retry_delay(attempt, exc))
+
+        assert last_exc is not None  # loop only breaks after a retryable failure
+        if last_exc.response.status_code == 429:
+            raise LLMRateLimited(
+                f"anthropic rate limited after {self._retry_max_attempts} attempts"
+            ) from last_exc
+        raise LLMProviderUnavailable(
+            f"anthropic unavailable after {self._retry_max_attempts} attempts"
+        ) from last_exc
 
     def _record_langfuse(
         self, request: LLMGenerateRequest, model_id: str, response: LLMGenerateResponse
