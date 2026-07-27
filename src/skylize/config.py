@@ -133,6 +133,11 @@ class Settings(BaseSettings):
 
     # LLM provider keys
     anthropic_api_key: str = ""
+    # Optional Anthropic API base URL override (e.g. a regional gateway or a
+    # record/replay proxy). None/empty = the SDK default endpoint; the adapter
+    # omits the argument entirely rather than passing None so the SDK's own
+    # default resolution (env + built-in URL) is untouched.
+    anthropic_base_url: str | None = None
     openai_api_key: str = ""
     langfuse_public_key: str = ""
     langfuse_secret_key: str = ""

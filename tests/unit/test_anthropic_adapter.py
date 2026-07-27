@@ -11,8 +11,11 @@ import pytest
 
 from skylize.adapters.llm.anthropic_adapter import AnthropicAdapter
 from skylize.adapters.llm.gateway import (
+    LLMContentBlock,
     LLMGenerateRequest,
     LLMGenerateResponse,
+    LLMGenerateWithToolsRequest,
+    LLMMessage,
     LLMProviderUnavailable,
     TokenBudgetExceeded,
 )
@@ -78,6 +81,40 @@ def _make_adapter(
         langfuse_client=langfuse_client,
         tracer=tracer,
     )
+
+
+def _mock_tools_response(
+    text: str = "World",
+    input_tokens: int = 10,
+    output_tokens: int = 20,
+    stop_reason: str = "end_turn",
+) -> MagicMock:
+    """A response mock for the generate_with_tools (async) egress path.
+
+    Unlike `_mock_anthropic_response`, this also carries `stop_reason` (a str,
+    not a MagicMock) so the tool-path response model validates.
+    """
+    block = MagicMock()
+    block.type = "text"
+    block.text = text
+    resp = MagicMock()
+    resp.content = [block]
+    resp.usage.input_tokens = input_tokens
+    resp.usage.output_tokens = output_tokens
+    resp.stop_reason = stop_reason
+    return resp
+
+
+def _tools_request(**kwargs: object) -> LLMGenerateWithToolsRequest:
+    defaults: dict[str, object] = {
+        "model": "default",
+        "messages": [LLMMessage(role="user", content=[LLMContentBlock(kind="text", text="hi")])],
+        "requested_max_tokens": 100,
+        "governance_token_id": uuid4(),
+        "org_id": ORG,
+    }
+    defaults.update(kwargs)
+    return LLMGenerateWithToolsRequest(**defaults)  # type: ignore[arg-type]
 
 
 def _httpx_response(status: int) -> httpx.Response:
@@ -397,3 +434,38 @@ async def test_no_tracer_does_not_raise() -> None:
         mock_cls.return_value.messages.create.return_value = mock_resp
         result = await adapter.generate(req)
     assert isinstance(result, LLMGenerateResponse)
+
+
+# ---------------------------------------------------------------------------
+# base_url override — passed at BOTH construction sites, omitted when unset
+# ---------------------------------------------------------------------------
+
+
+async def test_base_url_passed_to_sync_client_when_set() -> None:
+    adapter = _make_adapter(anthropic_base_url="https://proxy.internal/v1")
+    req = _request()
+    mock_resp = _mock_anthropic_response()
+    with patch("skylize.adapters.llm.anthropic_adapter.anthropic.Anthropic") as mock_cls:
+        mock_cls.return_value.messages.create.return_value = mock_resp
+        await adapter.generate(req)
+    assert mock_cls.call_args.kwargs.get("base_url") == "https://proxy.internal/v1"
+
+
+async def test_base_url_omitted_from_sync_client_when_unset() -> None:
+    adapter = _make_adapter()  # anthropic_base_url unset (None default)
+    req = _request()
+    mock_resp = _mock_anthropic_response()
+    with patch("skylize.adapters.llm.anthropic_adapter.anthropic.Anthropic") as mock_cls:
+        mock_cls.return_value.messages.create.return_value = mock_resp
+        await adapter.generate(req)
+    # Omitted entirely — never handed to the SDK as an explicit None.
+    assert "base_url" not in mock_cls.call_args.kwargs
+
+
+async def test_base_url_passed_to_async_client_when_set() -> None:
+    adapter = _make_adapter(anthropic_base_url="https://proxy.internal/v1")
+    req = _tools_request()
+    with patch("skylize.adapters.llm.anthropic_adapter.anthropic.AsyncAnthropic") as mock_cls:
+        mock_cls.return_value.messages.create = AsyncMock(return_value=_mock_tools_response())
+        await adapter.generate_with_tools(req, tools=[])
+    assert mock_cls.call_args.kwargs.get("base_url") == "https://proxy.internal/v1"

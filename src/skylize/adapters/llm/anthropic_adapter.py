@@ -136,11 +136,15 @@ class AnthropicAdapter:
         settings: Any,
         *,
         api_key: str | None = None,
+        base_url: str | None = None,
         langfuse_client: Any = None,
         tracer: Any = None,
     ) -> None:
         self._settings = settings
         self._api_key = api_key or str(getattr(settings, "anthropic_api_key", "") or "")
+        # Empty string when unset; `_client_kwargs` omits base_url in that case so
+        # the SDK falls back to its own default endpoint resolution (env + built-in).
+        self._base_url = base_url or str(getattr(settings, "anthropic_base_url", "") or "")
         self._langfuse = langfuse_client
         self._tracer = tracer
         # Strict logical -> concrete map; unknown logical names fail loudly so a
@@ -152,6 +156,18 @@ class AnthropicAdapter:
         }
 
     # -- helpers --------------------------------------------------------------
+
+    def _client_kwargs(self) -> dict[str, Any]:
+        """Constructor kwargs shared by both egress clients (sync + async).
+
+        base_url is included ONLY when configured; when unset the argument is
+        omitted entirely so the Anthropic SDK applies its own default endpoint
+        (rather than being handed an explicit None).
+        """
+        kwargs: dict[str, Any] = {"api_key": self._api_key}
+        if self._base_url:
+            kwargs["base_url"] = self._base_url
+        return kwargs
 
     def _concrete_model(self, logical: str) -> str:
         try:
@@ -240,7 +256,7 @@ class AnthropicAdapter:
             if request.system:
                 kwargs["system"] = request.system
 
-            client = anthropic.Anthropic(api_key=self._api_key)
+            client = anthropic.Anthropic(**self._client_kwargs())
             message = await self._call_with_retry(client, kwargs)
 
             text = "".join(
@@ -286,7 +302,7 @@ class AnthropicAdapter:
         if request.system:
             kwargs["system"] = request.system
 
-        client = anthropic.AsyncAnthropic(api_key=self._api_key)
+        client = anthropic.AsyncAnthropic(**self._client_kwargs())
         message = await client.messages.create(**kwargs)
         text, blocks = _normalize_anthropic_message(message, name_map=name_map)
         prompt_tokens = int(message.usage.input_tokens)
