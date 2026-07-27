@@ -251,7 +251,7 @@ class AnthropicAdapter:
             retry_after = self._parse_retry_after(exc)
             if retry_after is not None:
                 return min(retry_after, self._retry_max_delay)
-        backoff = min(self._retry_base_delay * (2 ** (attempt - 1)), self._retry_max_delay)
+        backoff = min(self._retry_base_delay * (2.0 ** (attempt - 1)), self._retry_max_delay)
         return backoff + random.uniform(0.0, self._retry_jitter)
 
     async def _call_with_retry(self, invoke: Callable[[], Awaitable[Any]]) -> Any:
@@ -353,7 +353,7 @@ class AnthropicAdapter:
 
             client = anthropic.Anthropic(**self._client_kwargs())
             message = await self._call_with_retry(
-                lambda: asyncio.to_thread(client.messages.create, **kwargs)
+                lambda: asyncio.to_thread(lambda: client.messages.create(**kwargs))
             )
 
             text = "".join(
