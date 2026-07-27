@@ -95,3 +95,20 @@ async def test_demo_adapter_fallback_for_unknown_prompt() -> None:
     resp = await adapter.generate(req)
     parsed = json.loads(resp.text)
     assert isinstance(parsed, dict)
+
+
+@pytest.mark.asyncio
+async def test_demo_adapter_warns_on_every_call(caplog: pytest.LogCaptureFixture) -> None:
+    """Demo mode must log a WARNING on every generation so non-production output
+    is never mistaken for real AI. The warning must carry no prompt content."""
+    import logging
+
+    adapter = DemoLLMAdapter()
+    secret = "SECRET_PROMPT_CONTENT_XYZ"
+    with caplog.at_level(logging.WARNING, logger="skylize"):
+        await adapter.generate(_make_request(secret))
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "demo" in warnings[0].getMessage().lower()
+    assert secret not in warnings[0].getMessage()

@@ -9,7 +9,11 @@ deliverables embed back into tenant knowledge. These tests exercise the real
 
 from __future__ import annotations
 
-from skylize.bootstrap import build_container
+import pytest
+
+from skylize.adapters.llm.content_gate import GuardedLLMGateway
+from skylize.adapters.llm.demo_adapter import DemoLLMAdapter
+from skylize.bootstrap import LLMConfigurationError, build_container
 from skylize.config import Settings
 
 
@@ -37,3 +41,24 @@ async def test_deliverable_service_tolerates_absent_vector_backend() -> None:
 
     assert container.knowledge_ingestion is None
     assert container.deliverables._knowledge_ingestion is None
+
+
+async def test_build_fails_closed_without_api_key_or_demo_flag() -> None:
+    """No anthropic_api_key AND no explicit demo flag -> the container refuses to
+    build with a typed error that names the missing variable, instead of silently
+    serving fake demo output."""
+    settings = Settings(backend="memory", anthropic_api_key="", llm_demo_mode=False)
+    with pytest.raises(LLMConfigurationError, match="SKYLIZE_ANTHROPIC_API_KEY"):
+        await build_container(settings)
+
+
+async def test_demo_mode_requires_explicit_flag_and_wires_demo_adapter() -> None:
+    """With the explicit demo flag set (and no key), the demo adapter is wired
+    behind the shared content-gate wrapper."""
+    settings = Settings(backend="memory", anthropic_api_key="", llm_demo_mode=True)
+    container = await build_container(settings)
+    try:
+        assert isinstance(container.llm, GuardedLLMGateway)
+        assert isinstance(container.llm._gateway, DemoLLMAdapter)
+    finally:
+        await container.aclose()

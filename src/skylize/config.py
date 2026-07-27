@@ -138,6 +138,12 @@ class Settings(BaseSettings):
     # omits the argument entirely rather than passing None so the SDK's own
     # default resolution (env + built-in URL) is untouched.
     anthropic_base_url: str | None = None
+    # Demo LLM mode. OFF by default so a missing anthropic_api_key fails the
+    # container build closed (bootstrap raises a typed config error naming the
+    # missing variable) rather than silently falling back to fake output. Set
+    # true to explicitly opt into the deterministic DemoLLMAdapter, which logs a
+    # WARNING on every call. Never enable in production.
+    llm_demo_mode: bool = False
     openai_api_key: str = ""
     langfuse_public_key: str = ""
     langfuse_secret_key: str = ""

@@ -55,6 +55,13 @@ from .tools.builtin import default_tool_registry
 from .tools.proxy import ToolProxy
 
 
+class LLMConfigurationError(RuntimeError):
+    """The LLM gateway cannot be wired from the current configuration.
+
+    Raised at composition time so a misconfigured deployment fails to build
+    rather than serving fake demo output under a real workload."""
+
+
 @dataclass
 class Container:
     settings: Settings
@@ -275,15 +282,24 @@ async def build_container(settings: Settings | None = None) -> Container:
         decision_engine.subscribe(org_id)
     closers.append(decision_engine.stop)
 
-    # LLM gateway: the live Anthropic adapter when a key is configured, else the
-    # deterministic `[DEMO]` adapter (memory backend / tests / no-key local run).
+    # LLM gateway: the live Anthropic adapter when a key is configured. With no
+    # key we fail closed rather than silently serving fake output — UNLESS demo
+    # mode is explicitly opted into (llm_demo_mode), in which case the
+    # DemoLLMAdapter is wired and it logs a WARNING on every call.
     llm: LLMGateway
     if settings.anthropic_api_key:
         from .adapters.llm.anthropic_adapter import AnthropicAdapter
 
         llm = AnthropicAdapter(settings=settings)
-    else:
+    elif settings.llm_demo_mode:
         llm = DemoLLMAdapter()
+    else:
+        raise LLMConfigurationError(
+            "SKYLIZE_ANTHROPIC_API_KEY is not set. Refusing to build the container "
+            "with a silent demo fallback. Set SKYLIZE_ANTHROPIC_API_KEY for real "
+            "LLM egress, or set SKYLIZE_LLM_DEMO_MODE=true to explicitly run the "
+            "non-production demo adapter."
+        )
 
     # Content gate (constructed above, shared with the knowledge store) wraps the
     # single gateway reference, so every downstream holder of `llm`

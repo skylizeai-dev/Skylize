@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import random
 import re
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -30,7 +31,13 @@ if TYPE_CHECKING:
     from ...tools.base import ToolDefinition
     from .structured import StructuredRequest
 
+log = logging.getLogger(__name__)
+
 _TModel = TypeVar("_TModel", bound=BaseModel)
+
+# Logged at WARNING on every demo generation so non-production output is never
+# mistaken for real AI (the message carries no prompt content).
+_DEMO_ACTIVE_WARNING = "demo_llm_adapter_active_returning_non_production_output"
 
 _DEMO_HOOKS: list[str] = [
     "[DEMO] Stop everything — this is the last product you'll ever need.",
@@ -145,6 +152,7 @@ class DemoLLMAdapter:
     _MODEL = "demo-v1"
 
     async def generate(self, request: LLMGenerateRequest) -> LLMGenerateResponse:
+        log.warning(_DEMO_ACTIVE_WARNING)
         await asyncio.sleep(random.uniform(0.5, 1.5))
         payload = _pick_response(request)
         text = json.dumps(payload)
@@ -180,6 +188,7 @@ class DemoLLMAdapter:
         (a tool_result is present): returns the same templated output as
         `generate()`.
         """
+        log.warning(_DEMO_ACTIVE_WARNING)
         await asyncio.sleep(random.uniform(0.5, 1.5))
 
         if tools and not _has_tool_result(request.messages):
