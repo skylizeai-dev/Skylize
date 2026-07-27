@@ -193,6 +193,42 @@ async def test_no_budget_fields_skips_check() -> None:
     assert result.text == "World"
 
 
+async def test_tools_budget_exceeded_raises_before_api_call() -> None:
+    """generate_with_tools enforces the same pre-egress budget guard as generate."""
+    adapter = _make_adapter()
+    req = _tools_request(
+        requested_max_tokens=500,
+        max_token_budget=1000,
+        tokens_used_so_far=600,  # remaining=400 < 500
+    )
+    with patch("skylize.adapters.llm.anthropic_adapter.anthropic.AsyncAnthropic") as mock_cls:
+        with pytest.raises(TokenBudgetExceeded):
+            await adapter.generate_with_tools(req, tools=[])
+        mock_cls.assert_not_called()
+
+
+async def test_tools_budget_within_limit_does_not_raise() -> None:
+    adapter = _make_adapter()
+    req = _tools_request(
+        requested_max_tokens=100,
+        max_token_budget=1000,
+        tokens_used_so_far=500,  # remaining=500 >= 100
+    )
+    with patch("skylize.adapters.llm.anthropic_adapter.anthropic.AsyncAnthropic") as mock_cls:
+        mock_cls.return_value.messages.create = AsyncMock(return_value=_mock_tools_response())
+        result = await adapter.generate_with_tools(req, tools=[])
+    assert isinstance(result, LLMGenerateResponse)
+
+
+async def test_tools_no_budget_fields_skips_check() -> None:
+    adapter = _make_adapter()
+    req = _tools_request(requested_max_tokens=9999)
+    with patch("skylize.adapters.llm.anthropic_adapter.anthropic.AsyncAnthropic") as mock_cls:
+        mock_cls.return_value.messages.create = AsyncMock(return_value=_mock_tools_response())
+        result = await adapter.generate_with_tools(req, tools=[])
+    assert result.text == "World"
+
+
 # ---------------------------------------------------------------------------
 # Unknown model
 # ---------------------------------------------------------------------------

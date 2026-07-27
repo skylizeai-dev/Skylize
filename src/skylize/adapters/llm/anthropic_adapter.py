@@ -209,7 +209,7 @@ class AnthropicAdapter:
             ) from None
 
     @staticmethod
-    def _check_budget(request: LLMGenerateRequest) -> None:
+    def _check_budget(request: LLMGenerateRequest | LLMGenerateWithToolsRequest) -> None:
         """Refuse before egress when the request cannot fit the remaining budget."""
         if request.max_token_budget is None:
             return
@@ -387,6 +387,7 @@ class AnthropicAdapter:
     async def generate_with_tools(
         self, request: LLMGenerateWithToolsRequest, tools: list["ToolDefinition"]
     ) -> LLMGenerateResponse:
+        self._check_budget(request)
         model_id = self._concrete_model(request.model)
         anthropic_tools, name_map = _to_anthropic_tools(tools)
         kwargs: dict[str, Any] = dict(

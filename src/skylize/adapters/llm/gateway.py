@@ -156,6 +156,12 @@ class LLMGenerateWithToolsRequest(BaseModel):
     correlation_id: UUID
     agent_id: str
 
+    # Optional run-budget context. When set, adapters refuse a call whose
+    # requested_max_tokens exceeds (max_token_budget - tokens_used_so_far)
+    # BEFORE any provider egress → TokenBudgetExceeded.
+    max_token_budget: int | None = None
+    tokens_used_so_far: int | None = None
+
 
 class LLMUsage(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
