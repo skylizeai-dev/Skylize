@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any, TypeVar
 from uuid import UUID
 
@@ -191,16 +192,24 @@ class AnthropicAdapter:
                 f"tokens_used_so_far={request.tokens_used_so_far or 0})"
             )
 
-    async def _call_with_retry(self, client: Any, kwargs: dict[str, Any]) -> Any:
-        """One retry on 5xx after a 1s pause; 4xx raises immediately."""
+    async def _call_with_retry(self, invoke: Callable[[], Awaitable[Any]]) -> Any:
+        """One retry on 5xx after a 1s pause; 4xx raises immediately.
+
+        Client-agnostic: `invoke` is a zero-argument callable returning a FRESH
+        awaitable for the provider call. The sync egress (generate) binds it
+        through asyncio.to_thread on anthropic.Anthropic; the async egress
+        (generate_with_tools) binds anthropic.AsyncAnthropic.messages.create
+        directly. Both paths share this one reliability wrapper regardless of
+        client type, so the two egresses are wrapped identically.
+        """
         try:
-            return await asyncio.to_thread(client.messages.create, **kwargs)
+            return await invoke()
         except anthropic.APIStatusError as exc:
             if exc.response.status_code < 500:
                 raise
             await asyncio.sleep(1)
             try:
-                return await asyncio.to_thread(client.messages.create, **kwargs)
+                return await invoke()
             except anthropic.APIStatusError as retry_exc:
                 if retry_exc.response.status_code < 500:
                     raise
@@ -257,7 +266,9 @@ class AnthropicAdapter:
                 kwargs["system"] = request.system
 
             client = anthropic.Anthropic(**self._client_kwargs())
-            message = await self._call_with_retry(client, kwargs)
+            message = await self._call_with_retry(
+                lambda: asyncio.to_thread(client.messages.create, **kwargs)
+            )
 
             text = "".join(
                 block.text
@@ -303,7 +314,7 @@ class AnthropicAdapter:
             kwargs["system"] = request.system
 
         client = anthropic.AsyncAnthropic(**self._client_kwargs())
-        message = await client.messages.create(**kwargs)
+        message = await self._call_with_retry(lambda: client.messages.create(**kwargs))
         text, blocks = _normalize_anthropic_message(message, name_map=name_map)
         prompt_tokens = int(message.usage.input_tokens)
         completion_tokens = int(message.usage.output_tokens)

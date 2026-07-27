@@ -246,6 +246,31 @@ async def test_non_retryable_400_raises_immediately_no_retry() -> None:
         assert mock_cls.return_value.messages.create.call_count == 1
 
 
+async def test_generate_with_tools_retries_500_once_then_succeeds() -> None:
+    """The async (tools) egress is routed through the SAME retry helper as the
+    sync egress, so a 5xx is retried once there too (both wrapped identically)."""
+    adapter = _make_adapter()
+    req = _tools_request()
+
+    error_500 = anthropic.APIStatusError(
+        message="internal server error",
+        response=_httpx_response(500),
+        body={},
+    )
+    mock_create = AsyncMock(side_effect=[error_500, _mock_tools_response()])
+
+    with patch("skylize.adapters.llm.anthropic_adapter.anthropic.AsyncAnthropic") as mock_cls:
+        mock_cls.return_value.messages.create = mock_create
+        with patch(
+            "skylize.adapters.llm.anthropic_adapter.asyncio.sleep", new_callable=AsyncMock
+        ) as mock_sleep:
+            result = await adapter.generate_with_tools(req, tools=[])
+
+    assert result.text == "World"
+    assert mock_create.call_count == 2
+    mock_sleep.assert_called_once_with(1)
+
+
 # ---------------------------------------------------------------------------
 # Response normalization
 # ---------------------------------------------------------------------------
