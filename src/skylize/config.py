@@ -127,9 +127,8 @@ class Settings(BaseSettings):
     search_provider: str = "brave"
     search_api_key: str = ""
 
-    # HMAC-SHA256 secrets for inbound webhook verification; empty = check disabled.
+    # HMAC-SHA256 secret for inbound webhook verification; empty = check disabled.
     knowledge_webhook_secret: str = ""    # X-Hub-Signature-256 from n8n knowledge ingest
-    agent_prompts_hmac_secret: str = ""  # X-Skylize-Signature on agent-prompts endpoint
 
     # LLM provider keys
     anthropic_api_key: str = ""
