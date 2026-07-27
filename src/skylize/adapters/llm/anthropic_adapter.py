@@ -20,6 +20,7 @@ import json
 import logging
 import random
 from collections.abc import Awaitable, Callable
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, TypeVar
 from uuid import UUID
 
@@ -41,6 +42,7 @@ from .gateway import (
 )
 
 if TYPE_CHECKING:
+    from ...dal.cost_ledger import CostLedgerDAL
     from ...tools.base import ToolDefinition
     from .structured import StructuredRequest
 
@@ -147,8 +149,15 @@ class AnthropicAdapter:
         base_url: str | None = None,
         langfuse_client: Any = None,
         tracer: Any = None,
+        cost_ledger: "CostLedgerDAL | None" = None,
     ) -> None:
         self._settings = settings
+        # Billing-grade cost ledger (ADR-0006). When wired (postgres backend),
+        # every egress is price-gated BEFORE the SDK call and recorded AFTER
+        # the provider responds. When None (memory backend / unit harnesses)
+        # the adapter keeps the documented Settings-float fallback for
+        # cost_usd_micros and records nothing.
+        self._cost_ledger = cost_ledger
         self._api_key = api_key or str(getattr(settings, "anthropic_api_key", "") or "")
         # Empty string when unset; `_client_kwargs` omits base_url in that case so
         # the SDK falls back to its own default endpoint resolution (env + built-in).
@@ -221,6 +230,33 @@ class AnthropicAdapter:
                 f"(max_token_budget={request.max_token_budget}, "
                 f"tokens_used_so_far={request.tokens_used_so_far or 0})"
             )
+
+    async def _require_price(self, *, org_id: str, model_id: str) -> None:
+        """PRE-CALL pricing gate (owner decision D1).
+
+        When the cost ledger is wired, the concrete model must have an active
+        model_pricing row BEFORE any provider egress — a pricing gap refuses
+        the call with a typed error instead of producing an unrecordable
+        (budget-cap-evading) charge. Without a ledger there is nothing to
+        check against; the documented Settings-float fallback applies.
+        """
+        if self._cost_ledger is None:
+            return
+        from ...dal.cost_ledger import PricingNotFound
+
+        try:
+            await self._cost_ledger.resolve_price_for(
+                org_id=org_id,
+                provider=self._PROVIDER,
+                model=model_id,
+                occurred_at=datetime.now(timezone.utc),
+            )
+        except PricingNotFound as exc:
+            raise LLMModelNotPriced(
+                f"no model_pricing entry for concrete model {model_id!r}; "
+                "refusing the call before egress (a pricing gap must not "
+                "become a way to evade budget caps)"
+            ) from exc
 
     @staticmethod
     def _parse_retry_after(exc: anthropic.APIStatusError) -> float | None:
@@ -335,6 +371,7 @@ class AnthropicAdapter:
     async def generate(self, request: LLMGenerateRequest) -> LLMGenerateResponse:
         self._check_budget(request)
         model_id = self._concrete_model(request.model)
+        await self._require_price(org_id=request.org_id, model_id=model_id)
 
         span = self._tracer.start_span("llm.generate") if self._tracer is not None else None
         if span is not None:
@@ -363,6 +400,7 @@ class AnthropicAdapter:
             )
             prompt_tokens = int(message.usage.input_tokens)
             completion_tokens = int(message.usage.output_tokens)
+            cost_usd_micros = self._estimate_cost(model_id, prompt_tokens, completion_tokens)
             response = LLMGenerateResponse(
                 text=text,
                 provider=self._PROVIDER,
@@ -372,7 +410,7 @@ class AnthropicAdapter:
                     completion_tokens=completion_tokens,
                     total_tokens=prompt_tokens + completion_tokens,
                 ),
-                cost_usd_micros=self._estimate_cost(model_id, prompt_tokens, completion_tokens),
+                cost_usd_micros=cost_usd_micros,
             )
             self._record_langfuse(request, model_id, response)
             return response
@@ -389,6 +427,7 @@ class AnthropicAdapter:
     ) -> LLMGenerateResponse:
         self._check_budget(request)
         model_id = self._concrete_model(request.model)
+        await self._require_price(org_id=request.org_id, model_id=model_id)
         anthropic_tools, name_map = _to_anthropic_tools(tools)
         kwargs: dict[str, Any] = dict(
             model=model_id,
@@ -405,6 +444,7 @@ class AnthropicAdapter:
         text, blocks = _normalize_anthropic_message(message, name_map=name_map)
         prompt_tokens = int(message.usage.input_tokens)
         completion_tokens = int(message.usage.output_tokens)
+        cost_usd_micros = self._estimate_cost(model_id, prompt_tokens, completion_tokens)
         return LLMGenerateResponse(
             text=text,
             provider=self._PROVIDER,
@@ -414,7 +454,7 @@ class AnthropicAdapter:
                 completion_tokens=completion_tokens,
                 total_tokens=prompt_tokens + completion_tokens,
             ),
-            cost_usd_micros=self._estimate_cost(model_id, prompt_tokens, completion_tokens),
+            cost_usd_micros=cost_usd_micros,
             stop_reason=message.stop_reason,
             content=blocks,
         )

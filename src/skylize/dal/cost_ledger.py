@@ -160,14 +160,28 @@ class CostLedgerDAL:
         self._db = db
 
     async def resolve_price(self, obs: CostObservation) -> PriceSnapshot:
+        """Resolve the active price for one observation (see resolve_price_for)."""
+        return await self.resolve_price_for(
+            org_id=obs.org_id,
+            provider=obs.provider,
+            model=obs.model,
+            occurred_at=obs.occurred_at,
+        )
+
+    async def resolve_price_for(
+        self, *, org_id: str, provider: str, model: str, occurred_at: datetime
+    ) -> PriceSnapshot:
         """Resolve the active price for (provider, model) at ``occurred_at``.
+
+        Takes bare attribution keys (no token counts) so the gateway adapter
+        can run its PRE-CALL pricing gate before any usage exists to observe.
 
         Global-key-fallback shape (ADR-0006 §BYOK): a tenant-specific row
         (org_id = tenant) wins over the global row (org_id IS NULL); among
         matches the latest ``effective_from`` covering ``occurred_at`` wins.
         Raises ``PricingNotFound`` if nothing covers the point in time.
         """
-        async with self._db.tenant_session(obs.org_id) as conn:
+        async with self._db.tenant_session(org_id) as conn:
             row = await conn.fetchrow(
                 """
                 SELECT input_price_micros_per_mtok,
@@ -183,15 +197,15 @@ class CostLedgerDAL:
                 ORDER BY (org_id IS NULL), effective_from DESC
                 LIMIT 1
                 """,
-                obs.provider,
-                obs.model,
-                obs.org_id,
-                obs.occurred_at,
+                provider,
+                model,
+                org_id,
+                occurred_at,
             )
         if row is None:
             raise PricingNotFound(
-                f"No model_pricing for provider={obs.provider!r} model={obs.model!r} "
-                f"org={obs.org_id!r} at {obs.occurred_at.isoformat()}"
+                f"No model_pricing for provider={provider!r} model={model!r} "
+                f"org={org_id!r} at {occurred_at.isoformat()}"
             )
         return PriceSnapshot(
             input_price_micros_per_mtok=row["input_price_micros_per_mtok"],
