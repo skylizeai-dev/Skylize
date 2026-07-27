@@ -539,6 +539,18 @@ class AnthropicAdapter:
         return schema.model_validate(parsed)
 
     def _estimate_cost(self, model_id: str, prompt_tokens: int, completion_tokens: int) -> int:
+        """DEMOTED FALLBACK (owner decision D2): Settings-float pricing.
+
+        model_pricing (via the cost ledger) is the single source of truth for
+        price. This float-based estimate remains ONLY for deployments with no
+        ledger wired (memory backend / unit harnesses) and logs at WARNING on
+        every use so two silent price sources can never coexist.
+        """
+        log.warning(
+            "settings_price_fallback_used model=%s (no cost ledger wired; "
+            "model_pricing is the price source of truth when available)",
+            model_id,
+        )
         try:
             in_price, out_price = self._price_map[model_id]
         except KeyError:

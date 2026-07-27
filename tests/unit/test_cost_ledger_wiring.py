@@ -234,6 +234,29 @@ async def test_no_ledger_wired_skips_pricing_gate() -> None:
     assert result.text == "World"
 
 
+async def test_settings_float_fallback_logs_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """D2: the Settings floats are a DEMOTED fallback that warns on every use;
+    with a ledger wired the fallback (and its warning) never fires."""
+    with caplog.at_level(logging.WARNING, logger="skylize"):
+        adapter = _adapter(None)
+        with patch("skylize.adapters.llm.anthropic_adapter.anthropic.Anthropic") as mock_cls:
+            mock_cls.return_value.messages.create.return_value = _provider_message()
+            await adapter.generate(_request())
+    assert any("settings_price_fallback_used" in r.getMessage() for r in caplog.records)
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="skylize"):
+        adapter = _adapter(FakeCostLedger())
+        with patch("skylize.adapters.llm.anthropic_adapter.anthropic.Anthropic") as mock_cls:
+            mock_cls.return_value.messages.create.return_value = _provider_message()
+            await adapter.generate(_request())
+    assert not any(
+        "settings_price_fallback_used" in r.getMessage() for r in caplog.records
+    )
+
+
 # ---------------------------------------------------------------------------
 # Exactly one ledger row per completed call, on BOTH egresses
 # ---------------------------------------------------------------------------
