@@ -258,7 +258,11 @@ class ToolProxy:
         """
         await self.validate_token(token, tool_call, contract_allowed_tools)
 
-        _skip = {"governance_token_id", "org_id"}
+        # agent_id comes from the validated token (first-hand); correlation_id
+        # must be threaded by the caller in params (LLMAgentRunner passes its
+        # run_id) — a missing value fails loudly at model validation rather
+        # than being invented here.
+        _skip = {"governance_token_id", "org_id", "agent_id"}
         extra = {
             k: v
             for k, v in tool_call.params.items()
@@ -267,6 +271,7 @@ class ToolProxy:
         request = LLMGenerateRequest(
             governance_token_id=tool_call.governance_token_id,
             org_id=tool_call.org_id,
+            agent_id=token.agent_id,
             **extra,
         )
         response = await gateway.generate(request)

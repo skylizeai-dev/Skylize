@@ -109,6 +109,8 @@ async def test_real_output_schema_round_trips_through_generate_structured(
         requested_max_tokens=2000,
         governance_token_id=uuid4(),
         org_id="org_contract",
+        correlation_id=uuid4(),
+        agent_id=agent_id,
         capability=StructuredCapability.TOOL_USE,
     )
 

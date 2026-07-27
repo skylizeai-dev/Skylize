@@ -113,6 +113,10 @@ class StructuredRequest(BaseModel):
     governance_token_id: UUID
     org_id: str
 
+    # Attribution context — mirrors LLMGenerateRequest (required, threaded).
+    correlation_id: UUID
+    agent_id: str
+
     # The enforcement mode of the provider this request will route to.
     capability: StructuredCapability = StructuredCapability.NONE
 
@@ -126,6 +130,8 @@ class StructuredRequest(BaseModel):
             temperature=self.temperature,
             governance_token_id=self.governance_token_id,
             org_id=self.org_id,
+            correlation_id=self.correlation_id,
+            agent_id=self.agent_id,
         )
 
 

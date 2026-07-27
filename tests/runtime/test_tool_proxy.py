@@ -106,6 +106,7 @@ def _tool_call(
             "prompt": "generate hooks",
             "requested_max_tokens": requested_max_tokens,
             "tokens_used_so_far": tokens_used_so_far,
+            "correlation_id": str(uuid4()),
         },
     )
 

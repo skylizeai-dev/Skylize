@@ -145,6 +145,8 @@ def _request(
         requested_max_tokens=max_tokens,
         governance_token_id=uuid4(),
         org_id="org_1",
+        correlation_id=uuid4(),
+        agent_id="agent_test",
         capability=capability,
     )
 
