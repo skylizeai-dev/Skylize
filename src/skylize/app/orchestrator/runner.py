@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from typing import Any, Protocol
+from uuid import UUID
 
 from ...adapters.llm.gateway import LLMGateway, LLMGenerateRequest
 from ...contracts.base import AgentContract, GovernanceToken
@@ -40,8 +41,14 @@ class AgentRunner(Protocol):
         input_payload: dict[str, Any],
         token: GovernanceToken,
         org_id: str,
+        correlation_id: UUID,
     ) -> tuple[dict[str, Any], RunnerMeta]:
-        """Execute the agent; return (output matching `contract.output_schema`, meta)."""
+        """Execute the agent; return (output matching `contract.output_schema`, meta).
+
+        `correlation_id` is the run-level id the Orchestrator minted (or was
+        handed) — threaded so LLM egress carries the SAME id the run's audit
+        trail uses, never a fresh one minted at the call site.
+        """
         ...
 
 
@@ -55,6 +62,7 @@ class StubAgentRunner:
         input_payload: dict[str, Any],
         token: GovernanceToken,
         org_id: str,
+        correlation_id: UUID,
     ) -> tuple[dict[str, Any], RunnerMeta]:
         meta = RunnerMeta(provider="stub", model="stub", total_tokens=0)
 
@@ -97,6 +105,7 @@ class LLMStepRunner:
         input_payload: dict[str, Any],
         token: GovernanceToken,
         org_id: str,
+        correlation_id: UUID,
     ) -> tuple[dict[str, Any], RunnerMeta]:
         input_model = resolve_model(contract.input_schema).model_validate(input_payload)
         request = LLMGenerateRequest(
@@ -107,6 +116,8 @@ class LLMStepRunner:
             temperature=0.7,
             governance_token_id=token.token_id,
             org_id=org_id,
+            correlation_id=correlation_id,
+            agent_id=token.agent_id,
         )
         response = await self._llm.generate(request)
         try:

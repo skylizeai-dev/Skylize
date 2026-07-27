@@ -230,6 +230,8 @@ class DemoLLMAdapter:
             temperature=request.temperature,
             governance_token_id=request.governance_token_id,
             org_id=request.org_id,
+            correlation_id=request.correlation_id,
+            agent_id=request.agent_id,
         )
         payload = _pick_response(fake_request)
         text = json.dumps(payload)

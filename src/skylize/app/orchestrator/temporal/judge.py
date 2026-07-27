@@ -80,6 +80,8 @@ class LLMJudge:
         try:
             token_id = UUID(str(context["governance_token_id"]))
             org_id = str(context["org_id"])
+            correlation_id = UUID(str(context["correlation_id"]))
+            agent_id = str(context["agent_id"])
         except (KeyError, ValueError) as exc:
             return _fail_closed(f"invalid judge context: {exc!r}")
 
@@ -99,6 +101,8 @@ class LLMJudge:
                     temperature=0.0,
                     governance_token_id=token_id,
                     org_id=org_id,
+                    correlation_id=correlation_id,
+                    agent_id=agent_id,
                 )
             )
         except GuardrailViolation as exc:

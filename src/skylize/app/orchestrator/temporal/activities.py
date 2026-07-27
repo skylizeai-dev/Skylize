@@ -43,6 +43,12 @@ class JudgeRequest:
     node_name: str
     output: dict[str, Any]
     success_criteria: dict[str, Any]
+    # agent_id of the node whose output is being judged — the engine that
+    # constructs JudgeRequest tracks it per node (see StepRecordRequest).
+    # Threaded so the judge's own LLM egress carries a real attribution id
+    # rather than an invented judge identity. Appended last so any positional
+    # construction of the older shape fails loudly instead of shifting fields.
+    agent_id: str
 
 
 @dataclasses.dataclass
@@ -118,6 +124,8 @@ class WorkflowActivities:
             "node": req.node_name,
             "org_id": req.ctx.org_id,
             "governance_token_id": req.ctx.correlation_id,
+            "correlation_id": req.ctx.correlation_id,
+            "agent_id": req.agent_id,
         }
         raw = await self._judge.judge(
             output=req.output,

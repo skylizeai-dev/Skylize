@@ -198,6 +198,8 @@ class AgentExecutionService:
                 temperature=0.7,
                 governance_token_id=governance_token_id,
                 org_id=org_id,
+                correlation_id=run_id,
+                agent_id=agent_id,
             )
             response = await self._llm.generate(llm_request)
             response_text = response.text
@@ -340,6 +342,8 @@ class AgentExecutionService:
                 temperature=0.7,
                 governance_token_id=token.token_id,
                 org_id=org_id,
+                correlation_id=correlation_id,
+                agent_id=token.agent_id,
             )
             response = await self._llm.generate_with_tools(request, available)
             provider = response.provider
