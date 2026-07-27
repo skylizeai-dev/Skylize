@@ -18,6 +18,7 @@ from skylize.adapters.llm.gateway import (
     LLMGenerateResponse,
     LLMGenerateWithToolsRequest,
     LLMMessage,
+    LLMModelNotPriced,
     LLMProviderUnavailable,
     LLMRateLimited,
     TokenBudgetExceeded,
@@ -442,6 +443,37 @@ async def test_normalization_cost_usd_micros_nonzero() -> None:
         result = await adapter.generate(req)
     # sonnet: $3/M in + $15/M out → $18 → 18_000_000 micros
     assert result.cost_usd_micros == 18_000_000
+
+
+def _expected_micros(in_tok: int, out_tok: int, in_price: float, out_price: float) -> int:
+    """Mirror the adapter's cost arithmetic so tier assertions are float-robust."""
+    cost = (in_tok / 1_000_000) * in_price + (out_tok / 1_000_000) * out_price
+    return int(cost * 1_000_000)
+
+
+async def test_cost_keyed_exactly_per_configured_tier() -> None:
+    """Exact concrete-id keying prices each configured model from its own tier:
+    fast->haiku, reasoning->opus (default->sonnet is covered above). A wrong tier
+    would produce a different figure, so this proves the keying, not just non-zero."""
+    adapter = _make_adapter()
+    cases = {
+        "fast": _expected_micros(1_000_000, 1_000_000, 0.80, 4.0),    # haiku prices
+        "reasoning": _expected_micros(1_000_000, 1_000_000, 15.0, 75.0),  # opus prices
+    }
+    for logical, expected in cases.items():
+        mock_resp = _mock_anthropic_response(input_tokens=1_000_000, output_tokens=1_000_000)
+        with patch("skylize.adapters.llm.anthropic_adapter.anthropic.Anthropic") as mock_cls:
+            mock_cls.return_value.messages.create.return_value = mock_resp
+            result = await adapter.generate(_request(model=logical))
+        assert result.cost_usd_micros == expected, logical
+
+
+def test_unknown_model_id_raises_not_priced() -> None:
+    """An unknown concrete model id raises rather than silently falling through
+    to a default (sonnet) price."""
+    adapter = _make_adapter()
+    with pytest.raises(LLMModelNotPriced, match="no price entry"):
+        adapter._estimate_cost("claude-unknown-9000", 1000, 1000)
 
 
 async def test_system_prompt_passed_to_api() -> None:

@@ -33,6 +33,7 @@ from .gateway import (
     LLMGenerateResponse,
     LLMGenerateWithToolsRequest,
     LLMMessage,
+    LLMModelNotPriced,
     LLMProviderUnavailable,
     LLMRateLimited,
     LLMUsage,
@@ -165,6 +166,24 @@ class AnthropicAdapter:
             "default": str(settings.llm_model_default),
             "fast": str(settings.llm_model_fast),
             "reasoning": str(settings.llm_model_reasoning),
+        }
+        # Explicit concrete-model-id -> (input_price, output_price) map for EXACT
+        # cost keying. Built from the three configured models paired with their
+        # price tier, keyed by the concrete id, so an unknown model id raises in
+        # _estimate_cost instead of being mispriced by substring guessing.
+        self._price_map: dict[str, tuple[float, float]] = {
+            str(settings.llm_model_default): (
+                float(getattr(settings, "llm_price_sonnet_in", 3.0)),
+                float(getattr(settings, "llm_price_sonnet_out", 15.0)),
+            ),
+            str(settings.llm_model_fast): (
+                float(getattr(settings, "llm_price_haiku_in", 0.80)),
+                float(getattr(settings, "llm_price_haiku_out", 4.0)),
+            ),
+            str(settings.llm_model_reasoning): (
+                float(getattr(settings, "llm_price_opus_in", 15.0)),
+                float(getattr(settings, "llm_price_opus_out", 75.0)),
+            ),
         }
 
     # -- helpers --------------------------------------------------------------
@@ -412,16 +431,13 @@ class AnthropicAdapter:
         return schema.model_validate(parsed)
 
     def _estimate_cost(self, model_id: str, prompt_tokens: int, completion_tokens: int) -> int:
-        settings = self._settings
-        if "haiku" in model_id:
-            in_price = float(getattr(settings, "llm_price_haiku_in", 0.80))
-            out_price = float(getattr(settings, "llm_price_haiku_out", 4.0))
-        elif "opus" in model_id:
-            in_price = float(getattr(settings, "llm_price_opus_in", 15.0))
-            out_price = float(getattr(settings, "llm_price_opus_out", 75.0))
-        else:
-            in_price = float(getattr(settings, "llm_price_sonnet_in", 3.0))
-            out_price = float(getattr(settings, "llm_price_sonnet_out", 15.0))
+        try:
+            in_price, out_price = self._price_map[model_id]
+        except KeyError:
+            raise LLMModelNotPriced(
+                f"no price entry for concrete model {model_id!r}; "
+                f"configured models: {sorted(self._price_map)}"
+            ) from None
         cost_usd = (
             (prompt_tokens / 1_000_000) * in_price
             + (completion_tokens / 1_000_000) * out_price

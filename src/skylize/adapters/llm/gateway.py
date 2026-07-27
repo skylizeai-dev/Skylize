@@ -94,6 +94,14 @@ class LLMAuthenticationError(Exception):
     exception string, a log record, or an emitted event via this path."""
 
 
+class LLMModelNotPriced(Exception):
+    """Raised when a concrete provider model id has no configured price entry.
+
+    Cost estimation keys on the EXACT concrete model id (not a substring), so an
+    unrecognized model id fails loudly instead of being mispriced as a default
+    tier — a wrong bill is worse than a loud error."""
+
+
 class LLMGenerateRequest(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
