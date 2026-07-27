@@ -339,6 +339,61 @@ class AnthropicAdapter:
             f"anthropic unavailable after {self._retry_max_attempts} attempts"
         ) from last_exc
 
+    async def _settle_cost(
+        self,
+        *,
+        request: LLMGenerateRequest | LLMGenerateWithToolsRequest,
+        message: Any,
+        prompt_tokens: int,
+        completion_tokens: int,
+        fallback_model_id: str,
+    ) -> int:
+        """Record the served call in the cost ledger; return its cost in micros.
+
+        Called ONLY after a provider response was actually received, so the
+        timeout / retry-exhausted / 401 paths can never write a row. With a
+        wired ledger, ONE CostObservation is built from first-hand response
+        data — the provider's RESOLVED model id (owner decision D3) and the
+        provider message id as the idempotency key — and the SAME price
+        resolution that lands on the ledger row prices the returned
+        cost_usd_micros (owner decision D2). A ledger write failure is logged
+        at ERROR with the correlation_id and re-raised: a call whose charge
+        cannot be recorded must not be reported as a silent success.
+
+        Without a ledger (memory backend / unit harnesses) the documented
+        Settings-float fallback prices the response instead.
+        """
+        if self._cost_ledger is None:
+            return self._estimate_cost(fallback_model_id, prompt_tokens, completion_tokens)
+
+        from ...dal.cost_ledger import CostObservation
+
+        occurred_at = datetime.now(timezone.utc)
+        observation = CostObservation(
+            org_id=request.org_id,
+            correlation_id=request.correlation_id,
+            agent_id=request.agent_id,
+            run_id=request.governance_token_id,
+            provider=self._PROVIDER,
+            model=str(message.model),
+            input_tokens=prompt_tokens,
+            output_tokens=completion_tokens,
+            occurred_at=occurred_at,
+            billing_period=occurred_at.strftime("%Y-%m"),
+            idempotency_key=str(message.id),
+        )
+        try:
+            record = await self._cost_ledger.record_cost(observation)
+        except Exception:
+            log.error(
+                "cost_ledger_write_failed correlation_id=%s model=%s idempotency_key=%s",
+                request.correlation_id,
+                observation.model,
+                observation.idempotency_key,
+            )
+            raise
+        return record.cost_micros
+
     def _record_langfuse(
         self, request: LLMGenerateRequest, model_id: str, response: LLMGenerateResponse
     ) -> None:
@@ -400,7 +455,13 @@ class AnthropicAdapter:
             )
             prompt_tokens = int(message.usage.input_tokens)
             completion_tokens = int(message.usage.output_tokens)
-            cost_usd_micros = self._estimate_cost(model_id, prompt_tokens, completion_tokens)
+            cost_usd_micros = await self._settle_cost(
+                request=request,
+                message=message,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                fallback_model_id=model_id,
+            )
             response = LLMGenerateResponse(
                 text=text,
                 provider=self._PROVIDER,
@@ -444,7 +505,13 @@ class AnthropicAdapter:
         text, blocks = _normalize_anthropic_message(message, name_map=name_map)
         prompt_tokens = int(message.usage.input_tokens)
         completion_tokens = int(message.usage.output_tokens)
-        cost_usd_micros = self._estimate_cost(model_id, prompt_tokens, completion_tokens)
+        cost_usd_micros = await self._settle_cost(
+            request=request,
+            message=message,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            fallback_model_id=model_id,
+        )
         return LLMGenerateResponse(
             text=text,
             provider=self._PROVIDER,

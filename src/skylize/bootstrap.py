@@ -289,8 +289,16 @@ async def build_container(settings: Settings | None = None) -> Container:
     llm: LLMGateway
     if settings.anthropic_api_key:
         from .adapters.llm.anthropic_adapter import AnthropicAdapter
+        from .dal.cost_ledger import CostLedgerDAL
 
-        llm = AnthropicAdapter(settings=settings)
+        # Billing-grade cost ledger (ADR-0006): wired on the postgres backend
+        # so every Anthropic egress is price-gated pre-call and recorded
+        # post-call. On the memory backend there is no durable store, so the
+        # adapter falls back to Settings-float estimates (logged at WARNING).
+        llm = AnthropicAdapter(
+            settings=settings,
+            cost_ledger=CostLedgerDAL(db) if db is not None else None,
+        )
     elif settings.llm_demo_mode:
         llm = DemoLLMAdapter()
     else:

@@ -278,6 +278,38 @@ async def test_price_change_does_not_alter_history(app_db, admin_conn) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Concurrency — N PARALLEL record_cost calls produce a ledger total exactly
+# equal to the sum of the individual costs (tolerance zero, no lost writes).
+# ---------------------------------------------------------------------------
+
+@requires_app_role
+async def test_concurrent_writes_sum_exactly(app_db, admin_conn) -> None:
+    import asyncio
+
+    org, _ = _orgs()
+    provider, model = f"synthprov_{uuid.uuid4().hex[:6]}", "synth-model"
+    try:
+        await _seed_tenant(admin_conn, org)
+        await _seed_global_price(admin_conn, provider, model)
+        dal = CostLedgerDAL(app_db)
+
+        calls = [(100 * (n + 1), 37 * (n + 1)) for n in range(16)]
+        expected = sum(i * 3 + o * 15 for i, o in calls)  # exact micros
+
+        records = await asyncio.gather(*(
+            dal.record_cost(_obs(org, provider, model, i=i, o=o, key=f"par{n}"))
+            for n, (i, o) in enumerate(calls)
+        ))
+        assert all(rec.inserted for rec in records)
+        assert sum(rec.cost_micros for rec in records) == expected
+
+        total = await dal.period_total_micros(org, provider, "2026-07")
+        assert total == expected  # tolerance ZERO under concurrency
+    finally:
+        await _cleanup(admin_conn, [org], provider)
+
+
+# ---------------------------------------------------------------------------
 # Fail closed — no active price means no fabricated cost.
 # ---------------------------------------------------------------------------
 
