@@ -172,6 +172,27 @@ name = "Application logic contains no SQL (depends on dal ports only)"
 type = "forbidden"
 source_modules = ["skylize.app"]
 forbidden_modules = ["skylize.dal.repositories", "skylize.dal.connection", "asyncpg"]
+# EXEMPTION (2026-07-27, owner decision during W1 trunk reconciliation):
+# the Temporal worker entrypoint (app/orchestrator/temporal/worker.py) is a
+# process composition root — like `edge` and `bootstrap` it constructs
+# concretes at startup — but it lives inside skylize.app, so its two direct
+# imports below trip this contract transitively (worker -> bootstrap ->
+# dal.connection -> asyncpg; worker -> bootstrap -> dal.repositories;
+# worker -> dal.workflows -> dal.connection). app.orchestrator.temporal.* is
+# unwired/paused code on no live request path, consistent with the mypy
+# ignore_errors override for the same tree further down this file. Only these
+# two edges out of the worker module are ignored; every other skylize.app
+# module remains fully checked against all three forbidden targets.
+# REMOVAL CONDITION (testable trigger): delete this exemption the moment the
+# Temporal worker is wired to a live path, or when the concrete judge
+# activity is implemented — whichever comes first.
+# Violating module introduced by commit 1ef9281d; the SHA of the commit that
+# added this exemption is recoverable via `git blame` on these lines. Also
+# recorded in docs/architecture/decisions/import_linter_exemptions.md.
+ignore_imports = [
+    "skylize.app.orchestrator.temporal.worker -> skylize.bootstrap",
+    "skylize.app.orchestrator.temporal.worker -> skylize.dal.workflows",
+]
 
 # CrewAI and LangChain are forbidden as direct dependencies of this codebase.
 # langgraph (the mandated orchestration layer) transitively carries langchain_core
