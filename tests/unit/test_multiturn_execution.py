@@ -289,6 +289,7 @@ async def test_demo_adapter_simulates_one_tool_call_then_finalizes() -> None:
         system="You are a Hook Generator — produces ad/scroll-stopping hooks.",
         messages=[LLMMessage(role="user", content=[LLMContentBlock(kind="text", text="Generate hooks")])],
         requested_max_tokens=512, governance_token_id=uuid4(), org_id=ORG,
+        correlation_id=uuid4(), agent_id="hook_generator_agent",
     )
     resp1 = await adapter.generate_with_tools(req1, [tool])
     assert resp1.stop_reason == "tool_use"
@@ -308,6 +309,7 @@ async def test_demo_adapter_simulates_one_tool_call_then_finalizes() -> None:
     req2 = LLMGenerateWithToolsRequest(
         system=req1.system, messages=messages2, requested_max_tokens=512,
         governance_token_id=req1.governance_token_id, org_id=ORG,
+        correlation_id=req1.correlation_id, agent_id=req1.agent_id,
     )
     resp2 = await adapter.generate_with_tools(req2, [tool])
     assert resp2.stop_reason == "end_turn"

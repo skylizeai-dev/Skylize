@@ -19,6 +19,8 @@ def _make_request(prompt: str, system: str | None = None) -> LLMGenerateRequest:
         requested_max_tokens=1024,
         governance_token_id=uuid4(),
         org_id="org_test",
+        correlation_id=uuid4(),
+        agent_id="agent_test",
     )
 
 

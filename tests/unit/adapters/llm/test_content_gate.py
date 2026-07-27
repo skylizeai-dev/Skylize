@@ -69,6 +69,8 @@ def _request(prompt: str, system: str | None = None) -> LLMGenerateRequest:
         requested_max_tokens=100,
         governance_token_id=uuid4(),
         org_id=ORG,
+        correlation_id=uuid4(),
+        agent_id="agent_test",
     )
 
 
@@ -159,6 +161,8 @@ def _tools_request(*, system: str | None, blocks: list[LLMContentBlock]) -> LLMG
         requested_max_tokens=100,
         governance_token_id=uuid4(),
         org_id=ORG,
+        correlation_id=uuid4(),
+        agent_id="agent_test",
     )
 
 

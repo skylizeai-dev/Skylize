@@ -116,6 +116,15 @@ class LLMGenerateRequest(BaseModel):
     governance_token_id: UUID
     org_id: str
 
+    # Attribution context — REQUIRED and threaded (never resolved by a DB
+    # lookup in the adapter): `correlation_id` is the run-level id minted by
+    # the caller's entrypoint (e.g. AgentExecutionService's run_id or the
+    # Orchestrator's correlation_id) and `agent_id` is the acting agent
+    # (GovernanceToken.agent_id on token-bearing paths). Required fields turn
+    # a missed construction site into a type error, not a silent null.
+    correlation_id: UUID
+    agent_id: str
+
     # Optional run-budget context. When set, adapters refuse a call whose
     # requested_max_tokens exceeds (max_token_budget - tokens_used_so_far)
     # BEFORE any provider egress → TokenBudgetExceeded.
@@ -142,6 +151,10 @@ class LLMGenerateWithToolsRequest(BaseModel):
 
     governance_token_id: UUID
     org_id: str
+
+    # Attribution context — same contract as LLMGenerateRequest.
+    correlation_id: UUID
+    agent_id: str
 
 
 class LLMUsage(BaseModel):

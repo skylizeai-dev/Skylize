@@ -57,6 +57,8 @@ def _request(**kwargs: object) -> LLMGenerateRequest:
         "requested_max_tokens": 100,
         "governance_token_id": uuid4(),
         "org_id": ORG,
+        "correlation_id": uuid4(),
+        "agent_id": "agent_test",
     }
     defaults.update(kwargs)
     return LLMGenerateRequest(**defaults)  # type: ignore[arg-type]
@@ -116,6 +118,8 @@ def _tools_request(**kwargs: object) -> LLMGenerateWithToolsRequest:
         "requested_max_tokens": 100,
         "governance_token_id": uuid4(),
         "org_id": ORG,
+        "correlation_id": uuid4(),
+        "agent_id": "agent_test",
     }
     defaults.update(kwargs)
     return LLMGenerateWithToolsRequest(**defaults)  # type: ignore[arg-type]
