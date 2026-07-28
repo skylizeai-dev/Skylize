@@ -26,6 +26,7 @@ from ...contracts.base import AgentContract, AuthorityLevel, HumanInLoopTrigger
 from ...contracts.registry import AgentNotRegistered, AgentRegistry
 from ...dal.ports import BudgetCeiling, CapitalRepository
 from .events import (
+    AGENT_EXECUTE_ACTION_KIND,
     KNOWN_ACTION_KINDS,
     Conflict,
     DecisionProposal,
@@ -54,6 +55,9 @@ STAGE_SCORING = "scoring"
 STAGE_CAPITAL = "capital_allocation"
 STAGE_CONFLICT = "conflict_resolution"
 STAGE_HITL = "hitl_gate"
+# The synchronous agent-execution vertical gate (owner decisions D6/K1/K2). Only
+# `agent.execute` proposals reach it; it is terminal for them.
+STAGE_EXECUTE = "agent_execution_gate"
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,6 +129,16 @@ class DecisionEvaluator:
         if s.terminal:
             return self._terminate(proposal, contract, stages, STAGE_POLICY, s)
 
+        # 2.5 synchronous agent-execution vertical (owner decisions D6/K1/K2) --
+        # The request-path gate (POST /api/v1/agents/execute) is decided HERE,
+        # terminally, so an `agent.execute` proposal never rides the generic
+        # default-approve at the end of this method (K2 fail-closed). The
+        # business-event stages below (scoring / capital / conflict / hitl) are
+        # for the async proposal-bearing events only; this vertical is decided by
+        # `_decide_agent_execution` alone.
+        if proposal.action_kind == AGENT_EXECUTE_ACTION_KIND:
+            return self._decide_agent_execution(proposal, contract, stages)
+
         # 3. scoring (deterministic; never terminal, recorded for ranking) ----
         stages.append(STAGE_SCORING)
         ceiling = (
@@ -167,6 +181,67 @@ class DecisionEvaluator:
             conflicts=s.conflicts,  # any conflict the proposal *won*
             policy_version=POLICY_VERSION,
             authority_level=contract.authority_level,
+        )
+
+    # -- synchronous agent-execution vertical (D6/K1/K2) --------------------
+    def _decide_agent_execution(
+        self, proposal: DecisionProposal, contract: AgentContract, stages: list[str]
+    ) -> DecisionResult:
+        """Decide a request-path `agent.execute` proposal, terminally.
+
+        The rule for THIS vertical, and only this one (owner decision D6): a
+        deliverable destined for external publication defers to a human. The
+        signal is the resolving agent contract's ``human_in_loop_triggers``
+        (owner decision K1 — the existing field, read here), NOT a name-string
+        inference over the agent id:
+
+          * FIRST_EXTERNAL_LAUNCH present -> deferred_to_human (external publication)
+          * no human-in-loop trigger      -> approved  (D6 "everything else approves")
+          * any OTHER trigger present     -> rejected  (owner decision K2, fail
+                                             closed: a human-in-loop condition the
+                                             synchronous path cannot honour is
+                                             NEVER silently approved)
+
+        The approve outcome is produced HERE explicitly rather than by falling
+        through to the generic "all six stages passed" terminal, so an
+        `agent.execute` proposal can never default-approve on an unmatched path.
+        """
+        stages.append(STAGE_EXECUTE)
+        triggers = contract.human_in_loop_triggers
+        if HumanInLoopTrigger.FIRST_EXTERNAL_LAUNCH in triggers:
+            return self._terminate(
+                proposal, contract, stages, STAGE_EXECUTE,
+                _Stage(
+                    terminal=True,
+                    outcome="deferred_to_human",
+                    reasons=[
+                        "external_publication: deliverable destined for external "
+                        "publication defers to human"
+                    ],
+                    hitl_trigger=HumanInLoopTrigger.FIRST_EXTERNAL_LAUNCH.value,
+                    routed_to=_escalate_to(contract),
+                ),
+            )
+        if not triggers:
+            return DecisionResult(
+                proposal_id=proposal.proposal_id,
+                decision_id=decision_id_for(proposal.proposal_id),
+                proposing_agent=proposal.proposing_agent_id,
+                action_kind=proposal.action_kind,
+                outcome="approved",
+                stages_completed=stages,
+                policy_version=POLICY_VERSION,
+                authority_level=contract.authority_level,
+            )
+        # K2: an agent.execute carrying a human-in-loop condition the synchronous
+        # vertical does not know how to honour must fail closed — never approve.
+        return self._reject(
+            proposal, contract, stages, STAGE_EXECUTE,
+            [
+                "agent_execution_unhandled_trigger: "
+                + ", ".join(t.value for t in triggers)
+                + " cannot be honoured on the synchronous path"
+            ],
         )
 
     # -- stage 0 (safety veto) ---------------------------------------------
