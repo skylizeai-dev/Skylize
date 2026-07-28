@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID, uuid4
@@ -50,6 +51,7 @@ from ...contracts.registry import AgentRegistry, resolve_model
 from ...contracts.token import ValidationStage, validate_tool_call
 from ...dal.ports import DeliverableRow, HitlEscalation, HitlQueueRepository
 from ...events.bus import EventBus
+from ...schemas.hitl import HitlReplayEnvelope
 from ...schemas.events.decision import (
     DecisionApproved,
     DecisionDeferredToHuman,
@@ -124,6 +126,31 @@ class AgentDeferredToHuman(Exception):
         self.reason = reason
 
 
+@dataclass(frozen=True, slots=True)
+class HitlApprovalContext:
+    """Proof that a HUMAN approved a previously deferred request.
+
+    Constructed ONLY by HitlQueueService.approve after its conditional
+    status='pending' claim succeeded. When execute() receives one, the
+    synchronous decision gate is already satisfied — the human verdict IS the
+    decision the gate deferred to — so the evaluator is not consulted again
+    (re-running it would defer forever).
+
+    This object is unreachable from the ordinary request path by construction:
+    POST /api/v1/agents/execute deserializes ExecuteAgentRequest
+    (extra="forbid" — any extra body field is a 422) and calls execute() with
+    exactly org_id/agent_id/input_data/user_id. An HTTP body is data; it can
+    never inject a Python object into a keyword argument the route does not
+    pass."""
+
+    hitl_id: UUID
+    decision_id: UUID | None
+    # The ORIGINAL request correlation — recorded as causation_id on the
+    # replay's audit record so defer -> approve -> execute is traceable (K8).
+    original_correlation_id: UUID
+    approved_by: str
+
+
 class AgentExecutionService:
     def __init__(
         self,
@@ -160,11 +187,15 @@ class AgentExecutionService:
         agent_id: str,
         input_data: dict[str, Any],
         user_id: str,
+        hitl_approval: HitlApprovalContext | None = None,
     ) -> DeliverableRow:
         # 1. Resolve contract (raises AgentNotRegistered on unknown id)
         contract = self._registry.resolve(agent_id)
 
-        # 2. Validate input
+        # 2. Validate input. On a HITL replay this IS the K7 re-validation: the
+        # stored payload is checked against the agent's CURRENT input schema
+        # before the gate, the mint, and any LLM spend — schema drift surfaces
+        # here as AgentInputError and nothing executes.
         input_cls = resolve_model(contract.input_schema)
         try:
             validated_input = input_cls.model_validate(input_data)
@@ -177,10 +208,17 @@ class AgentExecutionService:
         # governance-token mint, and any LLM spend: a reject/defer verdict means no
         # LLM call, no deliverable, and no ledger row. `run_id` is the per-request
         # correlation the decision, the mint, the LLM call, and the audit all share.
+        #
+        # A HitlApprovalContext skips the evaluator: the gate already ran for the
+        # original request and DEFERRED — the human approval it produced is the
+        # gate's resolution, and re-evaluating would defer again forever. The
+        # decision events + audit for that resolution are emitted by
+        # HitlQueueService before this method is ever called.
         run_id: UUID = uuid4()
-        if org_id in self._governed_org_ids:
+        if org_id in self._governed_org_ids and hitl_approval is None:
             await self._govern(
-                contract=contract, org_id=org_id, agent_id=agent_id, correlation_id=run_id
+                contract=contract, org_id=org_id, agent_id=agent_id,
+                correlation_id=run_id, validated_input=validated_input, user_id=user_id,
             )
 
         # 3. Build prompts
@@ -308,6 +346,11 @@ class AgentExecutionService:
 
         # 7. Persist
         deliverable_type = _AGENT_DELIVERABLE_TYPE.get(agent_id, "other")
+        metadata: dict[str, Any] = {
+            "input": input_data, "user_id": user_id, "llm_provider": provider,
+        }
+        if hitl_approval is not None:
+            metadata["replay_of_hitl_id"] = str(hitl_approval.hitl_id)
         row = await self._deliverables.create_deliverable(
             org_id=org_id,
             agent_id=agent_id,
@@ -315,9 +358,11 @@ class AgentExecutionService:
             title=title,
             content_markdown=content_markdown,
             governance_token_id=governance_token_id,
-            metadata={"input": input_data, "user_id": user_id, "llm_provider": provider},
+            metadata=metadata,
         )
         if self._audit is not None:
+            # On a HITL replay, causation_id carries the ORIGINAL request
+            # correlation (K8): defer -> approve -> execute share one chain.
             await self._audit.record(
                 org_id=org_id,
                 correlation_id=run_id,
@@ -326,14 +371,27 @@ class AgentExecutionService:
                 source_agent_id=agent_id,
                 authority_level=contract.authority_level,
                 governance_token_id=governance_token_id,
-                result_reason=f"deliverable={row.id} provider={provider}",
+                causation_id=(
+                    hitl_approval.original_correlation_id if hitl_approval else None
+                ),
+                result_reason=(
+                    f"deliverable={row.id} provider={provider}"
+                    + (f" hitl_id={hitl_approval.hitl_id}" if hitl_approval else "")
+                ),
             )
         return row
 
     # ── Synchronous decision gate (D1/D3/D4/D5) ──────────────────────────────
 
     async def _govern(
-        self, *, contract: AgentContract, org_id: str, agent_id: str, correlation_id: UUID
+        self,
+        *,
+        contract: AgentContract,
+        org_id: str,
+        agent_id: str,
+        correlation_id: UUID,
+        validated_input: Any,
+        user_id: str,
     ) -> None:
         """Run the synchronous decision gate and act on the verdict.
 
@@ -365,7 +423,10 @@ class AgentExecutionService:
             )
         # deferred_to_human — write the hitl_queue row, then surface the 202.
         hitl_id = hitl_id_for(proposal.proposal_id)
-        await self._enqueue_hitl(contract, proposal, result, hitl_id)
+        await self._enqueue_hitl(
+            contract, proposal, result, hitl_id,
+            validated_input=validated_input, user_id=user_id,
+        )
         raise AgentDeferredToHuman(
             hitl_id=hitl_id,
             reason="; ".join(result.reasons) or result.hitl_trigger or "deferred to human",
@@ -377,17 +438,27 @@ class AgentExecutionService:
         proposal: DecisionProposal,
         result: DecisionResult,
         hitl_id: UUID,
+        *,
+        validated_input: Any,
+        user_id: str,
     ) -> None:
         """Persist the HITL escalation (and its parent decision) via the app-layer
         DAL (owner decision K3). hitl_id is minted once by hitl_id_for
         (events.py:54) and is the SAME id carried by the 202 response and the
-        terminal event."""
+        terminal event. request_json (owner decisions K4/K6) is the serialized
+        HitlReplayEnvelope a later human approval executes."""
         if self._hitl is None:
             raise RuntimeError(
                 f"org_id={proposal.org_id!r} deferred to human but "
                 "AgentExecutionService was built without a HitlQueueRepository"
             )
         now = datetime.now(timezone.utc)
+        envelope = HitlReplayEnvelope(
+            agent_id=proposal.proposing_agent_id,
+            input=validated_input.model_dump(mode="json"),
+            user_id=user_id,
+            correlation_id=proposal.correlation_id,
+        )
         await self._hitl.enqueue(
             HitlEscalation(
                 decision_id=result.decision_id,
@@ -410,6 +481,7 @@ class AgentExecutionService:
                 ),
                 expires_at=now + timedelta(hours=_HITL_EXPIRY_HOURS),
                 created_at=now,
+                request_json=envelope.model_dump(mode="json"),
             )
         )
 
