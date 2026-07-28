@@ -20,6 +20,8 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .dal.connection import Database
+    from .dal.cost_ledger import CostLedgerDAL
+    from .dal.org_spend_ceiling import OrgSpendCeilingDAL
 
 from .adapters.llm.content_gate import GuardedLLMGateway, LLMContentGate
 from .adapters.llm.demo_adapter import DemoLLMAdapter
@@ -90,6 +92,12 @@ class Container:
     # PgWorkflowRepository(container.db) — not for request-path use: services
     # above this layer keep depending on ports, never on the pool.
     db: "Database | None" = None
+    # Read-side spend stores on the postgres backend (None on memory). The
+    # spend position route reads period-to-date spend and the effective-dated
+    # ceiling through these; the ceiling WRITE stays an operator action through
+    # the audited OrgSpendCeilingDAL.set_ceiling seam — no route writes it.
+    cost_ledger: "CostLedgerDAL | None" = None
+    spend_ceiling_dal: "OrgSpendCeilingDAL | None" = None
 
     async def aclose(self) -> None:
         # LIFO, like ExitStack: consumers/subscribers are registered after the
@@ -296,31 +304,36 @@ async def build_container(settings: Settings | None = None) -> Container:
     # key we fail closed rather than silently serving fake output — UNLESS demo
     # mode is explicitly opted into (llm_demo_mode), in which case the
     # DemoLLMAdapter is wired and it logs a WARNING on every call.
+    # Billing-grade cost ledger (ADR-0006) and org spend-ceiling store
+    # (migration 0014): constructed whenever the postgres pool exists (None on
+    # memory — no durable store). Shared by the LLM egress gate below and the
+    # read-only spend position route (edge/routes/spend.py) via the Container.
+    from .dal.cost_ledger import CostLedgerDAL
+    from .dal.org_spend_ceiling import OrgSpendCeilingDAL
+
+    cost_ledger = CostLedgerDAL(db) if db is not None else None
+    spend_ceiling_dal = OrgSpendCeilingDAL(db) if db is not None else None
+
     llm: LLMGateway
     if settings.anthropic_api_key:
         from .adapters.llm.anthropic_adapter import AnthropicAdapter
         from .adapters.llm.spend_ceiling import SpendCeilingEnforcer
-        from .dal.cost_ledger import CostLedgerDAL
-        from .dal.org_spend_ceiling import OrgSpendCeilingDAL
 
-        # Billing-grade cost ledger (ADR-0006): wired on the postgres backend
-        # so every Anthropic egress is price-gated pre-call and recorded
-        # post-call. On the memory backend there is no durable store, so the
-        # adapter falls back to Settings-float estimates (logged at WARNING).
-        cost_ledger = CostLedgerDAL(db) if db is not None else None
-        # Org spend-ceiling gate (migration 0014): wired alongside the ledger on
-        # the postgres backend. Both egresses refuse a call before egress when
+        # Org spend-ceiling gate: wired alongside the ledger on the postgres
+        # backend so every Anthropic egress is price-gated pre-call and recorded
+        # post-call. Both egresses refuse a call before egress when
         # period-to-date spend plus a biased-high estimate would breach the
-        # org-wide ceiling; a missing ceiling row fails closed. No ceiling store on
-        # the memory backend, so the gate is left unwired (None) there.
+        # org-wide ceiling; a missing ceiling row fails closed. No ceiling store
+        # on the memory backend, so the gate is left unwired (None) there and
+        # the adapter falls back to Settings-float estimates (logged at WARNING).
         spend_ceiling = (
             SpendCeilingEnforcer(
-                ceiling_dal=OrgSpendCeilingDAL(db),
+                ceiling_dal=spend_ceiling_dal,
                 cost_ledger=cost_ledger,
                 audit=audit,
                 bus=bus,
             )
-            if db is not None and cost_ledger is not None
+            if spend_ceiling_dal is not None and cost_ledger is not None
             else None
         )
         llm = AnthropicAdapter(
@@ -386,4 +399,5 @@ async def build_container(settings: Settings | None = None) -> Container:
         hitl=hitl_service,
         knowledge_ingestion=knowledge_ingestion, decision_engine=decision_engine,
         llm=llm, _closers=closers, db=db,
+        cost_ledger=cost_ledger, spend_ceiling_dal=spend_ceiling_dal,
     )

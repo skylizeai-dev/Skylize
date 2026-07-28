@@ -30,6 +30,7 @@ from .routes import (
     hitl,
     kill_switch,
     knowledge,
+    spend,
     tenants,
     workflows,
 )
@@ -82,6 +83,7 @@ def create_app() -> FastAPI:
     app.include_router(kill_switch.router)
     app.include_router(knowledge.router)
     app.include_router(audit.router)
+    app.include_router(spend.router)
     return app
 
 
