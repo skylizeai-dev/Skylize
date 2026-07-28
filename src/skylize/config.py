@@ -168,6 +168,12 @@ class Settings(BaseSettings):
     llm_retry_base_delay_seconds: float = 1.0   # exponential backoff base (attempt 1)
     llm_retry_max_delay_seconds: float = 30.0   # cap on any single backoff sleep
     llm_retry_jitter_seconds: float = 0.5       # max random jitter added to each backoff
+    # Provider HTTP timeout, applied to BOTH egress clients. 120s bounds the
+    # longest plausible non-streaming completion (a few thousand output tokens
+    # at tens of tokens/second, with headroom); the SDK default (~600s) only
+    # keeps hung connections pinned for ten minutes. A timed-out call is never
+    # retried (see anthropic_adapter._call_with_retry).
+    llm_timeout_seconds: float = 120.0
 
     # Pricing per 1M tokens in USD (configurable so ops can update without redeploy)
     llm_price_sonnet_in: float = 3.0

@@ -209,6 +209,10 @@ class AnthropicAdapter:
         self._retry_base_delay = float(getattr(settings, "llm_retry_base_delay_seconds", 1.0))
         self._retry_max_delay = float(getattr(settings, "llm_retry_max_delay_seconds", 30.0))
         self._retry_jitter = float(getattr(settings, "llm_retry_jitter_seconds", 0.5))
+        # Provider HTTP timeout (owner decision D3) — Settings-driven, applied to
+        # both egress clients via `_client_kwargs`. A timed-out call is never
+        # retried (owner decision D2; see `_call_with_retry`).
+        self._timeout_seconds = float(getattr(settings, "llm_timeout_seconds", 120.0))
         # Strict logical -> concrete map; unknown logical names fail loudly so a
         # typo never silently lands on the wrong (priced) model.
         self._model_map: dict[str, str] = {
@@ -240,11 +244,24 @@ class AnthropicAdapter:
     def _client_kwargs(self) -> dict[str, Any]:
         """Constructor kwargs shared by both egress clients (sync + async).
 
+        The adapter is the SOLE retry authority (owner decision D1):
+        max_retries=0 disables the SDK's internal retry (default 2), which would
+        otherwise run UNDER `_call_with_retry` and turn every adapter attempt
+        into up to three real HTTP requests — compounding rate-limit pressure
+        and real spend in a way no caller can observe or bound.
+
+        The timeout is Settings-driven (owner decision D3) so a hung request
+        fails within a configured bound instead of the SDK's ~600s default.
+
         base_url is included ONLY when configured; when unset the argument is
         omitted entirely so the Anthropic SDK applies its own default endpoint
         (rather than being handed an explicit None).
         """
-        kwargs: dict[str, Any] = {"api_key": self._api_key}
+        kwargs: dict[str, Any] = {
+            "api_key": self._api_key,
+            "max_retries": 0,
+            "timeout": self._timeout_seconds,
+        }
         if self._base_url:
             kwargs["base_url"] = self._base_url
         return kwargs
