@@ -314,7 +314,6 @@ async def generate_structured(
     request: StructuredRequest,
     schema: type[T],
     *,
-    correlation_id: UUID,
     audit: AuditSink | None = None,
 ) -> T:
     """Generate a validated `schema` instance via provider-native enforcement.
@@ -353,7 +352,7 @@ async def generate_structured(
         if audit is not None:
             await audit.record(
                 org_id=request.org_id,
-                correlation_id=correlation_id,
+                correlation_id=request.correlation_id,
                 action_type=STRUCTURED_FALLBACK_ACTION,
                 result="failed",
                 governance_token_id=request.governance_token_id,

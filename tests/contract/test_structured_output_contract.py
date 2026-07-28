@@ -114,9 +114,7 @@ async def test_real_output_schema_round_trips_through_generate_structured(
         capability=StructuredCapability.TOOL_USE,
     )
 
-    result = await generate_structured(
-        gateway, request, model, correlation_id=uuid4()
-    )
+    result = await generate_structured(gateway, request, model)
 
     assert isinstance(result, model)
     assert result == original
