@@ -37,14 +37,8 @@ _ITEM_COLUMNS = (
 )
 
 
-def _json(value: Any) -> dict[str, Any] | None:
-    """JSONB comes back as str (no codec is registered on the pool)."""
-    if value is None:
-        return None
-    return json.loads(value) if isinstance(value, str) else dict(value)
-
-
 def _item(rec: Any) -> HitlQueueItem:
+    # JSONB decodes to dict via the pool codec (connection._init_connection).
     return HitlQueueItem(
         hitl_id=rec["hitl_id"],
         org_id=rec["org_id"],
@@ -52,11 +46,11 @@ def _item(rec: Any) -> HitlQueueItem:
         correlation_id=rec["correlation_id"],
         partition_key=rec["partition_key"],
         trigger_reason=rec["trigger_reason"],
-        proposal_json=_json(rec["proposal_json"]) or {},
-        request_json=_json(rec["request_json"]),
+        proposal_json=rec["proposal_json"] or {},
+        request_json=rec["request_json"],
         status=rec["status"],
         verdict_by=rec["verdict_by"],
-        verdict_json=_json(rec["verdict_json"]),
+        verdict_json=rec["verdict_json"],
         verdict_at=rec["verdict_at"],
         expires_at=rec["expires_at"],
         created_at=rec["created_at"],

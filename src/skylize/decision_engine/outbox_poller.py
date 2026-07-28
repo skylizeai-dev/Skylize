@@ -113,19 +113,8 @@ class OutboxPoller:
         stream_key = row["stream_key"]
         tenant_id = row["tenant_id"]
         db_id = row["id"]
-        payload_str = row["payload"]
-
-        # Deserialize payload — stored as JSONB string from asyncpg
-        import json
-        try:
-            payload_dict = json.loads(payload_str) if isinstance(payload_str, str) else payload_str
-        except (ValueError, TypeError) as exc:
-            log.error(
-                "outbox_payload_deserialize_failed",
-                extra={"outbox_row_id": row_id, "tenant_id": tenant_id, "error": str(exc)},
-            )
-            await self._mark_failed(db_id, row["retry_count"])
-            return
+        # JSONB decodes to dict via the pool codec (dal.connection._init_connection).
+        payload_dict = row["payload"]
 
         # Flatten payload for Redis stream fields (XADD expects flat key-value pairs)
         fields = {k: str(v) for k, v in _flatten_for_stream(payload_dict).items()}

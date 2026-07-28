@@ -197,7 +197,7 @@ async def test_hitl_approve_full_loop(app_db, admin_conn, fake_provider) -> None
             assert row is not None and row["status"] == "approved"
             assert row["verdict_by"] == "u1"
             assert row["verdict_at"] is not None
-            verdict = json.loads(row["verdict_json"])
+            verdict = row["verdict_json"]  # dict via the pool's JSONB codec
             assert verdict["deliverable_id"] == str(deliverable_id)
             assert verdict["note"] == "looks good"
 

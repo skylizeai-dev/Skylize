@@ -18,7 +18,7 @@ def _make_row(
     stream_key: str = "evt:tenant-a:decisions",
     tenant_id: str = "tenant-a",
     db_id: int = 1,
-    payload: str = '{"event_type":"decision.approved","decision_id":"abc"}',
+    payload: dict | None = None,
     event_type: str = "decision.approved",
     retry_count: int = 0,
 ) -> dict:
@@ -27,7 +27,10 @@ def _make_row(
         "stream_key": stream_key,
         "tenant_id": tenant_id,
         "id": db_id,
-        "payload": payload,
+        # dict, as the pool's JSONB codec now yields on a real fetch
+        "payload": payload if payload is not None else {
+            "event_type": "decision.approved", "decision_id": "abc",
+        },
         "event_type": event_type,
         "retry_count": retry_count,
     }

@@ -9,10 +9,40 @@ the data layer regardless of upstream checks.
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 
 import asyncpg
+
+
+def _encode_json(value: Any) -> str:
+    """Encoder for the json/jsonb codec.
+
+    Every DAL write site passes JSONB parameters as pre-serialized ``str``
+    (``json.dumps(...)`` at the call site), so a ``str`` must pass through
+    untouched — running it through ``json.dumps`` again would store a JSON
+    string scalar instead of the document. Non-str values (dicts/lists) are
+    serialized here, so passing a raw object also works.
+    """
+    return value if isinstance(value, str) else json.dumps(value)
+
+
+async def _init_connection(conn: asyncpg.Connection) -> None:
+    """Register json/jsonb codecs so JSONB decodes to Python objects uniformly.
+
+    Without this, asyncpg returns JSONB columns as ``str`` and every read site
+    must decode (or crash) on its own — the defect class behind the
+    deliverables 500. Runs once per pooled connection via ``create_pool(init=)``.
+    """
+    for type_name in ("json", "jsonb"):
+        await conn.set_type_codec(
+            type_name,
+            encoder=_encode_json,
+            decoder=json.loads,
+            schema="pg_catalog",
+        )
 
 
 class Database:
@@ -22,7 +52,9 @@ class Database:
 
     async def connect(self) -> None:
         if self._pool is None:
-            self._pool = await asyncpg.create_pool(self._dsn, min_size=1, max_size=10)
+            self._pool = await asyncpg.create_pool(
+                self._dsn, min_size=1, max_size=10, init=_init_connection
+            )
 
     async def close(self) -> None:
         if self._pool is not None:
