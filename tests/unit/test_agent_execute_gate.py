@@ -18,7 +18,6 @@ from skylize.adapters.llm.gateway import LLMGenerateResponse, LLMUsage
 from skylize.app.agents.execution import (
     AgentDeferredToHuman,
     AgentExecutionService,
-    AgentGovernanceRejected,
 )
 from skylize.app.audit.service import AuditService
 from skylize.app.decision_engine.evaluator import DecisionEvaluator
@@ -120,16 +119,19 @@ async def test_governed_defer_writes_hitl_and_skips_llm() -> None:
     assert "decision.deferred_to_human" in _audit_action_types(bus)
 
 
-# ── reject -> 403, SDK never invoked, no deliverable, no hitl row ────────────
+# ── unmatched trigger -> defer (202), hitl row records the trigger ───────────
 
-async def test_governed_reject_skips_llm_and_writes_no_hitl() -> None:
+async def test_governed_unmatched_trigger_defers_and_records_trigger() -> None:
     llm = _llm({"anything": True})
     deliverables = _deliverables()
     service, bus, hitl = _service(governed={GOV_ORG}, llm=llm, deliverables=deliverables)
 
-    # copy_director declares BRAND_LEGAL_SENSITIVE -> the synchronous vertical
-    # fails closed (K2). Input must be valid (validation precedes the gate).
-    with pytest.raises(AgentGovernanceRejected):
+    # copy_director declares BRAND_LEGAL_SENSITIVE — a trigger the synchronous
+    # vertical cannot specifically honour. Owner decision 2026-07-28: still
+    # fail-closed (no LLM call without a human) but routed into the HITL queue
+    # instead of dead-ending as a reject. Input must be valid (validation
+    # precedes the gate).
+    with pytest.raises(AgentDeferredToHuman) as ei:
         await service.execute(
             org_id=GOV_ORG,
             agent_id="copy_director",
@@ -139,10 +141,18 @@ async def test_governed_reject_skips_llm_and_writes_no_hitl() -> None:
 
     llm.generate.assert_not_called()
     deliverables.create_deliverable.assert_not_called()
-    assert hitl.all() == []
+
+    # The hitl_queue row records WHICH trigger caused the defer.
+    rows = hitl.all()
+    assert len(rows) == 1
+    assert rows[0].hitl_id == ei.value.hitl_id
+    assert rows[0].trigger_reason == "brand_legal_sensitive"
     assert bus.published_of_type("decision.evaluated")
-    assert bus.published_of_type("decision.rejected")
-    assert "decision.rejected" in _audit_action_types(bus)
+    assert bus.published_of_type("decision.deferred_to_human")
+    assert "decision.deferred_to_human" in _audit_action_types(bus)
+    # No reject was emitted — the unmatched trigger no longer dead-ends.
+    assert bus.published_of_type("decision.rejected") == []
+    assert "decision.rejected" not in _audit_action_types(bus)
 
 
 # ── approve -> execution proceeds (201 path), event + audit emitted ─────────

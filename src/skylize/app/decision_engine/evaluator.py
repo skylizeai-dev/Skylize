@@ -197,10 +197,15 @@ class DecisionEvaluator:
 
           * FIRST_EXTERNAL_LAUNCH present -> deferred_to_human (external publication)
           * no human-in-loop trigger      -> approved  (D6 "everything else approves")
-          * any OTHER trigger present     -> rejected  (owner decision K2, fail
-                                             closed: a human-in-loop condition the
-                                             synchronous path cannot honour is
-                                             NEVER silently approved)
+          * any OTHER trigger present     -> deferred_to_human (owner decision
+                                             2026-07-28: still fail-closed — nothing
+                                             executes without a human — but the
+                                             request is routed into the HITL queue,
+                                             recording WHICH triggers caused the
+                                             defer, instead of dead-ending as a
+                                             reject. `rejected` remains reachable
+                                             for a genuinely invalid proposal, e.g.
+                                             an unknown action_kind at policy_check.)
 
         The approve outcome is produced HERE explicitly rather than by falling
         through to the generic "all six stages passed" terminal, so an
@@ -233,15 +238,25 @@ class DecisionEvaluator:
                 policy_version=POLICY_VERSION,
                 authority_level=contract.authority_level,
             )
-        # K2: an agent.execute carrying a human-in-loop condition the synchronous
-        # vertical does not know how to honour must fail closed — never approve.
-        return self._reject(
+        # An agent.execute carrying a human-in-loop condition the synchronous
+        # vertical cannot specifically honour still fails closed — nothing
+        # executes without a human — but it routes into the HITL queue rather
+        # than dead-ending (owner decision 2026-07-28, supersedes the K2 reject).
+        # `hitl_trigger` carries the unmatched trigger value(s) so the queue
+        # row's trigger_reason records WHY the reviewer is seeing it.
+        return self._terminate(
             proposal, contract, stages, STAGE_EXECUTE,
-            [
-                "agent_execution_unhandled_trigger: "
-                + ", ".join(t.value for t in triggers)
-                + " cannot be honoured on the synchronous path"
-            ],
+            _Stage(
+                terminal=True,
+                outcome="deferred_to_human",
+                reasons=[
+                    "agent_execution_unhandled_trigger: "
+                    + ", ".join(t.value for t in triggers)
+                    + " cannot be honoured on the synchronous path; deferred to human"
+                ],
+                hitl_trigger=", ".join(t.value for t in triggers),
+                routed_to=_escalate_to(contract),
+            ),
         )
 
     # -- stage 0 (safety veto) ---------------------------------------------

@@ -1,20 +1,24 @@
 """End-to-end: the governance decision gate on a live POST /api/v1/agents/execute.
 
 Real app (real Container on the postgres backend) + real Postgres + the fake
-Anthropic HTTP server, for hook_generator_agent, covering all three outcomes plus
-the ungoverned control:
+Anthropic HTTP server, for hook_generator_agent, covering the governed outcomes
+plus the ungoverned control:
 
   approve -> 201, deliverable persisted, ledger row written, SDK invoked
-  reject  -> 403, SDK never invoked, no deliverable, no ledger row
   defer   -> 202 with hitl_id, hitl_queue row present with that exact id,
              SDK never invoked, no deliverable, no ledger row
   ungoverned org -> 201, same body shape, executes as today (gate dormant)
 
-The three governed outcomes are driven by hook_generator_agent's
+The governed outcomes are driven by hook_generator_agent's
 human_in_loop_triggers (owner decision K1): the production contract declares
-FIRST_EXTERNAL_LAUNCH (defer); a []-trigger variant approves; a
-BRAND_LEGAL_SENSITIVE variant fails closed (reject, K2). The audit record and the
-terminal decision event are asserted for all three.
+FIRST_EXTERNAL_LAUNCH (defer, external publication); a []-trigger variant
+approves; a BRAND_LEGAL_SENSITIVE variant — a trigger the synchronous vertical
+cannot specifically honour — also defers, recording the trigger in
+trigger_reason (owner decision 2026-07-28: fail-closed defer into the HITL
+queue, superseding the K2 reject). The evaluator's rejected outcome remains
+reachable only for a genuinely invalid proposal (proven at the unit level in
+test_decision_evaluator.py). The audit record and the terminal decision event
+are asserted for every outcome.
 
 Real Postgres + Redis; skipped unless SKYLIZE_TEST_DB_URL (+ APP_DB_URL) are set.
 """
@@ -156,7 +160,9 @@ async def _audit_count(app_db: Database, org: str, action_type: str) -> int:
 async def _hitl_row(app_db: Database, org: str, hitl_id: uuid.UUID) -> dict | None:
     async with app_db.tenant_session(org) as conn:
         row = await conn.fetchrow(
-            "SELECT hitl_id, status, decision_id FROM hitl_queue WHERE hitl_id=$1", hitl_id
+            "SELECT hitl_id, status, decision_id, trigger_reason "
+            "FROM hitl_queue WHERE hitl_id=$1",
+            hitl_id,
         )
     return dict(row) if row is not None else None
 
@@ -237,24 +243,34 @@ async def test_governed_execute_three_outcomes_e2e(app_db, admin_conn, fake_prov
             row = await _hitl_row(app_db, gov_org, hitl_id)
             assert row is not None and row["hitl_id"] == hitl_id  # 202 id == queue row id
             assert row["status"] == "pending"
+            assert row["trigger_reason"] == HumanInLoopTrigger.FIRST_EXTERNAL_LAUNCH.value
             assert await _deliverable_ids(app_db, gov_org) == []  # no deliverable
             assert await _ledger_keys(app_db, gov_org) == []  # no ledger row
             assert await _audit_count(app_db, gov_org, "decision.deferred_to_human") == 1
 
-            # ---- REJECT: BRAND_LEGAL_SENSITIVE variant -> 403 ------------------
+            # ---- DEFER (unmatched trigger): BRAND_LEGAL_SENSITIVE -> 202 -------
+            # Owner decision 2026-07-28: a trigger the synchronous vertical cannot
+            # specifically honour routes into the HITL queue (fail-closed defer)
+            # instead of dead-ending as a 403, and trigger_reason records WHY.
             _variant([HumanInLoopTrigger.BRAND_LEGAL_SENSITIVE])
-            fake.program(success(text=json.dumps({"hooks": ["x"]}), message_id="never_reject"))
+            fake.program(success(text=json.dumps({"hooks": ["x"]}), message_id="never_defer2"))
             a0 = fake.attempts
             r = await client.post(
                 "/api/v1/agents/execute",
                 json={"agent_id": "hook_generator_agent", "input": _INPUT},
                 headers=_owner(gov_org),
             )
-            assert r.status_code == 403, r.text
+            assert r.status_code == 202, r.text
+            hitl_id2 = uuid.UUID(r.json()["hitl_id"])
+            assert r.json()["status"] == "deferred_to_human"
             assert fake.attempts == a0  # SDK never invoked
+            row2 = await _hitl_row(app_db, gov_org, hitl_id2)
+            assert row2 is not None and row2["status"] == "pending"
+            assert row2["trigger_reason"] == HumanInLoopTrigger.BRAND_LEGAL_SENSITIVE.value
             assert await _deliverable_ids(app_db, gov_org) == []  # no deliverable
             assert await _ledger_keys(app_db, gov_org) == []  # no ledger row
-            assert await _audit_count(app_db, gov_org, "decision.rejected") == 1
+            assert await _audit_count(app_db, gov_org, "decision.deferred_to_human") == 2
+            assert await _audit_count(app_db, gov_org, "decision.rejected") == 0
 
             # ---- APPROVE: []-trigger variant -> 201, executes -----------------
             _variant([])

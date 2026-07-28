@@ -418,26 +418,62 @@ async def test_agent_execute_no_trigger_approves() -> None:
     assert result.stages_completed[-1] == STAGE_EXECUTE
 
 
-async def test_agent_execute_unhandled_trigger_fails_closed_rejected() -> None:
+async def test_agent_execute_unhandled_trigger_fails_closed_defers() -> None:
     # copy_director declares BRAND_LEGAL_SENSITIVE, NOT the external-publication
-    # trigger. The synchronous vertical cannot honour it, so it fails closed
-    # (rejected) rather than silently approving (owner decision K2). This is the
-    # "unmatched action_kind" outcome: rejected, fail-closed.
+    # trigger. The synchronous vertical cannot specifically honour it, so it
+    # still fails closed — nothing executes without a human — but routes into
+    # the HITL queue instead of dead-ending (owner decision 2026-07-28,
+    # supersedes the K2 reject). hitl_trigger records WHICH trigger caused it.
     result = await _evaluator().evaluate(
         make_proposal(
-            agent="copy_director", action_kind="agent.execute", partition="ax:reject"
+            agent="copy_director", action_kind="agent.execute", partition="ax:defer2"
+        )
+    )
+    assert result.outcome == "deferred_to_human"
+    assert result.stage_failed_at == STAGE_EXECUTE
+    assert result.hitl_trigger == HumanInLoopTrigger.BRAND_LEGAL_SENSITIVE.value
+    assert result.routed_to  # escalation target for the human
+    assert any("unhandled_trigger" in r for r in result.reasons)
+
+
+async def test_agent_execute_unhandled_triggers_all_recorded() -> None:
+    # ceo declares three non-external triggers; the defer must record every one
+    # so the reviewer can see why the request is in the queue.
+    result = await _evaluator().evaluate(
+        make_proposal(agent="ceo", action_kind="agent.execute", partition="ax:multi")
+    )
+    assert result.outcome == "deferred_to_human"
+    assert result.stage_failed_at == STAGE_EXECUTE
+    assert result.hitl_trigger is not None
+    for trigger in (
+        HumanInLoopTrigger.SPEND_OVER_CEILING,
+        HumanInLoopTrigger.BRAND_LEGAL_SENSITIVE,
+        HumanInLoopTrigger.LOW_CONFIDENCE_IRREVERSIBLE,
+    ):
+        assert trigger.value in result.hitl_trigger
+
+
+async def test_agent_execute_invalid_action_kind_still_rejects() -> None:
+    # The rejected outcome stays reachable for a genuinely invalid proposal:
+    # an unknown action_kind is never guessed — policy_check rejects it before
+    # the vertical gate is ever consulted (owner decision 2026-07-28: defer is
+    # for unmatched triggers only, not for invalid proposals).
+    result = await _evaluator().evaluate(
+        make_proposal(
+            agent="copy_director", action_kind="agent.bogus_kind", partition="ax:invalid"
         )
     )
     assert result.outcome == "rejected"
-    assert result.stage_failed_at == STAGE_EXECUTE
-    assert any("unhandled_trigger" in r for r in result.reasons)
+    assert result.stage_failed_at == STAGE_POLICY
+    assert any("unknown_action_class" in r for r in result.reasons)
 
 
 async def test_agent_execute_never_rides_generic_default_approve() -> None:
     # An agent.execute proposal is decided by the vertical gate, never by the
     # generic six-stage default-approve: a would-otherwise-pass proposal from an
-    # agent with an unhandled trigger is rejected, and its stages_completed stops
-    # at the vertical gate (scoring/capital/conflict/hitl never run).
+    # agent with an unhandled trigger is deferred to a human, and its
+    # stages_completed stops at the vertical gate (scoring/capital/conflict/hitl
+    # never run).
     result = await _evaluator().evaluate(
         make_proposal(
             agent="copy_director", action_kind="agent.execute", partition="ax:noride"
