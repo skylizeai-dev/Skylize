@@ -98,7 +98,7 @@ export function KillSwitchPanel() {
       className="border border-border-strong bg-card"
     >
       <div className="px-7 pt-7 pb-7 sm:px-8">
-        <Eyebrow index="03">Owner action</Eyebrow>
+        <Eyebrow index="05">Owner action</Eyebrow>
         <h2
           id={`${baseId}-title`}
           className="mt-4 flex items-center gap-2.5 font-display text-xl font-semibold tracking-tight"
