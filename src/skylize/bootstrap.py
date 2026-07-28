@@ -45,6 +45,7 @@ from .dal.ports import (
     CapitalRepository,
     DeliverableRepository,
     GovernanceRepository,
+    HitlQueueRepository,
     ProcessedEventStore,
     TenantRepository,
     UserRepository,
@@ -117,6 +118,9 @@ async def build_container(settings: Settings | None = None) -> Container:
     # (memory backend); the postgres branch below swaps in the durable stores.
     capital_repo: CapitalRepository | None = None
     processed_store: ProcessedEventStore | None = None
+    # Request-path HITL writer for the synchronous decision gate (owner decision
+    # K3). In-memory on the memory backend; the durable Pg writer on postgres.
+    hitl_repo: HitlQueueRepository
 
     if settings.backend == "memory":
         from .app.governance.broadcast import InMemoryGovernanceBroadcast
@@ -126,6 +130,7 @@ async def build_container(settings: Settings | None = None) -> Container:
             InMemoryAuditRepository,
             InMemoryDeliverableRepository,
             InMemoryGovernanceRepository,
+            InMemoryHitlQueueRepository,
             InMemoryTenantRepository,
             InMemoryUserRepository,
         )
@@ -140,11 +145,13 @@ async def build_container(settings: Settings | None = None) -> Container:
         deliverable_repo = InMemoryDeliverableRepository()
         credential_repo = InMemoryCredentialRepository()
         broadcast = InMemoryGovernanceBroadcast()
+        hitl_repo = InMemoryHitlQueueRepository()
     else:
         from .dal.connection import Database
         from .dal.credentials import PgCredentialRepository
         from .dal.decision_stores import PgCapitalRepository, PgProcessedEventStore
         from .dal.deliverables import PgDeliverableRepository
+        from .dal.hitl import PgHitlQueueRepository
         from .dal.repositories import (
             PgApiKeyRepository,
             PgAuditRepository,
@@ -171,6 +178,7 @@ async def build_container(settings: Settings | None = None) -> Container:
         credential_repo = PgCredentialRepository(db)
         capital_repo = PgCapitalRepository(db)
         processed_store = PgProcessedEventStore(db)
+        hitl_repo = PgHitlQueueRepository(db)
         redis_broadcast = RedisGovernanceBroadcast(settings.redis_url)
         broadcast = redis_broadcast
 
@@ -350,8 +358,15 @@ async def build_container(settings: Settings | None = None) -> Container:
         public_key=authority.public_key,
         live_state_for=authority.live_state_checker,
     )
+    # AgentExecutionService also carries the synchronous decision gate (owner
+    # decisions D1/D3/D4/D5): the SAME pure evaluator the async engine uses
+    # (decision_engine.evaluator, D2), the request-path HITL writer (K3), the bus
+    # for terminal-event emission (D5), and the governed-org switch (D3). With no
+    # governed orgs the gate is dormant and execution is unchanged.
     agent_execution = AgentExecutionService(
-        registry, llm, deliverables, tools=tool_proxy, authority=authority, audit=audit
+        registry, llm, deliverables, tools=tool_proxy, authority=authority, audit=audit,
+        evaluator=decision_engine.evaluator, hitl=hitl_repo, bus=bus,
+        governed_org_ids=frozenset(settings.decision_engine_org_ids),
     )
 
     return Container(

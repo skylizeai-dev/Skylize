@@ -18,6 +18,7 @@ from .ports import (
     AuditRow,
     BudgetCeiling,
     DeliverableRow,
+    HitlEscalation,
     KillScope,
     RefreshTokenRow,
     TenantRow,
@@ -214,6 +215,20 @@ class InMemoryProcessedEventStore:
 
     async def mark_processed(self, key: str, outcome: str, *, org_id: str) -> None:
         self._seen[(org_id, key)] = outcome
+
+
+class InMemoryHitlQueueRepository:
+    """In-memory HITL escalation store (memory backend + tests). Mirrors the Pg
+    writer's contract: it records the escalation; tests read it back via `all`."""
+
+    def __init__(self) -> None:
+        self._rows: list[HitlEscalation] = []
+
+    async def enqueue(self, escalation: HitlEscalation) -> None:
+        self._rows.append(escalation)
+
+    def all(self) -> list[HitlEscalation]:
+        return list(self._rows)
 
 
 class InMemoryUserRepository:

@@ -374,6 +374,54 @@ class ProcessedEventStore(Protocol):
 
 
 # ---------------------------------------------------------------------------
+# HITL escalation write (synchronous request-path decision gate)
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True, slots=True)
+class HitlEscalation:
+    """One human-in-the-loop escalation the SYNCHRONOUS decision gate persists.
+
+    Carries BOTH the parent `decisions` row and the `hitl_queue` row fields:
+    `hitl_queue.decision_id` is an FK to `decisions`, and the synchronous request
+    path (unlike the async OPA publisher) has no separate decisions projection to
+    write the parent first. The `hitl_queue` fields mirror the columns the async
+    writer (`decision_engine/hitl_writer.py`) populates, so a row from either
+    writer is schema-compatible (owner decision K3)."""
+
+    # -- parent `decisions` row --------------------------------------------
+    decision_id: UUID
+    org_id: str
+    correlation_id: UUID
+    causation_event_id: UUID | None
+    partition_key: str
+    proposing_agent: str
+    authority_level: str
+    action_kind: str
+    proposal_json: dict[str, Any]
+    outcome: str  # "deferred_to_human"
+    outcome_reason: str | None
+    policy_version: str | None
+    score_json: dict[str, Any] | None
+    governance_token_id: UUID | None
+    # -- child `hitl_queue` row (the id + escalation reason + lifecycle) ----
+    hitl_id: UUID
+    trigger_reason: str
+    expires_at: datetime
+    created_at: datetime
+
+
+class HitlQueueRepository(Protocol):
+    """Writes a human-in-the-loop escalation (and its parent decision) for the
+    SYNCHRONOUS request-path decision gate.
+
+    The async OPA engine has its OWN writer (`decision_engine/hitl_writer.py`);
+    this is the request-path sibling. Nothing on the request path imports the
+    `decision_engine` package (owner decision K3)."""
+
+    async def enqueue(self, escalation: HitlEscalation) -> None: ...
+
+
+# ---------------------------------------------------------------------------
 # Workflow orchestration (Temporal activities) — run-step audit trail
 # ---------------------------------------------------------------------------
 
