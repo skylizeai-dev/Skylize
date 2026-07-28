@@ -408,17 +408,81 @@ class HitlEscalation:
     trigger_reason: str
     expires_at: datetime
     created_at: datetime
+    # Serialized HitlReplayEnvelope (schemas/hitl.py) — what a human approval
+    # executes (owner decisions K4/K6). None = no replayable execution (the
+    # OPA-side writer never sets it).
+    request_json: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class HitlQueueItem:
+    """One hitl_queue row as read back for the review/approval path."""
+
+    hitl_id: UUID
+    org_id: str
+    decision_id: UUID | None
+    correlation_id: UUID
+    partition_key: str
+    trigger_reason: str
+    proposal_json: dict[str, Any]
+    request_json: dict[str, Any] | None
+    status: str  # pending|approved|rejected|modified|expired
+    verdict_by: str | None
+    verdict_json: dict[str, Any] | None
+    verdict_at: datetime | None
+    expires_at: datetime | None
+    created_at: datetime
 
 
 class HitlQueueRepository(Protocol):
     """Writes a human-in-the-loop escalation (and its parent decision) for the
-    SYNCHRONOUS request-path decision gate.
+    SYNCHRONOUS request-path decision gate, and serves the review/approval
+    reads + the exactly-once verdict claim.
 
     The async OPA engine has its OWN writer (`decision_engine/hitl_writer.py`);
     this is the request-path sibling. Nothing on the request path imports the
     `decision_engine` package (owner decision K3)."""
 
     async def enqueue(self, escalation: HitlEscalation) -> None: ...
+
+    async def list_pending(
+        self, org_id: str, *, limit: int = 50, offset: int = 0
+    ) -> tuple[list[HitlQueueItem], int]:
+        """Newest-first pending rows for one org (partial index
+        idx_hitl_org_pending) plus the total pending count."""
+        ...
+
+    async def get(self, hitl_id: UUID, org_id: str) -> HitlQueueItem | None: ...
+
+    async def claim(
+        self,
+        hitl_id: UUID,
+        org_id: str,
+        *,
+        status_to: str,  # 'approved' | 'rejected'
+        verdict_by: str,
+        verdict_json: dict[str, Any],
+        verdict_at: datetime,
+        require_request: bool,
+    ) -> HitlQueueItem | None:
+        """The exactly-once guard: a CONDITIONAL status update, never a
+        read-then-write. Flips status and records the verdict only when the row
+        is still 'pending', not past expires_at, and (when `require_request`)
+        carries a replayable request_json. Returns the claimed row, or None if
+        the predicate did not match (caller re-reads to type the refusal)."""
+        ...
+
+    async def release(self, hitl_id: UUID, org_id: str, *, from_status: str) -> bool:
+        """Return a claimed row to 'pending' (verdict fields cleared) after a
+        failed execution, so the approved work is never silently lost. Only a
+        row currently in `from_status` is released."""
+        ...
+
+    async def update_verdict_json(
+        self, hitl_id: UUID, org_id: str, verdict_json: dict[str, Any]
+    ) -> None:
+        """Enrich the recorded verdict (e.g. with the produced deliverable_id)."""
+        ...
 
 
 # ---------------------------------------------------------------------------

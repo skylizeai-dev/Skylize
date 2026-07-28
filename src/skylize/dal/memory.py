@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime, timezone
+from typing import Any
 from uuid import UUID
 
 from .ports import (
@@ -19,6 +20,7 @@ from .ports import (
     BudgetCeiling,
     DeliverableRow,
     HitlEscalation,
+    HitlQueueItem,
     KillScope,
     RefreshTokenRow,
     TenantRow,
@@ -219,16 +221,100 @@ class InMemoryProcessedEventStore:
 
 class InMemoryHitlQueueRepository:
     """In-memory HITL escalation store (memory backend + tests). Mirrors the Pg
-    writer's contract: it records the escalation; tests read it back via `all`."""
+    implementation's contract: enqueue records the escalation; the review path
+    reads it back as HitlQueueItem and claims verdicts with the same
+    only-while-pending predicate. Tests still read raw escalations via `all`."""
 
     def __init__(self) -> None:
         self._rows: list[HitlEscalation] = []
+        # hitl_id -> mutable verdict state mirroring the Pg row's lifecycle
+        # columns: [status, verdict_by, verdict_json, verdict_at].
+        self._state: dict[UUID, list[Any]] = {}
 
     async def enqueue(self, escalation: HitlEscalation) -> None:
         self._rows.append(escalation)
+        self._state[escalation.hitl_id] = ["pending", None, None, None]
 
     def all(self) -> list[HitlEscalation]:
         return list(self._rows)
+
+    def _item(self, e: HitlEscalation) -> HitlQueueItem:
+        status, verdict_by, verdict_json, verdict_at = self._state[e.hitl_id]
+        return HitlQueueItem(
+            hitl_id=e.hitl_id,
+            org_id=e.org_id,
+            decision_id=e.decision_id,
+            correlation_id=e.correlation_id,
+            partition_key=e.partition_key,
+            trigger_reason=e.trigger_reason,
+            proposal_json=dict(e.proposal_json),
+            request_json=dict(e.request_json) if e.request_json is not None else None,
+            status=status,
+            verdict_by=verdict_by,
+            verdict_json=verdict_json,
+            verdict_at=verdict_at,
+            expires_at=e.expires_at,
+            created_at=e.created_at,
+        )
+
+    async def list_pending(
+        self, org_id: str, *, limit: int = 50, offset: int = 0
+    ) -> tuple[list[HitlQueueItem], int]:
+        pending = [
+            self._item(e)
+            for e in self._rows
+            if e.org_id == org_id and self._state[e.hitl_id][0] == "pending"
+        ]
+        pending.sort(key=lambda i: i.created_at, reverse=True)
+        return pending[offset : offset + limit], len(pending)
+
+    async def get(self, hitl_id: UUID, org_id: str) -> HitlQueueItem | None:
+        for e in self._rows:
+            if e.hitl_id == hitl_id and e.org_id == org_id:
+                return self._item(e)
+        return None
+
+    async def claim(
+        self,
+        hitl_id: UUID,
+        org_id: str,
+        *,
+        status_to: str,
+        verdict_by: str,
+        verdict_json: dict[str, Any],
+        verdict_at: datetime,
+        require_request: bool,
+    ) -> HitlQueueItem | None:
+        for e in self._rows:
+            if e.hitl_id != hitl_id or e.org_id != org_id:
+                continue
+            state = self._state[e.hitl_id]
+            if state[0] != "pending":
+                return None
+            if e.expires_at is not None and e.expires_at <= verdict_at:
+                return None
+            if require_request and e.request_json is None:
+                return None
+            self._state[e.hitl_id] = [status_to, verdict_by, dict(verdict_json), verdict_at]
+            return self._item(e)
+        return None
+
+    async def release(self, hitl_id: UUID, org_id: str, *, from_status: str) -> bool:
+        for e in self._rows:
+            if e.hitl_id == hitl_id and e.org_id == org_id:
+                if self._state[e.hitl_id][0] != from_status:
+                    return False
+                self._state[e.hitl_id] = ["pending", None, None, None]
+                return True
+        return False
+
+    async def update_verdict_json(
+        self, hitl_id: UUID, org_id: str, verdict_json: dict[str, Any]
+    ) -> None:
+        for e in self._rows:
+            if e.hitl_id == hitl_id and e.org_id == org_id:
+                self._state[e.hitl_id][2] = dict(verdict_json)
+                return
 
 
 class InMemoryUserRepository:
