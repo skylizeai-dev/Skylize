@@ -74,9 +74,13 @@ class TokenBudgetExceeded(Exception):
 
 
 class LLMProviderUnavailable(Exception):
-    """Raised when a provider is unreachable after retries (retryable 5xx/network
-    errors exhausted). The gateway may fail over to another provider; if none is
-    available the error propagates so the caller can degrade gracefully."""
+    """Raised when a provider is unreachable: a retryable 5xx exhausted the
+    bounded retry budget, or a connection failed outright — the latter raised
+    IMMEDIATELY with no retry, because at that seam it is unknowable whether the
+    provider received (and will bill) the request, and re-sending a possibly
+    billed call risks double-spending. The gateway may fail over to another
+    provider; if none is available the error propagates so the caller can
+    degrade gracefully."""
 
 
 class LLMRateLimited(Exception):
@@ -84,6 +88,24 @@ class LLMRateLimited(Exception):
     is exhausted (Retry-After honoured when present, else jittered exponential
     backoff). Distinct from LLMProviderUnavailable so callers can back off on
     rate limits separately from provider outages."""
+
+
+class LLMTimeout(Exception):
+    """Raised when a provider call exceeds the configured HTTP timeout
+    (Settings.llm_timeout_seconds). NEVER retried (owner decision D2): a
+    timed-out request may have COMPLETED and been billed by the provider while
+    the response was lost, so retrying it could spend real money twice for at
+    most one recorded ledger row. The SDK timeout exception is chained for
+    diagnosis; neither message carries key material."""
+
+
+class LLMMalformedResponse(Exception):
+    """Raised when the provider returns a 2xx whose body cannot be parsed as a
+    Message. A parse failure is a PROVIDER failure, and it is NOT retried
+    (owner decision D4): a served-but-unparseable response means the provider
+    completed — and billed — the generation, so a retry would double-spend
+    exactly like a retried timeout. The parser error is chained for diagnosis;
+    neither message carries key material."""
 
 
 class LLMAuthenticationError(Exception):

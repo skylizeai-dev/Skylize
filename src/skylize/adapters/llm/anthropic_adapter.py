@@ -11,6 +11,15 @@ context overflow re-raised immediately; 401 fails closed with no key material
 in the error, logs, or events), accounts cost in USD micros from Settings
 prices, and optionally reports every generation to Langfuse and OpenTelemetry —
 observability failures never fail the call, and prompt text is never logged.
+
+The adapter is the SOLE retry authority (owner decision D1): both SDK clients
+are built with max_retries=0 so exactly one HTTP request reaches the provider
+per adapter attempt. Requests are bounded by Settings.llm_timeout_seconds
+(owner decision D3); a timeout maps to LLMTimeout and is NEVER retried (owner
+decision D2 — the provider may have completed and billed the lost response), a
+connection failure maps to LLMProviderUnavailable without retry, and an
+unparseable response body maps to LLMMalformedResponse without retry (owner
+decision D4).
 """
 
 from __future__ import annotations
@@ -33,10 +42,12 @@ from .gateway import (
     LLMGenerateRequest,
     LLMGenerateResponse,
     LLMGenerateWithToolsRequest,
+    LLMMalformedResponse,
     LLMMessage,
     LLMModelNotPriced,
     LLMProviderUnavailable,
     LLMRateLimited,
+    LLMTimeout,
     LLMUsage,
     TokenBudgetExceeded,
 )
@@ -401,11 +412,46 @@ class AnthropicAdapter:
             LLMProviderUnavailable.
           * other 4xx (incl. 400 / context overflow) — re-raise the provider's
             typed error immediately, no retry.
+          * timeout — LLMTimeout immediately, NEVER retried (owner decision D2).
+          * connection failure — LLMProviderUnavailable immediately, no retry.
+          * unparseable response body — LLMMalformedResponse immediately, no
+            retry (owner decision D4).
         """
         last_exc: anthropic.APIStatusError | None = None
         for attempt in range(1, self._retry_max_attempts + 1):
             try:
                 return await invoke()
+            except anthropic.APITimeoutError as exc:
+                # Owner decision D2 — timeouts are NOT retried: a timed-out
+                # request may have COMPLETED and been billed by the provider
+                # while the response was lost. Retrying it spends real money a
+                # second time while the ledger records at most one row.
+                # Under-charging the ledger is an accounting defect;
+                # double-spending is a customer-visible one.
+                raise LLMTimeout(
+                    f"anthropic request exceeded the configured "
+                    f"{self._timeout_seconds}s timeout (never retried)"
+                ) from exc
+            except anthropic.APIConnectionError as exc:
+                # Non-timeout connection failure (refused / reset / dropped
+                # mid-response). This seam cannot distinguish a request the
+                # provider never saw from one it received and will bill, so it
+                # fails closed with no retry — the same double-spend rationale
+                # as the timeout above. The chained SDK message is static
+                # ("Connection error.") and carries no key material.
+                raise LLMProviderUnavailable(
+                    "anthropic connection failed before a response was read "
+                    "(not retried)"
+                ) from exc
+            except json.JSONDecodeError as exc:
+                # Owner decision D4 — a malformed/truncated body is a PROVIDER
+                # failure, mapped and NOT retried: a 2xx the SDK cannot parse
+                # means the provider completed (and billed) the generation, so
+                # retrying would double-spend like a retried timeout would.
+                raise LLMMalformedResponse(
+                    "anthropic returned an unparseable response body "
+                    "(not retried)"
+                ) from exc
             except anthropic.APIStatusError as exc:
                 status = exc.response.status_code
                 if status == 401:
