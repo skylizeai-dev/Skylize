@@ -10,6 +10,7 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from ...bootstrap import Container
@@ -58,9 +59,14 @@ async def execute_agent(
     body: ExecuteAgentRequest,
     ctx: RequestContext = Depends(require_any_role_or_user("owner", "admin", "operator")),
     container: Container = Depends(get_container),
-) -> ExecuteAgentResponse:
+) -> ExecuteAgentResponse | JSONResponse:
     from ...adapters.llm.gateway import TokenBudgetExceeded
-    from ...app.agents.execution import AgentInputError, AgentOutputError
+    from ...app.agents.execution import (
+        AgentDeferredToHuman,
+        AgentGovernanceRejected,
+        AgentInputError,
+        AgentOutputError,
+    )
     from ...app.governance import GovernanceDenied
     from ...contracts.registry import AgentNotRegistered
 
@@ -75,6 +81,23 @@ async def execute_agent(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except AgentInputError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except AgentGovernanceRejected as exc:
+        # Decision engine rejected the request (owner decision D4): 403 carrying
+        # the decision reason. No LLM call, no deliverable, no ledger row happened.
+        raise HTTPException(status_code=403, detail=f"decision rejected: {exc}") from exc
+    except AgentDeferredToHuman as exc:
+        # Decision engine deferred to a human (owner decision D4): 202 carrying the
+        # hitl_id of the queued escalation. No LLM call, no deliverable, no ledger
+        # row happened; the hitl_queue row was written before this response.
+        return JSONResponse(
+            status_code=202,
+            content={
+                "hitl_id": str(exc.hitl_id),
+                "status": "deferred_to_human",
+                "agent_id": body.agent_id,
+                "reason": str(exc),
+            },
+        )
     except GovernanceDenied as exc:
         # Kill switch / suspension: the denial is already audited by the
         # authority — surface it as forbidden, not a 500.
@@ -84,6 +107,7 @@ async def execute_agent(
     except AgentOutputError as exc:
         raise HTTPException(status_code=502, detail=f"LLM output error: {exc}") from exc
 
+    # Approve (owner decision D4): 201 shape byte-identical to today.
     return ExecuteAgentResponse(
         deliverable_id=row.id,
         status=row.status,
