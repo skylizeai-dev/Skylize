@@ -14,7 +14,16 @@ The table is MUTABLE CONFIG, not append-only (owner decision D5). A ceiling
 change is a governance event, not silent config (owner decision, step 11): the
 setter writes an ``AuditService`` record on every change, so the ``audit_log``
 trail (and the audit event on the bus) always carries who changed the ceiling to
-what. A missing (org, period) row means the gate FAILS CLOSED (owner decision
+what.
+
+The read is EFFECTIVE-DATED (owner decision, Stage 1): it resolves to the ceiling
+of the GREATEST ``billing_period`` at or before the requested period, so a
+configured org no longer goes dark at each calendar-month rollover (mirroring the
+effective-dated pricing precedent set by migration 0013's two Sonnet 5 rows).
+Only the ceiling LOOKUP is effective-dated — spend accounting is untouched and
+never carries across months (period-to-date spend is still aggregated for the
+current calendar month by ``CostLedgerDAL.org_period_total_micros``). When NO row
+exists at or before the requested period the gate FAILS CLOSED (owner decision
 D6); this DAL never fabricates a default — a ``None`` read is the honest
 "no ceiling configured" signal the caller refuses on.
 """
@@ -36,18 +45,45 @@ class OrgSpendCeilingDAL:
     async def read_ceiling_micros(
         self, org_id: str, billing_period: str
     ) -> int | None:
-        """The org-wide ceiling in micro-USD for (org, period), or None if unset.
+        """The org-wide ceiling in micro-USD IN FORCE for (org, period), or None.
 
-        ``None`` means NO ceiling row exists for this (org, period) — the honest
-        fail-closed signal (owner decision D6); it is deliberately distinct from a
-        configured ceiling of ``0`` (which permits no spend). Tenant-scoped via RLS.
+        EFFECTIVE-DATED (owner decision, Stage 1): the ceiling resolves to the row
+        with the GREATEST ``billing_period`` that is ``<=`` the requested period —
+        NOT an exact-month match. A ceiling set in an earlier month therefore stays
+        in force in every later month until a newer row supersedes it, so a
+        configured org no longer goes dark at each calendar-month rollover. This
+        mirrors the effective-dated pricing precedent set by migration 0013's two
+        Sonnet 5 ``model_pricing`` rows.
+
+        Resolution semantics:
+          * NO row at or before the requested period -> ``None`` -> caller REFUSES.
+            Fail-closed for a never-configured org is PRESERVED (owner decision D6):
+            ``None`` is still the honest "no ceiling configured" signal, distinct
+            from a configured ceiling of ``0`` (which permits no spend).
+          * a row exists only for an EARLIER period  -> that ceiling is in force.
+          * a NEWER row supersedes an older one from its own period onward.
+          * a row for a period LATER than the requested one is NOT used — the
+            ``<=`` predicate excludes future-dated ceilings.
+
+        Spend accounting is UNCHANGED and does NOT carry over: only this ceiling
+        LOOKUP is effective-dated. Period-to-date spend is still aggregated for the
+        CURRENT calendar month by ``CostLedgerDAL.org_period_total_micros`` (the
+        enforcer compares that current-month spend against the effective ceiling);
+        an earlier month's ceiling never drags an earlier month's spend forward.
+
+        Tenant-scoped via RLS. The ``(org_id, billing_period)`` primary-key btree
+        already serves this predicate (leading equality on ``org_id`` plus a
+        reverse range scan on ``billing_period``), so no new index — and no new
+        migration — is added.
         """
         async with self._db.tenant_session(org_id) as conn:
             value = await conn.fetchval(
                 """
                 SELECT ceiling_micros
                 FROM org_spend_ceiling
-                WHERE org_id = $1 AND billing_period = $2
+                WHERE org_id = $1 AND billing_period <= $2
+                ORDER BY billing_period DESC
+                LIMIT 1
                 """,
                 org_id,
                 billing_period,

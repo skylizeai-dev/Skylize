@@ -26,7 +26,12 @@ error. The unit is asserted in the column comment below and in a test.
 Period (owner decision D4): ``billing_period`` is the calendar month as the
 ``"%Y-%m"`` string already used by ai_cost_ledger.billing_period
 (anthropic_adapter.py:382, ``occurred_at.strftime("%Y-%m")``). No second period
-concept is introduced.
+concept is introduced. The ceiling READ is EFFECTIVE-DATED (Stage 1): it resolves
+to the row with the greatest ``billing_period`` at or before the requested period
+(zero-padded ``"%Y-%m"`` sorts chronologically as text), so a ceiling set in one
+month stays in force in later months until a newer row supersedes it — mirroring
+migration 0013's effective-dated pricing. Only the lookup is effective-dated;
+spend accounting is still per current calendar month.
 
 Mutability + isolation (owner decision D5): this is MUTABLE CONFIG, not
 append-only — there is deliberately NO append-only trigger (unlike
@@ -70,7 +75,7 @@ def upgrade() -> None:
     op.execute(sa.text("""
         CREATE TABLE org_spend_ceiling (
             org_id         TEXT NOT NULL REFERENCES tenants(org_id),
-            billing_period TEXT NOT NULL,                 -- calendar month "%Y-%m" (D4)
+            billing_period TEXT NOT NULL,                 -- calendar month "%Y-%m" (D4); the ceiling read is EFFECTIVE-DATED (resolves to the greatest billing_period <= the requested period), like migration 0013's effective-dated pricing
             ceiling_micros BIGINT NOT NULL CHECK (ceiling_micros >= 0),
             created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
             updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),

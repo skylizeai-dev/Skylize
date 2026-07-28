@@ -503,3 +503,150 @@ async def test_concurrency_overshoot_within_guarantee(app_db, admin_conn) -> Non
         assert total == served * one_call_cost
     finally:
         await _cleanup(admin_conn, [org], [model])
+
+
+# ---------------------------------------------------------------------------
+# Effective-dated ceiling read (Stage 1) — REAL Postgres, proven as the app role.
+#
+# DEFECT fixed: org_spend_ceiling has PK (org_id, billing_period) and a missing
+# row for the current period refuses (D6), so before this change every configured
+# org went dark at each calendar-month rollover. The read is now EFFECTIVE-DATED:
+# it resolves to the row with the GREATEST billing_period <= the requested period
+# (mirroring migration 0013's effective-dated pricing). Only the ceiling LOOKUP
+# changed — spend accounting is still per current calendar month (asserted by the
+# aggregate/boundary tests above, which are unmodified).
+# ---------------------------------------------------------------------------
+
+_JUL, _AUG, _SEP = "2026-07", "2026-08", "2026-09"
+
+
+@requires_app_role
+async def test_effective_dated_earlier_ceiling_stays_in_force(app_db, admin_conn) -> None:
+    """Ceiling set for 2026-07, queried for 2026-09 -> July's value in force."""
+    org, _ = _orgs()
+    try:
+        await _seed_tenant(admin_conn, org)
+        await _seed_ceiling(admin_conn, org, _JUL, 7_000)
+        dal = OrgSpendCeilingDAL(app_db)
+        # No row exists for 2026-08 or 2026-09, yet July's ceiling remains in force
+        # in each later month — the month-rollover blackout is gone.
+        assert await dal.read_ceiling_micros(org, _SEP) == 7_000
+        assert await dal.read_ceiling_micros(org, _AUG) == 7_000
+        assert await dal.read_ceiling_micros(org, _JUL) == 7_000  # its own period
+    finally:
+        await _cleanup(admin_conn, [org], [])
+
+
+@requires_app_role
+async def test_effective_dated_newer_row_supersedes(app_db, admin_conn) -> None:
+    """Ceilings set for 2026-07 and 2026-08, queried for 2026-09 -> August's."""
+    org, _ = _orgs()
+    try:
+        await _seed_tenant(admin_conn, org)
+        await _seed_ceiling(admin_conn, org, _JUL, 7_000)
+        await _seed_ceiling(admin_conn, org, _AUG, 8_000)
+        dal = OrgSpendCeilingDAL(app_db)
+        # Greatest billing_period <= 2026-09 is 2026-08: August supersedes July.
+        assert await dal.read_ceiling_micros(org, _SEP) == 8_000
+        assert await dal.read_ceiling_micros(org, _AUG) == 8_000  # August itself
+        # And the older row is still what resolves for its own (earlier) month.
+        assert await dal.read_ceiling_micros(org, _JUL) == 7_000
+    finally:
+        await _cleanup(admin_conn, [org], [])
+
+
+@requires_app_role
+async def test_effective_dated_future_row_not_used_early(app_db, admin_conn) -> None:
+    """A row for a LATER period than requested is NOT used (<= predicate)."""
+    org, _ = _orgs()
+    try:
+        await _seed_tenant(admin_conn, org)
+        # The ONLY row is future-dated relative to the July/August queries below.
+        await _seed_ceiling(admin_conn, org, _SEP, 9_000)
+        dal = OrgSpendCeilingDAL(app_db)
+        # No row at or before July/August -> None (a future ceiling is not pulled
+        # forward), so those periods still fail closed.
+        assert await dal.read_ceiling_micros(org, _JUL) is None
+        assert await dal.read_ceiling_micros(org, _AUG) is None
+        # From its own period onward the future-dated row is in force.
+        assert await dal.read_ceiling_micros(org, _SEP) == 9_000
+    finally:
+        await _cleanup(admin_conn, [org], [])
+
+
+@requires_app_role
+async def test_effective_dated_never_configured_fails_closed(app_db, admin_conn) -> None:
+    """No row anywhere for an org -> None -> the call is REFUSED (D6 preserved)."""
+    org, _ = _orgs()
+    model = _synth_model()
+    try:
+        await _seed_tenant(admin_conn, org)
+        await _seed_price(admin_conn, _PROVIDER, model)
+        dal = OrgSpendCeilingDAL(app_db)
+        # The effective-dated read of a never-configured org is None for every
+        # period — fail-closed is PRESERVED, not softened by the new predicate.
+        assert await dal.read_ceiling_micros(org, _SEP) is None
+        assert await dal.read_ceiling_micros(org, _period()) is None
+
+        # And the real adapter path refuses before egress: SDK never invoked,
+        # ceiling None, no ai_cost_ledger row written (nothing spent).
+        adapter, bus, repo, ledger = _make_adapter(app_db, model)
+        with patch("skylize.adapters.llm.anthropic_adapter.anthropic.Anthropic") as m:
+            m.return_value.messages.create.side_effect = _fake_message(
+                model, in_tok=1000, out_tok=1000
+            )
+            with pytest.raises(OrgSpendCeilingExceeded) as ei:
+                await adapter.generate(_request(org))
+            m.assert_not_called()
+        assert ei.value.ceiling_micros is None
+        assert await _ledger_row_count(app_db, org) == 0
+        assert len(bus.published_of_type("governance.scope_violation")) == 1
+    finally:
+        await _cleanup(admin_conn, [org], [model])
+
+
+@requires_app_role
+async def test_effective_dated_rls_blocks_cross_tenant(app_db, app_conn, admin_conn) -> None:
+    """RLS still holds under the effective-dated read: one org cannot resolve
+    another org's ceiling, proven as a non-superuser, non-owner role."""
+    org_a, org_b = _orgs()
+    try:
+        for org in (org_a, org_b):
+            await _seed_tenant(admin_conn, org)
+        # Earlier-period rows so the read must resolve them effective-dated for a
+        # LATER query period (exercises the <= predicate, not an exact match).
+        await _seed_ceiling(admin_conn, org_a, _JUL, 111)
+        await _seed_ceiling(admin_conn, org_b, _JUL, 222)
+        dal = OrgSpendCeilingDAL(app_db)
+
+        # Each org resolves ONLY its own effective ceiling for 2026-09.
+        assert await dal.read_ceiling_micros(org_a, _SEP) == 111
+        assert await dal.read_ceiling_micros(org_b, _SEP) == 222
+
+        # Bound to org_a, a raw SELECT with the effective-dated predicate sees ONLY
+        # org_a's row — org_b's is invisible under RLS.
+        async with app_db.tenant_session(org_a) as conn:
+            seen = {
+                r["org_id"]
+                for r in await conn.fetch(
+                    "SELECT org_id FROM org_spend_ceiling "
+                    "WHERE billing_period <= $1 ORDER BY billing_period DESC",
+                    _SEP,
+                )
+            }
+        assert seen == {org_a}
+
+        # Prove the RLS-subject role is NEITHER superuser NOR the table owner —
+        # otherwise RLS would be moot (same proof the exact-match RLS test uses).
+        role = await app_conn.fetchval("SELECT current_user")
+        rolrow = await admin_conn.fetchrow(
+            "SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname=$1", role
+        )
+        assert rolrow["rolsuper"] is False, f"{role} is a superuser — would bypass RLS"
+        assert rolrow["rolbypassrls"] is False, f"{role} has BYPASSRLS — would bypass RLS"
+        owner = await admin_conn.fetchval(
+            "SELECT pg_get_userbyid(relowner) FROM pg_class WHERE relname='org_spend_ceiling'"
+        )
+        assert owner != role, f"{role} owns the table — owner bypasses RLS unless FORCE"
+    finally:
+        await _cleanup(admin_conn, [org_a, org_b], [])
