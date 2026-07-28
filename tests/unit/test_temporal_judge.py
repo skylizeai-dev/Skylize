@@ -138,6 +138,7 @@ def _run_ctx() -> RunContext:
         correlation_id=str(uuid4()),
         thread_id="t1",
         triggered_by="test",
+        governance_token_id=uuid4(),
     )
 
 

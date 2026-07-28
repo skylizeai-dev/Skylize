@@ -230,6 +230,7 @@ async def test_path4_judge_threads_run_context_correlation_and_agent_id() -> Non
     ctx = RunContext(
         org_id=ORG, run_id=str(uuid4()), workflow_id="wf_demo",
         correlation_id=str(correlation_id), thread_id="t1", triggered_by="test",
+        governance_token_id=uuid4(),
     )
 
     await acts.run_judge_verification(
@@ -244,3 +245,39 @@ async def test_path4_judge_threads_run_context_correlation_and_agent_id() -> Non
     assert req.correlation_id == correlation_id
     assert req.agent_id == "draft_copy_agent"
     assert req.org_id == ORG
+
+
+async def test_path4_judge_passes_distinct_governance_token_and_correlation_id() -> None:
+    """The judge egress must carry the run's governance token id as
+    ``governance_token_id`` and the run correlation id as ``correlation_id`` — two
+    DISTINCT values. Aliasing them (the pre-fix bug at activities.py, where both
+    were set to ctx.correlation_id) would make the ai_cost_ledger row on the judge
+    path record run_id == correlation_id, violating cost_ledger.py:114.
+    """
+    gw = _CapturingGateway()
+    acts = WorkflowActivities(
+        repo=None, builder=None, judge=LLMJudge(gw), minter=None  # type: ignore[arg-type]
+    )
+    governance_token_id = uuid4()
+    correlation_id = uuid4()
+    assert governance_token_id != correlation_id
+    ctx = RunContext(
+        org_id=ORG, run_id=str(uuid4()), workflow_id="wf_demo",
+        correlation_id=str(correlation_id), thread_id="t1", triggered_by="test",
+        governance_token_id=governance_token_id,
+    )
+
+    await acts.run_judge_verification(
+        JudgeRequest(
+            ctx=ctx, node_name="draft_copy", output={"copy": "fine"},
+            success_criteria={"tone": "neutral"}, agent_id="draft_copy_agent",
+        )
+    )
+
+    assert len(gw.generate_requests) == 1
+    req = gw.generate_requests[0]
+    # The two attribution ids reaching the adapter are the two distinct RunContext
+    # ids — governance token id for the ledger run key, correlation id for tracing.
+    assert req.governance_token_id == governance_token_id
+    assert req.correlation_id == correlation_id
+    assert req.governance_token_id != req.correlation_id

@@ -35,6 +35,19 @@ class RunContext:
     correlation_id: str
     thread_id: str
     triggered_by: str
+    # The run's governance token id — DISTINCT from correlation_id. It is the
+    # ai_cost_ledger run key (cost_ledger.py:114 "run_id == governance token id"),
+    # so it must never be aliased to correlation_id: a judge-path ledger row that
+    # recorded run_id == correlation_id would misattribute the charge. Typed as
+    # UUID (not str) on purpose — a caller that hands over the wrong id, e.g. the
+    # correlation_id, fails to type-check instead of silently recording a wrong
+    # attribution. It MUST be populated by the workflow definitions from the token
+    # the minter mints at run start; the minter is currently None
+    # (worker.py:51-55) and no workflow definitions are registered yet
+    # (worker.py:19-21), so today only tests construct RunContext. Appended last
+    # so any positional construction of the older six-field shape fails loudly
+    # rather than silently shifting fields onto it.
+    governance_token_id: UUID
 
 
 @dataclasses.dataclass
@@ -123,7 +136,7 @@ class WorkflowActivities:
             "workflow_id": req.ctx.workflow_id,
             "node": req.node_name,
             "org_id": req.ctx.org_id,
-            "governance_token_id": req.ctx.correlation_id,
+            "governance_token_id": req.ctx.governance_token_id,
             "correlation_id": req.ctx.correlation_id,
             "agent_id": req.agent_id,
         }
