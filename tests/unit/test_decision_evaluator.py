@@ -11,6 +11,7 @@ from uuid import uuid4
 from skylize.app.decision_engine.evaluator import (
     STAGE_AUTHORITY,
     STAGE_CONFLICT,
+    STAGE_EXECUTE,
     STAGE_POLICY,
     STAGE_SECURITY,
     DecisionEvaluator,
@@ -387,6 +388,65 @@ async def test_hitl_brand_legal_sensitive_defers() -> None:
     )
     assert result.outcome == "deferred_to_human"
     assert result.hitl_trigger == HumanInLoopTrigger.BRAND_LEGAL_SENSITIVE.value
+
+
+# -- synchronous agent-execution vertical (D6/K1/K2) -----------------------
+async def test_agent_execute_external_publication_defers() -> None:
+    # hook_generator_agent declares FIRST_EXTERNAL_LAUNCH -> its deliverable is
+    # destined for external publication -> deferred_to_human (D6/K1).
+    result = await _evaluator().evaluate(
+        make_proposal(
+            agent="hook_generator_agent", action_kind="agent.execute", partition="ax:defer"
+        )
+    )
+    assert result.outcome == "deferred_to_human"
+    assert result.stage_failed_at == STAGE_EXECUTE
+    assert result.hitl_trigger == HumanInLoopTrigger.FIRST_EXTERNAL_LAUNCH.value
+    assert result.routed_to  # escalation target for the human
+    assert any("external_publication" in r for r in result.reasons)
+
+
+async def test_agent_execute_no_trigger_approves() -> None:
+    # ad_copy_agent declares no human_in_loop_triggers -> "everything else
+    # approves" (D6). The approve is produced by the vertical gate explicitly.
+    result = await _evaluator().evaluate(
+        make_proposal(
+            agent="ad_copy_agent", action_kind="agent.execute", partition="ax:approve"
+        )
+    )
+    assert result.outcome == "approved"
+    assert result.stages_completed[-1] == STAGE_EXECUTE
+
+
+async def test_agent_execute_unhandled_trigger_fails_closed_rejected() -> None:
+    # copy_director declares BRAND_LEGAL_SENSITIVE, NOT the external-publication
+    # trigger. The synchronous vertical cannot honour it, so it fails closed
+    # (rejected) rather than silently approving (owner decision K2). This is the
+    # "unmatched action_kind" outcome: rejected, fail-closed.
+    result = await _evaluator().evaluate(
+        make_proposal(
+            agent="copy_director", action_kind="agent.execute", partition="ax:reject"
+        )
+    )
+    assert result.outcome == "rejected"
+    assert result.stage_failed_at == STAGE_EXECUTE
+    assert any("unhandled_trigger" in r for r in result.reasons)
+
+
+async def test_agent_execute_never_rides_generic_default_approve() -> None:
+    # An agent.execute proposal is decided by the vertical gate, never by the
+    # generic six-stage default-approve: a would-otherwise-pass proposal from an
+    # agent with an unhandled trigger is rejected, and its stages_completed stops
+    # at the vertical gate (scoring/capital/conflict/hitl never run).
+    result = await _evaluator().evaluate(
+        make_proposal(
+            agent="copy_director", action_kind="agent.execute", partition="ax:noride"
+        )
+    )
+    assert result.outcome != "approved"
+    assert "scoring" not in result.stages_completed
+    assert "hitl_gate" not in result.stages_completed
+    assert result.stages_completed[-1] == STAGE_EXECUTE
 
 
 # -- happy path: all six stages pass ---------------------------------------
