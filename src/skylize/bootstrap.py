@@ -34,6 +34,7 @@ from .app.decision_engine import DecisionEngine
 from .app.deliverables.service import DeliverableService
 from .app.governance.authority import GovernanceAuthority
 from .app.governance.broadcast import GovernanceBroadcast
+from .app.hitl.service import HitlQueueService
 from .app.orchestrator import LLMStepRunner, Orchestrator
 from .app.tenants.service import TenantService
 from .config import Settings, get_settings
@@ -76,6 +77,7 @@ class Container:
     deliverables: DeliverableService
     credential_vault: CredentialVault
     agent_execution: AgentExecutionService
+    hitl: HitlQueueService
     knowledge_ingestion: KnowledgeIngestionService | None
     decision_engine: DecisionEngine
     # The single shared content-gated gateway reference. Anything that makes
@@ -368,12 +370,20 @@ async def build_container(settings: Settings | None = None) -> Container:
         evaluator=decision_engine.evaluator, hitl=hitl_repo, bus=bus,
         governed_org_ids=frozenset(settings.decision_engine_org_ids),
     )
+    # The human side of the gate: list pending escalations, approve (which
+    # replays the stored request through the SAME agent_execution path with the
+    # gate satisfied by the human verdict) or reject. Same repo instance the
+    # gate enqueues into.
+    hitl_service = HitlQueueService(
+        repo=hitl_repo, execution=agent_execution, audit=audit, bus=bus,
+    )
 
     return Container(
         settings=settings, bus=bus, audit=audit, authority=authority,
         orchestrator=orchestrator, tenants=tenants, api_keys=api_keys,
         user_auth=user_auth, deliverables=deliverables,
         credential_vault=credential_vault, agent_execution=agent_execution,
+        hitl=hitl_service,
         knowledge_ingestion=knowledge_ingestion, decision_engine=decision_engine,
         llm=llm, _closers=closers, db=db,
     )

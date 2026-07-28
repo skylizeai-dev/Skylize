@@ -27,6 +27,7 @@ from .routes import (
     auth,
     credentials,
     deliverables,
+    hitl,
     kill_switch,
     knowledge,
     tenants,
@@ -76,6 +77,7 @@ def create_app() -> FastAPI:
     app.include_router(agent_prompts.router)
     app.include_router(credentials.router)
     app.include_router(deliverables.router)
+    app.include_router(hitl.router)
     app.include_router(workflows.router)
     app.include_router(kill_switch.router)
     app.include_router(knowledge.router)
