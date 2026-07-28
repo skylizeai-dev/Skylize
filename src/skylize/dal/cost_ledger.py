@@ -406,3 +406,36 @@ class CostLedgerDAL:
         return micros_to_unit(
             await self.period_total_micros(org_id, provider, billing_period)
         )
+
+    async def org_period_total_micros(
+        self, org_id: str, billing_period: str
+    ) -> int:
+        """Org-wide SUM of ``cost_micros`` across ALL providers for a period.
+
+        The org spend ceiling is ORG-WIDE, across every provider (owner decision
+        D8), so the aggregate it checks against must NOT be provider-scoped. This
+        is ``period_total_micros`` with the ``provider`` filter dropped and
+        otherwise IDENTICAL:
+
+          * kept identical — runs inside ``tenant_session(org_id)`` so the RLS
+            ``tenant_isolation`` policy scopes the SUM to this org; sums
+            ``cost_micros`` (charges NET of reversals, since reversals are
+            negative rows); ``COALESCE(..., 0)`` so an org with no rows totals 0;
+            returns an exact integer (micro-USD), never a float;
+          * changed — WHERE has no ``provider`` predicate, so the total spans
+            every provider in the period.
+
+        The existing provider-scoped ``period_total_micros`` is left untouched —
+        other callers (reconciliation against a single provider invoice line) rely
+        on it.
+        """
+        async with self._db.tenant_session(org_id) as conn:
+            total = await conn.fetchval(
+                """
+                SELECT COALESCE(SUM(cost_micros), 0)
+                FROM ai_cost_ledger
+                WHERE billing_period = $1
+                """,
+                billing_period,
+            )
+        return int(total)
