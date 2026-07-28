@@ -42,8 +42,9 @@ from .gateway import (
 )
 
 if TYPE_CHECKING:
-    from ...dal.cost_ledger import CostLedgerDAL
+    from ...dal.cost_ledger import CostLedgerDAL, PriceSnapshot
     from ...tools.base import ToolDefinition
+    from .spend_ceiling import SpendCeilingEnforcer
     from .structured import StructuredRequest
 
 log = logging.getLogger(__name__)
@@ -136,6 +137,39 @@ def _normalize_anthropic_message(
     return "".join(text_parts), blocks
 
 
+def _generate_input_chars(request: LLMGenerateRequest) -> int:
+    """Total input character count for the single-shot `generate` egress.
+
+    Feeds the spend-ceiling input-token estimate (see spend_ceiling.py). Counts
+    the prompt plus the system prompt — the whole input payload the provider will
+    tokenize.
+    """
+    return len(request.prompt) + len(request.system or "")
+
+
+def _tools_input_chars(
+    request: LLMGenerateWithToolsRequest, tools: list["ToolDefinition"]
+) -> int:
+    """Total input character count for the `generate_with_tools` egress.
+
+    Sums the system prompt, every message text / tool-result / tool-input block,
+    and the tool definitions (id, description, JSON schema) — all of which count
+    toward the provider's input tokens. Feeds the spend-ceiling estimate, which
+    then biases the token count high.
+    """
+    total = len(request.system or "")
+    for message in request.messages:
+        for block in message.content:
+            total += len(block.text or "")
+            total += len(block.tool_output or "")
+            if block.tool_input:
+                total += len(json.dumps(block.tool_input, default=str))
+    for tool in tools:
+        total += len(tool.tool_id) + len(tool.description)
+        total += len(json.dumps(tool.input_schema.model_json_schema(), default=str))
+    return total
+
+
 class AnthropicAdapter:
     """Live Anthropic Claude adapter. Requires `pip install anthropic`."""
 
@@ -150,6 +184,7 @@ class AnthropicAdapter:
         langfuse_client: Any = None,
         tracer: Any = None,
         cost_ledger: "CostLedgerDAL | None" = None,
+        spend_ceiling: "SpendCeilingEnforcer | None" = None,
     ) -> None:
         self._settings = settings
         # Billing-grade cost ledger (ADR-0006). When wired (postgres backend),
@@ -158,6 +193,11 @@ class AnthropicAdapter:
         # the adapter keeps the documented Settings-float fallback for
         # cost_usd_micros and records nothing.
         self._cost_ledger = cost_ledger
+        # Org spend-ceiling gate (migration 0014). Wired alongside the cost ledger
+        # on the postgres backend: BOTH egresses refuse a call before egress when
+        # period-to-date spend plus a biased-high estimate would breach the
+        # org-wide ceiling. None (memory backend / unit harnesses) => no gate.
+        self._spend_ceiling = spend_ceiling
         self._api_key = api_key or str(getattr(settings, "anthropic_api_key", "") or "")
         # Empty string when unset; `_client_kwargs` omits base_url in that case so
         # the SDK falls back to its own default endpoint resolution (env + built-in).
@@ -231,21 +271,26 @@ class AnthropicAdapter:
                 f"tokens_used_so_far={request.tokens_used_so_far or 0})"
             )
 
-    async def _require_price(self, *, org_id: str, model_id: str) -> None:
-        """PRE-CALL pricing gate (owner decision D1).
+    async def _require_price(
+        self, *, org_id: str, model_id: str
+    ) -> "PriceSnapshot | None":
+        """PRE-CALL pricing gate (owner decision D1); returns the resolved price.
 
         When the cost ledger is wired, the concrete model must have an active
         model_pricing row BEFORE any provider egress — a pricing gap refuses
         the call with a typed error instead of producing an unrecordable
-        (budget-cap-evading) charge. Without a ledger there is nothing to
-        check against; the documented Settings-float fallback applies.
+        (budget-cap-evading) charge. The resolved ``PriceSnapshot`` is returned
+        so the spend-ceiling gate can estimate the pending call's cost from the
+        SAME prices the ledger will later charge with (no second price lookup, no
+        unit drift). Without a ledger there is nothing to check against — returns
+        None and the documented Settings-float fallback applies.
         """
         if self._cost_ledger is None:
-            return
+            return None
         from ...dal.cost_ledger import PricingNotFound
 
         try:
-            await self._cost_ledger.resolve_price_for(
+            return await self._cost_ledger.resolve_price_for(
                 org_id=org_id,
                 provider=self._PROVIDER,
                 model=model_id,
@@ -257,6 +302,36 @@ class AnthropicAdapter:
                 "refusing the call before egress (a pricing gap must not "
                 "become a way to evade budget caps)"
             ) from exc
+
+    async def _enforce_spend_ceiling(
+        self,
+        request: LLMGenerateRequest | LLMGenerateWithToolsRequest,
+        *,
+        price: "PriceSnapshot | None",
+        attempted_tool: str,
+        input_chars: int,
+    ) -> None:
+        """Refuse before egress when the org spend ceiling would be breached.
+
+        Active only when the enforcer is wired AND a price was resolved (both
+        arrive together with the cost ledger on the postgres backend). Mirrors how
+        ``_require_price`` / ``_settle_cost`` are gated on a wired ledger: on the
+        memory backend / unit harnesses there is no ceiling store, so this is a
+        no-op. Raises ``OrgSpendCeilingExceeded`` (from the enforcer) on refusal,
+        BEFORE any SDK client is constructed or called.
+        """
+        if self._spend_ceiling is None or price is None:
+            return
+        await self._spend_ceiling.enforce(
+            org_id=request.org_id,
+            agent_id=request.agent_id,
+            governance_token_id=request.governance_token_id,
+            correlation_id=request.correlation_id,
+            attempted_tool=attempted_tool,
+            input_chars=input_chars,
+            requested_max_tokens=request.requested_max_tokens,
+            price=price,
+        )
 
     @staticmethod
     def _parse_retry_after(exc: anthropic.APIStatusError) -> float | None:
@@ -426,7 +501,15 @@ class AnthropicAdapter:
     async def generate(self, request: LLMGenerateRequest) -> LLMGenerateResponse:
         self._check_budget(request)
         model_id = self._concrete_model(request.model)
-        await self._require_price(org_id=request.org_id, model_id=model_id)
+        price = await self._require_price(org_id=request.org_id, model_id=model_id)
+        # Org spend-ceiling gate — refuses BEFORE the SDK client is built/called,
+        # so a refused call never reaches the provider and never writes a ledger row.
+        await self._enforce_spend_ceiling(
+            request,
+            price=price,
+            attempted_tool="llm.generate",
+            input_chars=_generate_input_chars(request),
+        )
 
         span = self._tracer.start_span("llm.generate") if self._tracer is not None else None
         if span is not None:
@@ -488,7 +571,15 @@ class AnthropicAdapter:
     ) -> LLMGenerateResponse:
         self._check_budget(request)
         model_id = self._concrete_model(request.model)
-        await self._require_price(org_id=request.org_id, model_id=model_id)
+        price = await self._require_price(org_id=request.org_id, model_id=model_id)
+        # Org spend-ceiling gate — same pre-egress refusal as generate(), on the
+        # second egress. Refuses before the async SDK client is built/called.
+        await self._enforce_spend_ceiling(
+            request,
+            price=price,
+            attempted_tool="llm.generate_with_tools",
+            input_chars=_tools_input_chars(request, tools),
+        )
         anthropic_tools, name_map = _to_anthropic_tools(tools)
         kwargs: dict[str, Any] = dict(
             model=model_id,

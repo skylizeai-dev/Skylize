@@ -289,15 +289,34 @@ async def build_container(settings: Settings | None = None) -> Container:
     llm: LLMGateway
     if settings.anthropic_api_key:
         from .adapters.llm.anthropic_adapter import AnthropicAdapter
+        from .adapters.llm.spend_ceiling import SpendCeilingEnforcer
         from .dal.cost_ledger import CostLedgerDAL
+        from .dal.org_spend_ceiling import OrgSpendCeilingDAL
 
         # Billing-grade cost ledger (ADR-0006): wired on the postgres backend
         # so every Anthropic egress is price-gated pre-call and recorded
         # post-call. On the memory backend there is no durable store, so the
         # adapter falls back to Settings-float estimates (logged at WARNING).
+        cost_ledger = CostLedgerDAL(db) if db is not None else None
+        # Org spend-ceiling gate (migration 0014): wired alongside the ledger on
+        # the postgres backend. Both egresses refuse a call before egress when
+        # period-to-date spend plus a biased-high estimate would breach the
+        # org-wide ceiling; a missing ceiling row fails closed. No ceiling store on
+        # the memory backend, so the gate is left unwired (None) there.
+        spend_ceiling = (
+            SpendCeilingEnforcer(
+                ceiling_dal=OrgSpendCeilingDAL(db),
+                cost_ledger=cost_ledger,
+                audit=audit,
+                bus=bus,
+            )
+            if db is not None and cost_ledger is not None
+            else None
+        )
         llm = AnthropicAdapter(
             settings=settings,
-            cost_ledger=CostLedgerDAL(db) if db is not None else None,
+            cost_ledger=cost_ledger,
+            spend_ceiling=spend_ceiling,
         )
     elif settings.llm_demo_mode:
         llm = DemoLLMAdapter()
