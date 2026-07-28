@@ -12,11 +12,13 @@ it on the postgres backend, so the ledger-write seam and the ceiling gate run fo
 real. A missing ceiling row refuses every call, so each test SEEDS a ceiling for
 its org via the AUDITED DAL setter (not a raw INSERT) — the real path (step 10).
 
-Two deliberate mechanisms keep these deterministic WITHOUT hiding any HTTP:
-  * ``x-should-retry: false`` — a header the real SDK honours to suppress its OWN
-    internal retry (default max_retries=2). Setting it isolates the ADAPTER's
-    retry policy, so the server sees exactly one request per adapter attempt. The
-    dedicated amplification test OMITS it to reveal the SDK's compounding retries.
+Two facts keep these deterministic WITHOUT hiding any HTTP:
+  * the adapter builds BOTH SDK clients with ``max_retries=0`` (owner decision
+    D1 — the adapter is the SOLE retry authority), so the server-side request
+    count IS the adapter's attempt count. NO test sends ``x-should-retry: false``
+    (the header that previously suppressed the SDK's own internal retry, default
+    max_retries=2): with the header absent, every attempt count below is direct
+    proof the SDK's internal retry stays disabled.
   * a ``_retry_delay`` spy that records the delay the adapter WOULD sleep and then
     sleeps 0 — instead of patching the process-global ``asyncio.sleep`` (which
     would corrupt the in-process async server's own ``await asyncio.sleep``).
@@ -32,16 +34,15 @@ EXPLICITLY SYNTHETIC (1 micro-USD/token), never real provider prices.
 from __future__ import annotations
 
 import contextlib
-import functools
 import json
 import logging
+import time
 import uuid
 from collections.abc import Iterator
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 import anthropic
-import httpx
 import pytest
 import pytest_asyncio
 
@@ -52,9 +53,11 @@ from skylize.adapters.llm.gateway import (
     LLMContentBlock,
     LLMGenerateRequest,
     LLMGenerateWithToolsRequest,
+    LLMMalformedResponse,
     LLMMessage,
     LLMProviderUnavailable,
     LLMRateLimited,
+    LLMTimeout,
 )
 from skylize.adapters.llm.spend_ceiling import SpendCeilingEnforcer
 from skylize.app.audit.service import AuditService
@@ -525,13 +528,12 @@ async def test_g5_429_retry_after_attempts_and_delay(app_db, fake_provider, admi
         await _seed_all(app_db, admin_conn, org)
         adapter, _bus, _repo, _ledger = _make_adapter(app_db, base_url)
 
-        # x-should-retry:false suppresses the SDK's OWN retry so the server count
-        # equals the ADAPTER's attempts. Retry-After=3 must drive the delay.
+        # No x-should-retry header: max_retries=0 (D1) already guarantees the
+        # server count equals the ADAPTER's attempts. Retry-After=3 must drive
+        # the delay.
         fake.program(
-            status(429, error_type="rate_limit_error",
-                   headers={"retry-after": "3", "x-should-retry": "false"}),
-            status(429, error_type="rate_limit_error",
-                   headers={"retry-after": "3", "x-should-retry": "false"}),
+            status(429, error_type="rate_limit_error", headers={"retry-after": "3"}),
+            status(429, error_type="rate_limit_error", headers={"retry-after": "3"}),
             success(text="finally ok", message_id="msg_g5_ok"),
         )
         with _delay_spy(adapter) as delays:
@@ -560,12 +562,12 @@ async def test_g5b_429_exhausted_rate_limited_no_ledger_row(app_db, fake_provide
             app_db, base_url, llm_retry_max_attempts=2)
 
         fake.program(status(429, error_type="rate_limit_error",
-                            headers={"retry-after": "1", "x-should-retry": "false"}))
+                            headers={"retry-after": "1"}))
         with _delay_spy(adapter) as delays:
             with pytest.raises(LLMRateLimited):
                 await adapter.generate(_request(org))
 
-        assert fake.attempts == 2  # bounded by llm_retry_max_attempts
+        assert fake.attempts == 2  # bounded by llm_retry_max_attempts, no SDK amplification
         assert delays == [1.0]  # one sleep between the two attempts, Retry-After honoured
         assert await _ledger_rows(app_db, org) == []  # nothing served => no ledger row
     finally:
@@ -587,8 +589,7 @@ async def test_async_egress_429_retried_then_succeeds(app_db, fake_provider, adm
         adapter, _bus, _repo, _ledger = _make_adapter(app_db, base_url)
 
         fake.program(
-            status(429, error_type="rate_limit_error",
-                   headers={"retry-after": "2", "x-should-retry": "false"}),
+            status(429, error_type="rate_limit_error", headers={"retry-after": "2"}),
             success(text="tools ok", message_id="msg_async_ok"),
         )
         req = _tools_request(org, [
@@ -614,7 +615,7 @@ async def test_async_egress_5xx_exhausted_provider_unavailable(app_db, fake_prov
         await _seed_all(app_db, admin_conn, org)
         adapter, _bus, _repo, _ledger = _make_adapter(app_db, base_url, llm_retry_max_attempts=2)
 
-        fake.program(status(503, error_type="api_error", headers={"x-should-retry": "false"}))
+        fake.program(status(503, error_type="api_error"))
         req = _tools_request(org, [
             LLMMessage(role="user", content=[LLMContentBlock(kind="text", text="hi")]),
         ])
@@ -629,7 +630,9 @@ async def test_async_egress_5xx_exhausted_provider_unavailable(app_db, fake_prov
 
 
 # ===========================================================================
-# G6 — 5xx: bounded retries, then LLMProviderUnavailable
+# G6 — 5xx: bounded retries, then LLMProviderUnavailable. With x-should-retry
+# ABSENT, total HTTP attempts == llm_retry_max_attempts EXACTLY — the direct
+# proof that no SDK-internal retry runs underneath the adapter's policy (D1).
 # ===========================================================================
 
 
@@ -641,12 +644,14 @@ async def test_g6_5xx_bounded_then_provider_unavailable(app_db, fake_provider, a
         await _seed_all(app_db, admin_conn, org)
         adapter, _bus, _repo, _ledger = _make_adapter(app_db, base_url)  # max_attempts=3
 
-        fake.program(status(500, error_type="api_error", headers={"x-should-retry": "false"}))
+        fake.program(status(500, error_type="api_error"))
         with _delay_spy(adapter) as delays:
             with pytest.raises(LLMProviderUnavailable):
                 await adapter.generate(_request(org))
 
-        assert fake.attempts == 3  # bounded retries reached the socket
+        # EXACTLY llm_retry_max_attempts requests reached the socket, no more:
+        # the SDK contributed zero hidden attempts under the adapter's three.
+        assert fake.attempts == 3
         assert len(delays) == 2  # two jittered backoff sleeps between three attempts
         assert all(d > 0 for d in delays)  # 5xx uses backoff, not a zero delay
         assert await _ledger_rows(app_db, org) == []  # nothing served
@@ -714,34 +719,62 @@ async def test_g8_401_fail_closed_no_key_material(app_db, fake_provider, admin_c
 
 
 # ===========================================================================
-# G9 — timeout: clean cancellation, and NO ledger row
+# G9 — timeout: typed LLMTimeout within the CONFIGURED bound (D2/D3), exactly
+# one HTTP request (a possibly-billed call is never re-sent), NO ledger row
 # ===========================================================================
 
 
 @requires_app_role
-async def test_g9_timeout_sync_egress_no_ledger_row(app_db, fake_provider, admin_conn) -> None:
-    """Sync egress: a hanging server + a real short client timeout -> the SDK's own
-    APITimeoutError, cleanly, and no ledger row (settle_cost is never reached).
-
-    The timeout is injected onto the REAL SDK client constructor (a short timeout
-    + max_retries=0) so the genuine SDK timeout path fires fast and once; the
-    request recorder proves the socket was opened. See the step-12 findings for
-    why a short timeout must be injected (the adapter exposes no timeout setting)."""
+async def test_g9_hang_typed_timeout_within_configured_bound_sync(app_db, fake_provider, admin_conn) -> None:
+    """Sync egress: a hanging server + Settings.llm_timeout_seconds=1.0 (no
+    constructor patching — the knob exists now, owner decision D3) raises the
+    TYPED LLMTimeout well before the 4s hang completes, chains the SDK's
+    APITimeoutError, sends exactly ONE request (a timed-out call may already be
+    billed provider-side, so it is never re-sent — owner decision D2), and
+    writes no ledger row."""
     base_url, fake = fake_provider
     org = _org()
     try:
         await _seed_all(app_db, admin_conn, org)
-        adapter, _bus, _repo, _ledger = _make_adapter(app_db, base_url)
+        adapter, _bus, _repo, _ledger = _make_adapter(
+            app_db, base_url, llm_timeout_seconds=1.0)
 
-        real_cls = anthropic.Anthropic
-        short = functools.partial(real_cls, timeout=httpx.Timeout(1.0), max_retries=0)
         fake.program(hang(seconds=4.0))
-        with patch("skylize.adapters.llm.anthropic_adapter.anthropic.Anthropic", short):
-            with pytest.raises(anthropic.APITimeoutError):
-                await adapter.generate(_request(org))
+        started = time.monotonic()
+        with pytest.raises(LLMTimeout) as ei:
+            await adapter.generate(_request(org))
+        elapsed = time.monotonic() - started
 
-        assert fake.attempts == 1  # the request DID reach the socket (real HTTP)
+        # The configured 1s timeout fired — not the 4s hang, not the SDK's ~600s.
+        assert elapsed < 3.0
+        assert isinstance(ei.value.__cause__, anthropic.APITimeoutError)  # chained
+        assert fake.attempts == 1  # one socket open; the timeout was NOT retried
         assert await _ledger_rows(app_db, org) == []  # no partial/timeout row
+    finally:
+        await _cleanup(admin_conn, org)
+
+
+@requires_app_role
+async def test_g9_hang_typed_timeout_async_egress(app_db, fake_provider, admin_conn) -> None:
+    """Async (tools) egress: the SAME Settings-driven timeout raises the same
+    typed LLMTimeout (the retry helper is shared), one request, no ledger row."""
+    base_url, fake = fake_provider
+    org = _org()
+    try:
+        await _seed_all(app_db, admin_conn, org)
+        adapter, _bus, _repo, _ledger = _make_adapter(
+            app_db, base_url, llm_timeout_seconds=1.0)
+
+        fake.program(hang(seconds=4.0))
+        req = _tools_request(org, [
+            LLMMessage(role="user", content=[LLMContentBlock(kind="text", text="hi")]),
+        ])
+        with pytest.raises(LLMTimeout) as ei:
+            await adapter.generate_with_tools(req, tools=[_demo_tool()])
+
+        assert isinstance(ei.value.__cause__, anthropic.APITimeoutError)
+        assert fake.attempts == 1  # never retried on the async egress either
+        assert await _ledger_rows(app_db, org) == []
     finally:
         await _cleanup(admin_conn, org)
 
@@ -771,14 +804,17 @@ async def test_g9_timeout_async_egress_clean_cancellation(app_db, fake_provider,
 
 
 # ===========================================================================
-# G10 — malformed/truncated body: typed error, no partial result accepted
+# G10 — malformed/truncated body: TYPED LLMMalformedResponse (D4), the parser
+# error chained, exactly one request, no partial result, NO ledger row
 # ===========================================================================
 
 
 @requires_app_role
-async def test_g10_malformed_body_no_partial_result(app_db, fake_provider, admin_conn) -> None:
-    """A truncated 200 body: the SDK's own parser rejects it (json.JSONDecodeError,
-    a FINDING -- the adapter maps no typed LLM error for this), and crucially NO
+async def test_g10_malformed_body_typed_error_no_partial_result(app_db, fake_provider, admin_conn) -> None:
+    """A truncated 200 body maps to the typed LLMMalformedResponse (owner
+    decision D4) with the SDK parser's json.JSONDecodeError chained. NOT
+    retried (one request only): a served-but-unparseable 200 means the provider
+    completed — and billed — the generation, so a retry would double-spend. No
     partial result is accepted and NO ledger row is written."""
     base_url, fake = fake_provider
     org = _org()
@@ -787,46 +823,137 @@ async def test_g10_malformed_body_no_partial_result(app_db, fake_provider, admin
         adapter, _bus, _repo, _ledger = _make_adapter(app_db, base_url)
 
         fake.program(malformed())
-        with pytest.raises(json.JSONDecodeError):
+        with pytest.raises(LLMMalformedResponse) as ei:
             await adapter.generate(_request(org))
 
-        assert fake.attempts == 1  # not retried (a parse error is not an APIStatusError)
+        assert isinstance(ei.value.__cause__, json.JSONDecodeError)  # chained
+        assert fake.attempts == 1  # a parse failure is never retried
         assert await _ledger_rows(app_db, org) == []  # no partial result recorded
     finally:
         await _cleanup(admin_conn, org)
 
 
 # ===========================================================================
-# FINDING (step 12) — the SDK performs its OWN retries on top of the adapter's.
-# A single adapter attempt against a persistent 429/500 produces THREE HTTP
-# requests (SDK default max_retries=2). This is invisible to any mocked test.
+# D1 (inverse of the step-12 finding) — the SDK's internal retry is DISABLED.
+# REPLACES test_finding_sdk_internal_retry_amplifies_attempts, which proved the
+# pre-fix amplification (1 adapter attempt -> 3 HTTP requests, SDK default
+# max_retries=2). With max_retries=0 and x-should-retry ABSENT, exactly ONE
+# HTTP request reaches the server per adapter attempt.
 # ===========================================================================
 
 
 @requires_app_role
-async def test_finding_sdk_internal_retry_amplifies_attempts(app_db, fake_provider, admin_conn) -> None:
+async def test_d1_sdk_internal_retry_disabled_one_request_per_attempt(app_db, fake_provider, admin_conn) -> None:
     base_url, fake = fake_provider
     org = _org()
     try:
         await _seed_all(app_db, admin_conn, org)
-        # ONE adapter attempt; the fake omits x-should-retry, so the SDK's own
-        # retry policy is in force underneath the single adapter attempt.
+        # ONE adapter attempt against a persistent 429 with NO x-should-retry
+        # header: any SDK-internal retry would show up as extra requests.
         adapter, _bus, _repo, _ledger = _make_adapter(
             app_db, base_url, llm_retry_max_attempts=1)
 
         fake.program(status(429, error_type="rate_limit_error", headers={"retry-after": "0"}))
         with pytest.raises(LLMRateLimited):
             await adapter.generate(_request(org))
-        # 1 adapter attempt amplified to 3 real HTTP requests by the SDK (1 + 2
-        # internal retries). This is the flagged finding, proven over real HTTP.
-        assert fake.attempts == 3
+        # Exactly one real HTTP request per adapter attempt (was 3 pre-fix).
+        assert fake.attempts == 1
 
-        # Same amplification on 5xx.
+        # Same on a persistent 500.
         fake.program(status(500, error_type="api_error"))
         with pytest.raises(LLMProviderUnavailable):
             await adapter.generate(_request(org))
-        assert fake.attempts == 3
+        assert fake.attempts == 1
 
         assert await _ledger_rows(app_db, org) == []  # nothing served on either
+    finally:
+        await _cleanup(admin_conn, org)
+
+
+# ===========================================================================
+# Connection failure (step 8) — a real refused connection maps to the typed
+# LLMProviderUnavailable immediately (no retry: this seam cannot prove the
+# provider never received — and will not bill — the request), no ledger row.
+# ===========================================================================
+
+
+@requires_app_role
+async def test_connection_refused_maps_to_provider_unavailable(app_db, admin_conn) -> None:
+    org = _org()
+    # Start and fully stop a real server so its ephemeral port now REFUSES
+    # connections — a genuine transport-level failure, not a mocked one.
+    with running_fake_provider() as (base_url, _fake):
+        pass
+    try:
+        await _seed_all(app_db, admin_conn, org)
+        adapter, _bus, _repo, _ledger = _make_adapter(app_db, base_url)
+
+        with pytest.raises(LLMProviderUnavailable) as ei:
+            await adapter.generate(_request(org))
+
+        cause = ei.value.__cause__
+        assert isinstance(cause, anthropic.APIConnectionError)  # chained SDK error
+        assert not isinstance(cause, anthropic.APITimeoutError)  # the non-timeout path
+        assert await _ledger_rows(app_db, org) == []  # nothing served, nothing recorded
+    finally:
+        await _cleanup(admin_conn, org)
+
+
+# ===========================================================================
+# Key material — the NEW error paths (timeout, malformed body, connection
+# failure) leak no key material into the message, anywhere down the
+# __cause__/__context__ chain, any log record, or any trace attribute.
+# ===========================================================================
+
+
+def _assert_exception_chain_clean(exc: BaseException, secret: str) -> None:
+    """Walk the full __cause__/__context__ chain; no link may carry the key."""
+    seen: set[int] = set()
+    node: BaseException | None = exc
+    while node is not None and id(node) not in seen:
+        seen.add(id(node))
+        assert secret not in str(node)
+        assert secret not in repr(node)
+        node = node.__cause__ or node.__context__
+
+
+@requires_app_role
+async def test_new_error_paths_carry_no_key_material(app_db, fake_provider, admin_conn, caplog) -> None:
+    base_url, fake = fake_provider
+    org = _org()
+    secret = "sk-SECRETKEY-DO-NOT-LEAK-9b2d41"
+    span = MagicMock()
+    tracer = MagicMock()
+    tracer.start_span.return_value = span
+    try:
+        await _seed_all(app_db, admin_conn, org)
+        adapter, _bus, _repo, _ledger = _make_adapter(
+            app_db, base_url, api_key=secret, tracer=tracer, llm_timeout_seconds=1.0)
+
+        with caplog.at_level(logging.DEBUG):
+            # Timeout path (D2).
+            fake.program(hang(seconds=4.0))
+            with pytest.raises(LLMTimeout) as timeout_ei:
+                await adapter.generate(_request(org))
+            # Malformed-body path (D4).
+            fake.program(malformed())
+            with pytest.raises(LLMMalformedResponse) as malformed_ei:
+                await adapter.generate(_request(org))
+
+        # Connection-failure path — same secret-keyed adapter, dead port.
+        with running_fake_provider() as (dead_url, _f):
+            pass
+        adapter2, _bus2, _repo2, _ledger2 = _make_adapter(
+            app_db, dead_url, api_key=secret, tracer=tracer)
+        with caplog.at_level(logging.DEBUG):
+            with pytest.raises(LLMProviderUnavailable) as conn_ei:
+                await adapter2.generate(_request(org))
+
+        for ei in (timeout_ei, malformed_ei, conn_ei):
+            _assert_exception_chain_clean(ei.value, secret)
+        assert all(secret not in rec.getMessage() for rec in caplog.records)
+        span_attrs = " ".join(str(c) for c in span.set_attribute.call_args_list)
+        assert secret not in span_attrs
+        assert await _ledger_rows(app_db, org) == []  # none of the failures settled
     finally:
         await _cleanup(admin_conn, org)

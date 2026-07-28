@@ -464,3 +464,33 @@ async def test_base_url_passed_to_async_client_when_set() -> None:
         mock_cls.return_value.messages.create = AsyncMock(return_value=_mock_tools_response())
         await adapter.generate_with_tools(req, tools=[])
     assert mock_cls.call_args.kwargs.get("base_url") == "https://proxy.internal/v1"
+
+
+# ---------------------------------------------------------------------------
+# D1/D3 — SDK internal retry disabled; Settings-driven timeout. Asserted on
+# BOTH construction sites so the shared _client_kwargs helper cannot drift
+# between the two egresses.
+# ---------------------------------------------------------------------------
+
+
+async def test_sdk_internal_retry_disabled_and_timeout_set_on_sync_client() -> None:
+    adapter = _make_adapter()
+    req = _request()
+    mock_resp = _mock_anthropic_response()
+    with patch("skylize.adapters.llm.anthropic_adapter.anthropic.Anthropic") as mock_cls:
+        mock_cls.return_value.messages.create.return_value = mock_resp
+        await adapter.generate(req)
+    # The adapter is the sole retry authority (D1): the SDK must not retry.
+    assert mock_cls.call_args.kwargs["max_retries"] == 0
+    # Settings default (D3), not the SDK's ~600s default.
+    assert mock_cls.call_args.kwargs["timeout"] == 120.0
+
+
+async def test_sdk_internal_retry_disabled_and_timeout_set_on_async_client() -> None:
+    adapter = _make_adapter(llm_timeout_seconds=7.5)
+    req = _tools_request()
+    with patch("skylize.adapters.llm.anthropic_adapter.anthropic.AsyncAnthropic") as mock_cls:
+        mock_cls.return_value.messages.create = AsyncMock(return_value=_mock_tools_response())
+        await adapter.generate_with_tools(req, tools=[])
+    assert mock_cls.call_args.kwargs["max_retries"] == 0
+    assert mock_cls.call_args.kwargs["timeout"] == 7.5  # the override reaches the client
