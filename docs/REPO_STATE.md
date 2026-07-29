@@ -1,7 +1,8 @@
 # REPO_STATE — read-only audit mirror
 
 **Generated:** 2026-07-29 by a read-only audit (no source files modified; the only write is this file).
-**Describes commit:** `834153c9cc3c3da3415b0b22714e79d87440aacd` on branch `feat/durable-governance`.
+**Describes commit:** `834153c9cc3c3da3415b0b22714e79d87440aacd` on branch `feat/durable-governance` (figures re-verified and some resolved through 2026-07-29; see the dated notes inline).
+**See also:** `/CLAUDE.md` at the repo root — the short, durable orientation (architecture constraints, the two engines, the three ledgers, environment, testing) that points here for changing state.
 **Method:** code is ground truth; docs/comments/ADRs are claims tested against code. Every line carries a `file:line` citation, or an explicit **ABSENT** / **UNVERIFIED**. This is a mirror, not a plan — no recommendations.
 
 **Provenance note:** Part 2 items 8–13 were verified by subagents in a fan-out workflow; the other parts were verified directly in the main loop after 6 of 9 workflow agents aborted on a usage cap. Items marked UNVERIFIED are those a single session could not confirm cheaply; each states what confirmation would take.
