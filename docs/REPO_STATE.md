@@ -43,7 +43,7 @@ MYPY UNCHECKED SUBTREES: 5 — live: 1
 ### Branch topology / remote (A4, raw)
 - `git rev-parse main` = `603936a010b8c5ad08d6b893e5d07ba141951198`; `git rev-parse origin/main` = same. **main is fully pushed** — `git log origin/main..main` and `git log main..origin/main` both empty.
 - Current branch `feat/durable-governance` = `834153c9`, tracks `origin/feat/durable-governance` (`603936a0`) but is **46 commits ahead of that upstream** — all 46 unpushed.
-- **62 commits exist only on this machine** (`git log --oneline --all --not --remotes | wc -l` = 62): reachable from local refs, on no remote.
+- **62 commits exist only on this machine** (`git log --oneline --all --not --remotes | wc -l` = 62 at `834153c9`): reachable from local refs, on no remote. **Verified 2026-07-29 (Part 1):** this does **not** contradict "main fully pushed". The fast-forward hypothesis was tested — `git merge-base --is-ancestor feat/durable-governance origin/main` returns non-zero, so `feat/durable-governance`'s commits are genuinely absent from `origin/main`; the 62 live on unpushed feature branches, not on `main`. The count drifts +1 per new local commit (63 after the audit commit `65c2451a`, and higher after each Part-1/2/3 commit) until branches are pushed.
 - Remote: `origin https://github.com/skylizeai-dev/Skylize.git`. Only 6 local branches have upstreams (`feat/durable-governance`, `feat/grammar-gateway`, `feat/tool-dedup-convergence`, `release/console-m1`, plus `main`→origin/main and `fix/dal-ports-workflow-repo`→origin/main); **~44 local branches have never been pushed**.
 - 46 git worktrees registered (`git worktree list`); many `wt-*` worktrees sit exactly at `603936a0` (= main tip).
 
@@ -182,7 +182,11 @@ Prefix `SKYLIZE_`; source `src/skylize/config.py`. Behavior when absent:
 | feat/tool-dedup-convergence | cherry: 1 superseded (−) | 2026-06-28 | yes | **SUPERSEDED** |
 | feat/workflow-repository-postgres | cherry: 1 superseded (−) | 2026-07-13 | no | **SUPERSEDED** |
 
-STRANDED = 10, SUPERSEDED = 2. 8 of the 10 stranded have no remote (fully local-only). Finer ABANDONED-vs-STRANDED classification beyond the `git cherry` signal is **UNVERIFIED** (would take per-branch content review).
+STRANDED = 10, SUPERSEDED = 2 (unchanged after the Part-1 re-verification 2026-07-29; the audit figures were correct). Refinement via `git rev-list --count <branch> --not --remotes` (commits on the branch reachable from **no** remote ref) and `git cherry main <branch>`:
+- **9 of the 10 stranded carry commits on no remote** (at-risk of machine loss): `feat/durable-governance` (47), `fix/knowledge-tenant-identity` (2), and 1 each on `release/console-m1` (5 of its 6 ahead are off-remote), `audit/decision-consumer-gap`, `chore/import-linter-orphan-check`, `feat/capital-budget-reservation`, `fix/c3-investor-status`, `fix/outbox-canonical-envelope`, `worktree-bus-audit-gov`.
+- **`feat/grammar-gateway` is stranded-vs-main but fully pushed** (`--not --remotes` = 0, on `origin/feat/grammar-gateway`) — not at risk of loss.
+- **Both SUPERSEDED branches** show `git cherry` `-` (patch already on `main`): `feat/tool-dedup-convergence` (also pushed, 0 off-remote) and `feat/workflow-repository-postgres` (1 off-remote commit object, but its patch equivalent is on `main`, so the work is safe).
+- The authoritative de-duplicated at-risk total is `git log --all --not --remotes` (62 at `834153c9`), not the per-branch sum (which double-counts commits shared through the `release/console-m1` merges). Finer ABANDONED-vs-STRANDED classification beyond the `git cherry` signal remains **UNVERIFIED** (would take per-branch content review).
 
 ---
 
