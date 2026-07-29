@@ -12,14 +12,14 @@
 
 ```
 SUITE: 1255 / 2 / 0            (passed / skipped / failed, services up)
-OPEN DEFECTS: 5
+OPEN DEFECTS: 4          (was 5; #5 resolved 2026-07-29, see below)
 STALE CLAIMS: 14
 NOT WIRED SUBSYSTEMS: 7
 OWNER DECISIONS OUTSTANDING: 5
 UNMERGED BRANCHES: 12
-COMMITS LOCAL ONLY: 62
+COMMITS LOCAL ONLY: 62    (at 834153c9; see Branch topology for the drift note)
 STRANDED BRANCHES: 10
-MYPY UNCHECKED SUBTREES: 5 — live: 1
+MYPY UNCHECKED SUBTREES: 4 — live: 0   (was 5/live-1; app.decision_engine.* now checked)
 ```
 
 ---
@@ -98,7 +98,7 @@ Composition root `src/skylize/edge/gateway.py:73-84` mounts 13 routers. Auth dep
 2. **`APIConnectionError` collapses retry-safe failures with ambiguous ones** (item 10, STILL OPEN). `anthropic_adapter.py:435` catches `APIConnectionError` → raises field-less `LLMProviderUnavailable` (`gateway.py:76-84`) with no retry (adapter is sole retry authority, `max_retries=0` at anthropic_adapter.py:273). The SDK preserves `exc.__cause__` (`httpx.ConnectError` = connection-refused/DNS, request never sent, retry-safe; vs `ReadError`/`RemoteProtocolError` = mid-flight reset, may be billed) but the adapter inspects neither. *Consequence:* provably-safe retries are refused as terminal. The in-code comment `anthropic_adapter.py:436-441` ("this seam cannot distinguish...") is overstated (see STALE CLAIMS).
 3. **No sweep moves time-expired `hitl_queue` rows to `status='expired'`** (item 12, STILL OPEN). Both writers set `expires_at = now + 48h` (`decision_engine/hitl_writer.py:34,121`; `app/agents/execution.py:75,482` → `dal/hitl.py:119`). Verdicts on an expired row are refused with **HTTP 410** (`dal/hitl.py:173` predicate → `app/hitl/service.py:283-284` → `edge/routes/hitl.py:132-133,177-178`). But no cron/poller writes `'expired'` (grep over `src/` finds only migration 0015's one-time backfill keyed on `request_json IS NULL`, not on `expires_at`); no background task in the gateway lifespan (`edge/gateway.py:39-50`). `list_pending` filters only `status='pending'` with no `expires_at` predicate (`dal/hitl.py:133-142`). *Consequence:* expired rows linger in the pending list/count forever until someone attempts a verdict and gets the 410. (`'expired'` and `'modified'` are valid CHECK values, `0001_initial_schema.py:212-214`; `'modified'` is never written anywhere in `src/`.)
 4. **`_check_budget` (adapter-level token guard) is dormant on every live path** (item 11). `anthropic_adapter.py:288-300`: early-returns unless `request.max_token_budget` is set; both request models default it `None` (`gateway.py:153-154,184-185`); no production construction site populates it (all live callers — execution.py:298,664; runner.py:111; structured.py:125 — pass neither field; only unit tests set them). *Consequence:* this defense-in-depth layer never fires; the live budget control is the separate `validate_tool_call` BUDGET stage (`contracts/token.py:282-285`), which does bite.
-5. **Live code under mypy `ignore_errors` — `skylize.app.decision_engine.*` is type-unchecked** (addendum A1). `pyproject.toml:246-252` excludes 5 subtrees; the comment at `:241-244` claims they are "NOT wired into bootstrap (dead/paused code)". That is **false for `app.decision_engine.*`**, which is live: imported and wired at `bootstrap.py:35,294` and used by the live sync gate (`app/agents/execution.py:63,415`). *Consequence:* type errors in the inline decision engine + evaluator are invisible to CI. Of the 5 ignored subtrees: **live = 1** (`app.decision_engine.*`); **paused = 2** (`decision_engine.*` OPA worker, `app.orchestrator.temporal.*`); **dead = 2** (`services.obsidian_writer.*`, `memory.adapters.*`).
+5. **~~Live code under mypy `ignore_errors` — `skylize.app.decision_engine.*` is type-unchecked~~ — RESOLVED 2026-07-29** (was addendum A1). The subtree was removed from `ignore_errors` (`pyproject.toml`); mypy reports **0 errors** for it (it was already type-clean — the exclusion masked nothing), so it is now checked by CI with the rest of the product, and the stale comment describing it as "NOT wired" was rewritten. The remaining 4 excluded subtrees are all genuinely off the live request path: **paused = 2** (`decision_engine.*` OPA worker — API fails closed on non-inline at `bootstrap.py:276`; `app.orchestrator.temporal.*` — not referenced in bootstrap/gateway); **dead = 2** (`services.obsidian_writer.*` — no live import; `memory.adapters.*` — mem0 adapter, not in bootstrap).
 
 **Risk-class opens (unmerged work at risk):** 10 STRANDED branches and **62 commits that exist only on this machine** (see Branch Inventory). 8 of the 10 stranded branches have no remote at all.
 
