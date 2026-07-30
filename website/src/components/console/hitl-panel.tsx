@@ -22,17 +22,43 @@ interface ActionState {
   message: string | null;
 }
 
-/** Map a verdict failure to an honest, code-specific message. The `error`
- *  string is the backend's own detail, passed through the BFF envelope. */
-function verdictFailureMessage(status: number, error: string | null): string {
+/**
+ * Map a verdict failure to an honest, code-specific message. The `error`
+ * string is the backend's own detail, passed through the BFF envelope.
+ *
+ * A message here may only assert a state transition the response actually
+ * establishes. Two codes do NOT establish one on their own:
+ *
+ *   409 — three different backend refusals land here (HitlAlreadyActioned, and
+ *         HitlNotReplayable from either a row with no request_json or a stored
+ *         envelope that failed validation). Only the first is "already
+ *         actioned", so the message no longer claims that for all of them; the
+ *         backend's own detail says which, and the list is re-read either way.
+ *
+ *   502 — NOT only the backend's HitlExecutionFailed. mapSkylizeError
+ *         (lib/skylize/handler.ts) also returns 502 when the backend rejects
+ *         the server's SERVICE CREDENTIAL (backend 401/403) and for any backend
+ *         5xx, and skylizeFetch synthesises 502 for an unreachable backend or a
+ *         malformed body. On those paths no claim and no release ever happened,
+ *         so telling the reviewer the item "was returned to pending" asserts a
+ *         transition that did not occur. The status alone cannot tell them
+ *         apart, so the message states the uncertainty and points at the row's
+ *         re-read status as the authority.
+ *
+ * 410 and 422 DO establish their transition and say so: 422 is raised only by
+ * HitlReplayInvalid, which since the D4 fix TERMINATES the row as 'expired'
+ * (app/hitl/service.py `_terminate_failed`) rather than releasing it to pending.
+ */
+export function verdictFailureMessage(status: number, error: string | null): string {
   const detail = error ?? `HTTP ${status}`;
-  if (status === 409) return `Already actioned — ${detail}`;
+  if (status === 409)
+    return `The backend refused the verdict — ${detail} Nothing was executed; the item's current state is shown below.`;
   if (status === 410)
     return `Expired — the backend refused the verdict (${detail}). Nothing was executed.`;
   if (status === 422)
-    return `${detail} The stored input no longer passes the agent's current schema; the item stays pending and nothing was executed.`;
+    return `${detail} The stored input no longer passes the agent's current schema, so the item was moved to 'expired' and cannot be approved again — nothing was executed.`;
   if (status === 502)
-    return `Execution failed after approval — ${detail} The item was returned to pending; approve again to retry.`;
+    return `The verdict did not complete — ${detail} This response cannot say whether the item was claimed: if execution failed after the claim it has been returned to pending and approving again will retry it, but if the request never reached the verdict (a rejected server credential, or an unreachable backend) nothing changed. The list has been re-read — go by the status shown.`;
   if (status === 401) return "Session expired — log out and sign in again.";
   return detail;
 }
@@ -134,8 +160,19 @@ export function HitlPanel({
         working: null,
         message: verdictFailureMessage(res.status, body?.error ?? null),
       });
-      // 409/410 mean the row's real state differs from what we showed — re-read.
-      if (res.status === 409 || res.status === 410) await load();
+      // The row's real state may differ from what we showed — re-read it.
+      // 409/410: it definitely does. 422: the row was terminated as 'expired'.
+      // 502: we cannot tell whether it was claimed and released, which is
+      // exactly why the message defers to the re-read status rather than
+      // asserting one.
+      if (
+        res.status === 409 ||
+        res.status === 410 ||
+        res.status === 422 ||
+        res.status === 502
+      ) {
+        await load();
+      }
     } catch {
       setAction(hitlId, {
         working: null,

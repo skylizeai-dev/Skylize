@@ -134,12 +134,16 @@ async def approve(
     except HitlNotReplayable as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except HitlReplayInvalid as exc:
-        # K7: stored payload no longer validates against the CURRENT schema.
-        # The row was released back to 'pending'; nothing executed.
+        # K7: stored payload no longer validates against the CURRENT schema (or
+        # the contract is gone). PERMANENT under owner decision D4 — request_json
+        # is frozen at enqueue, so the row was moved to the TERMINAL 'expired'
+        # status, not released to 'pending'. Nothing executed; a retry is
+        # impossible by design (it would fail identically forever).
         raise HTTPException(status_code=422, detail=f"replay invalid: {exc}") from exc
     except HitlExecutionFailed as exc:
-        # K12: execution failed after the claim. The row was released back to
-        # 'pending' so the approved work is not lost; retry after fixing.
+        # K12: execution failed after the claim for a TRANSIENT reason. The row
+        # WAS released back to 'pending' so the approved work is not lost; retry
+        # after fixing. This is the only 502 the approve path itself produces.
         raise HTTPException(status_code=502, detail=f"execution failed: {exc}") from exc
     return HitlApproveResponse(
         hitl_id=row.hitl_id,

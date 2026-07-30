@@ -7,9 +7,16 @@
 //   404 not found in this org
 //   409 already actioned (detail names the existing status) / not replayable
 //   410 expired
-//   422 stored input failed re-validation against the CURRENT agent schema
-//       (the backend released the row back to pending)
-//   502 execution failed after the claim (backend 502 -> mapped 502, message kept)
+//   422 stored input failed re-validation against the CURRENT agent schema.
+//       Under owner decision D4 this is a PERMANENT failure: the backend moved
+//       the row to the terminal 'expired' status. It is NOT released to pending
+//       and cannot be approved again.
+//   502 execution failed after the claim (backend 502 -> mapped 502, message
+//       kept). NOTE for the UI: 502 reaching the browser does NOT imply this
+//       case — mapSkylizeError also returns 502 when the backend rejects the
+//       server's service credential and for any backend 5xx, and skylizeFetch
+//       synthesises 502 for an unreachable backend. Only the backend's own
+//       HitlExecutionFailed 502 means the row was claimed and released.
 
 import { NextResponse } from "next/server";
 import { z } from "zod";
