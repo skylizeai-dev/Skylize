@@ -8,8 +8,13 @@ the HitlQueueService under test. Proves, without infrastructure:
   * the second verdict on a row is a typed refusal, never a re-execution;
   * reject records the verdict and executes nothing;
   * an expired / non-replayable / schema-drifted row is refused with the
-    matching typed error, and a failed replay releases the row to 'pending'
-    (K7/K12 — the approved work is never silently lost);
+    matching typed error, and a failed replay is disposed of by whether it can
+    ever clear (owner decision D4): a PERMANENT failure (envelope invalid, input
+    -schema drift, contract unregistered) moves the row to the terminal
+    'expired' status, because request_json is frozen at enqueue so a release
+    would loop it forever; a TRANSIENT failure (K12 — provider down, database
+    unavailable, ceiling refusal) still releases the row to 'pending' so the
+    approved work is never silently lost and a retry succeeds;
   * the ordinary execute path cannot satisfy the gate: without a
     HitlApprovalContext a governed defer-trigger agent still defers, and the
     HTTP request model forbids smuggling one in.
@@ -240,9 +245,16 @@ async def test_row_without_request_json_not_replayable() -> None:
     llm.generate.assert_not_called()
 
 
-# ── K7: schema drift fails loudly, row released back to pending ─────────────
+# ── K7: schema drift fails loudly and TERMINATES the row (D4) ───────────────
+#
+# This assertion inverted deliberately. request_json is written once at enqueue
+# and never rewritten, so a release put the row back in the pending list where
+# the identical failure recurred on every approval: pending -> approve -> fail
+# -> pending, accumulating hitl.approve_failed audit rows and leaving a
+# permanently unactionable item in the reviewer's queue. Owner decision D4: a
+# PERMANENT failure moves the row to the terminal 'expired' status.
 
-async def test_replay_invalid_input_releases_row_to_pending() -> None:
+async def test_replay_invalid_input_terminates_row_as_expired() -> None:
     llm = _llm({"hooks": ["a"]})
     deliverables = _deliverables()
     service, execution, repo, bus = _harness(llm, deliverables)
@@ -258,12 +270,61 @@ async def test_replay_invalid_input_releases_row_to_pending() -> None:
     llm.generate.assert_not_called()
     deliverables.create_deliverable.assert_not_called()
     item = await repo.get(deferred.hitl_id, GOV_ORG)
-    assert item is not None and item.status == "pending"  # actionable again
-    assert item.verdict_by is None  # claim fully released
+    assert item is not None and item.status == "expired"  # terminal, not looping
+    assert item.verdict_by == "r1"  # a human really did approve; history kept
     assert "hitl.approve_failed" in _audit_action_types(bus)
 
+    # It is gone from the reviewer's queue and cannot be re-approved.
+    pending, total = await service.list_pending(GOV_ORG)
+    assert [i.hitl_id for i in pending] == []
+    assert total == 0
+    with pytest.raises(HitlAlreadyActioned):
+        await service.approve(org_id=GOV_ORG, hitl_id=deferred.hitl_id, reviewed_by="r2")
 
-# ── K12: execution failure after the claim releases the row ─────────────────
+
+async def test_invalid_stored_envelope_terminates_row_as_expired() -> None:
+    """The other PERMANENT path: request_json is not a valid HitlReplayEnvelope."""
+    llm = _llm({"hooks": ["a"]})
+    deliverables = _deliverables()
+    service, execution, repo, bus = _harness(llm, deliverables)
+    deferred = await _defer(execution)
+
+    stored = repo._rows[0]
+    repo._rows[0] = replace(stored, request_json={"totally": "wrong shape"})
+
+    with pytest.raises(HitlNotReplayable):
+        await service.approve(org_id=GOV_ORG, hitl_id=deferred.hitl_id, reviewed_by="r1")
+
+    llm.generate.assert_not_called()
+    item = await repo.get(deferred.hitl_id, GOV_ORG)
+    assert item is not None and item.status == "expired"
+    assert "hitl.approve_failed" in _audit_action_types(bus)
+    assert (await service.list_pending(GOV_ORG))[1] == 0
+
+
+async def test_unregistered_contract_terminates_row_as_expired() -> None:
+    """The third PERMANENT path: the stored agent_id is no longer registered."""
+    llm = _llm({"hooks": ["a"]})
+    deliverables = _deliverables()
+    service, execution, repo, bus = _harness(llm, deliverables)
+    deferred = await _defer(execution)
+
+    stored = repo._rows[0]
+    assert stored.request_json is not None
+    repo._rows[0] = replace(
+        stored, request_json={**stored.request_json, "agent_id": "agent_that_left"}
+    )
+
+    with pytest.raises(HitlReplayInvalid):
+        await service.approve(org_id=GOV_ORG, hitl_id=deferred.hitl_id, reviewed_by="r1")
+
+    llm.generate.assert_not_called()
+    item = await repo.get(deferred.hitl_id, GOV_ORG)
+    assert item is not None and item.status == "expired"
+    assert (await service.list_pending(GOV_ORG))[1] == 0
+
+
+# ── K12: TRANSIENT execution failure after the claim releases the row ───────
 
 async def test_execution_failure_releases_row_to_pending() -> None:
     llm = _llm({"hooks": ["a"]})

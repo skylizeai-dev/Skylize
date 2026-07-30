@@ -189,6 +189,23 @@ class PgHitlQueueRepository:
             )
             return str(tag).split()[-1] != "0"
 
+    async def terminate(self, hitl_id: UUID, org_id: str, *, from_status: str) -> bool:
+        """Terminal disposition for a PERMANENTLY unreplayable row.
+
+        'expired' is an existing CHECK value (0001_initial_schema.py:212-214) and
+        is what migration 0015 already assigns to rows that can never be replayed
+        — no new status vocabulary. Unlike `release`, the verdict columns are NOT
+        cleared: a human really did approve, and erasing that would lose the
+        reason the row left 'pending' at all.
+        """
+        async with self._db.tenant_session(org_id) as conn:
+            tag = await conn.execute(
+                "UPDATE hitl_queue SET status='expired' "
+                "WHERE hitl_id=$1 AND org_id=$2 AND status=$3",
+                hitl_id, org_id, from_status,
+            )
+            return str(tag).split()[-1] != "0"
+
     async def update_verdict_json(
         self, hitl_id: UUID, org_id: str, verdict_json: dict[str, Any]
     ) -> None:

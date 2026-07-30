@@ -19,12 +19,26 @@ conditional ``UPDATE ... WHERE status='pending' ... RETURNING`` claim — never 
 read-then-write. Two simultaneous verdicts race on that predicate; Postgres
 serializes them and exactly one wins.
 
-Failure after approval (owner decisions K7/K12): if the stored payload no
-longer validates (schema drift), the agent is gone, or execution fails, the row
-is RELEASED back to 'pending' (verdict cleared) and the failure is audited —
-the approved work is never silently lost, and no status outside the existing
-CHECK vocabulary is invented. The caller sees a typed error and can retry once
-the cause is fixed.
+Failure after approval (owner decisions K7/K12) splits by whether the failure
+can ever clear. ``request_json`` is written ONCE at enqueue (dal/hitl.py:121)
+and never rewritten, so a failure rooted in that payload recurs identically on
+every approval:
+
+  * PERMANENT — the stored envelope no longer validates, the stored input no
+    longer fits the agent's CURRENT input schema (schema drift), or the contract
+    is no longer registered. Releasing these to 'pending' produced an infinite
+    pending -> approve -> fail -> pending loop that accumulated
+    ``hitl.approve_failed`` audit rows and left permanently unactionable items in
+    the reviewer's queue. They are moved to the TERMINAL 'expired' status
+    instead, with an audit record naming the reason.
+  * TRANSIENT — database unavailable, LLM provider failure, output validation,
+    ceiling refusal, governance denial: anything a retry can clear. These are
+    RELEASED back to 'pending' (verdict cleared) exactly as before, so approved
+    work is never silently lost and the reviewer can retry once the cause is fixed.
+
+Both dispositions are audited and no status outside the existing CHECK
+vocabulary is invented ('expired' is what migration 0015 already assigns to
+rows that can never be replayed). The caller sees a typed error either way.
 """
 
 from __future__ import annotations
@@ -80,14 +94,16 @@ class HitlNotReplayable(HitlError):
 
 class HitlReplayInvalid(HitlError):
     """K7: the stored payload failed re-validation against the agent's CURRENT
-    input schema (or the agent is no longer registered). Row released back to
-    'pending'; nothing executed."""
+    input schema (or the agent is no longer registered). PERMANENT — the stored
+    payload never changes, so the same failure would recur on every approval —
+    so the row moves to the terminal 'expired' status; nothing executed."""
 
 
 class HitlExecutionFailed(HitlError):
-    """K12: execution failed AFTER the approval claim. Row released back to
-    'pending' so the approved work is not silently lost; the failure is
-    audited and the reviewer can retry."""
+    """K12: execution failed AFTER the approval claim for a TRANSIENT reason
+    (provider failure, database unavailable, ceiling refusal, output
+    validation). Row released back to 'pending' so the approved work is not
+    silently lost; the failure is audited and the reviewer can retry."""
 
 
 class HitlQueueService:
@@ -133,7 +149,9 @@ class HitlQueueService:
         try:
             envelope = HitlReplayEnvelope.model_validate(row.request_json)
         except ValidationError as exc:
-            await self._release_failed(
+            # PERMANENT: request_json is written once at enqueue and never
+            # rewritten, so this validation fails identically on every approval.
+            await self._terminate_failed(
                 row, org_id, fresh_correlation,
                 action_type="hitl.approve_failed",
                 reason=f"stored request envelope invalid: {exc}",
@@ -156,9 +174,11 @@ class HitlQueueService:
                 ),
             )
         except (AgentInputError, AgentNotRegistered) as exc:
-            # K7: schema drift / vanished agent — fail loudly, row stays
-            # actionable, nothing executed.
-            await self._release_failed(
+            # PERMANENT (K7): input-schema drift against the frozen stored input,
+            # or a contract that is no longer registered. Neither can clear by
+            # retrying the SAME row, so terminating it is what keeps the queue
+            # honest — releasing looped it forever.
+            await self._terminate_failed(
                 row, org_id, fresh_correlation,
                 action_type="hitl.approve_failed",
                 reason=f"replay_invalid: {exc}",
@@ -166,8 +186,11 @@ class HitlQueueService:
             )
             raise HitlReplayInvalid(str(exc)) from exc
         except Exception as exc:
-            # K12: anything that failed after the claim (LLM egress, output
-            # validation, governance denial, budget) — release, audit, surface.
+            # TRANSIENT (K12): anything else that failed after the claim — LLM
+            # egress, output validation, governance denial, budget or ceiling
+            # refusal, database unavailable. All are retryable once the cause is
+            # fixed, and an ambiguous failure is treated as transient on purpose:
+            # keeping work visible is safer than terminating it.
             await self._release_failed(
                 row, org_id, fresh_correlation,
                 action_type="hitl.approve_failed",
@@ -299,6 +322,7 @@ class HitlQueueService:
         reason: str,
         source_agent_id: str | None = None,
     ) -> None:
+        """TRANSIENT disposition: back to 'pending' so the work stays actionable."""
         await self._repo.release(row.hitl_id, org_id, from_status="approved")
         await self._audit.record(
             org_id=org_id,
@@ -309,7 +333,40 @@ class HitlQueueService:
             source_agent_id=source_agent_id,
             partition_key=row.partition_key,
             inputs={"hitl_id": str(row.hitl_id)},
+            outputs={"disposition": "released", "status": "pending"},
             result_reason=reason,
+        )
+
+    async def _terminate_failed(
+        self,
+        row: HitlQueueItem,
+        org_id: str,
+        correlation_id: UUID,
+        *,
+        action_type: str,
+        reason: str,
+        source_agent_id: str | None = None,
+    ) -> None:
+        """PERMANENT disposition: terminal 'expired', with the reason audited.
+
+        The failure is rooted in ``request_json``, which is frozen at enqueue, so
+        a release would reproduce it on every approval — the pending -> approve
+        -> fail -> pending loop this replaces. The audit record carries the same
+        ``action_type`` vocabulary as the transient path (no new value invented)
+        and distinguishes the two in ``outputs``.
+        """
+        await self._repo.terminate(row.hitl_id, org_id, from_status="approved")
+        await self._audit.record(
+            org_id=org_id,
+            correlation_id=correlation_id,
+            causation_id=row.correlation_id,
+            action_type=action_type,
+            result="failed",
+            source_agent_id=source_agent_id,
+            partition_key=row.partition_key,
+            inputs={"hitl_id": str(row.hitl_id)},
+            outputs={"disposition": "terminated", "status": "expired"},
+            result_reason=f"permanent: {reason}",
         )
 
     @staticmethod

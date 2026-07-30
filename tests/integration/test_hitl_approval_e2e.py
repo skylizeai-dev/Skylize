@@ -406,10 +406,18 @@ async def test_ordinary_execute_path_cannot_set_bypass(
         await _cleanup(admin_conn, org)
 
 
-# ── K7: schema-drifted stored payload fails loudly, row released ────────────
+# ── K7/D4: schema-drifted stored payload fails loudly and TERMINATES ────────
+#
+# The assertion here inverted deliberately (owner decision D4). request_json is
+# written once at enqueue and never rewritten, so releasing a drifted row put it
+# straight back in the pending list where the IDENTICAL failure recurred on the
+# next approval: pending -> approve -> fail -> pending forever, accumulating
+# hitl.approve_failed audit rows behind a permanently unactionable queue item.
+# A PERMANENT failure now moves the row to the terminal 'expired' status —
+# which is exactly what migration 0015 already does to unreplayable rows.
 
 @requires_app_role
-async def test_drifted_request_json_fails_and_releases_row(
+async def test_drifted_request_json_fails_and_terminates_row(
     app_db, admin_conn, fake_provider
 ) -> None:
     base_url, fake = fake_provider
@@ -433,8 +441,68 @@ async def test_drifted_request_json_fails_and_releases_row(
             assert await _deliverable_ids(app_db, org) == []
             assert await _ledger_keys(app_db, org) == []
             row = await _row(app_db, org, hitl_id)
-            assert row is not None and row["status"] == "pending"  # actionable again
-            assert row["verdict_by"] is None  # claim fully released
+            assert row is not None and row["status"] == "expired"  # terminal
+            assert row["verdict_by"] == "u1"  # the approval really happened
+            assert await _audit_count(app_db, org, "hitl.approve_failed") == 1
+
+            # It is out of the reviewer's queue and cannot be re-approved, so the
+            # approve_failed audit trail cannot grow without bound.
+            listed = await client.get("/api/v1/hitl", headers=_owner(org))
+            assert listed.status_code == 200, listed.text
+            assert [i["hitl_id"] for i in listed.json()["data"]] == []
+            again = await client.post(
+                f"/api/v1/hitl/{hitl_id}/approve", headers=_owner(org)
+            )
+            assert again.status_code == 409, again.text
+            assert await _audit_count(app_db, org, "hitl.approve_failed") == 1
+    finally:
+        await _cleanup(admin_conn, org)
+
+
+# ── K12/D4: a TRANSIENT failure still releases, and a retry then succeeds ────
+
+@requires_app_role
+async def test_transient_provider_failure_releases_row_and_retry_succeeds(
+    app_db, admin_conn, fake_provider
+) -> None:
+    """The other half of the D4 split, on real Postgres.
+
+    A provider 400 is a real, non-retryable-at-the-adapter failure that reaches
+    HitlQueueService's generic handler — the TRANSIENT class. The row must go
+    back to 'pending' (not 'expired'): the stored request is still perfectly
+    replayable, and a second approval after the outage must produce a
+    deliverable. Terminating this row would destroy recoverable approved work.
+    """
+    base_url, fake = fake_provider
+    org = _org()
+    await _seed(admin_conn, app_db, org)
+    try:
+        async with _running(org, base_url) as (client, _):
+            hitl_id = await _defer(client, org)
+
+            from tests.fakes.fake_provider_api import status as fake_status
+
+            fake.program(fake_status(400, message="bad request from the provider"))
+            r = await client.post(f"/api/v1/hitl/{hitl_id}/approve", headers=_owner(org))
+            assert r.status_code >= 400, r.text
+            row = await _row(app_db, org, hitl_id)
+            assert row is not None and row["status"] == "pending"  # released
+            assert row["verdict_by"] is None  # claim fully cleared
+            assert await _audit_count(app_db, org, "hitl.approve_failed") == 1
+            assert await _deliverable_ids(app_db, org) == []
+
+            # Still in the reviewer's queue...
+            listed = await client.get("/api/v1/hitl", headers=_owner(org))
+            assert [i["hitl_id"] for i in listed.json()["data"]] == [str(hitl_id)]
+
+            # ...and the retry, once the provider recovers, actually executes.
+            fake.program(success(text=_HOOKS, message_id="msg_retry_ok",
+                                 input_tokens=10, output_tokens=5))
+            r2 = await client.post(f"/api/v1/hitl/{hitl_id}/approve", headers=_owner(org))
+            assert r2.status_code == 200, r2.text
+            row2 = await _row(app_db, org, hitl_id)
+            assert row2 is not None and row2["status"] == "approved"
+            assert len(await _deliverable_ids(app_db, org)) == 1
             assert await _audit_count(app_db, org, "hitl.approve_failed") == 1
     finally:
         await _cleanup(admin_conn, org)

@@ -474,8 +474,25 @@ class HitlQueueRepository(Protocol):
 
     async def release(self, hitl_id: UUID, org_id: str, *, from_status: str) -> bool:
         """Return a claimed row to 'pending' (verdict fields cleared) after a
-        failed execution, so the approved work is never silently lost. Only a
-        row currently in `from_status` is released."""
+        TRANSIENT failed execution, so the approved work is never silently lost.
+        Only a row currently in `from_status` is released. For a PERMANENT
+        failure use `terminate` — releasing an unreplayable row loops it
+        forever."""
+        ...
+
+    async def terminate(self, hitl_id: UUID, org_id: str, *, from_status: str) -> bool:
+        """Move a claimed row to the TERMINAL 'expired' status after a PERMANENT
+        failure — one that will recur identically on every future approval
+        (envelope validation failure, input-schema drift, contract no longer
+        registered), because `request_json` is written once at enqueue and never
+        rewritten.
+
+        'expired' is an existing status-vocabulary value
+        (0001_initial_schema.py:212-214) and migration 0015 already applies it to
+        exactly this class of row (`request_json IS NULL AND status='pending'`);
+        no new status is invented. The verdict columns are deliberately LEFT IN
+        PLACE: a reviewer really did approve, and the row's history should say so.
+        Only a row currently in `from_status` is terminated."""
         ...
 
     async def update_verdict_json(

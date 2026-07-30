@@ -308,6 +308,18 @@ class InMemoryHitlQueueRepository:
                 return True
         return False
 
+    async def terminate(self, hitl_id: UUID, org_id: str, *, from_status: str) -> bool:
+        """Terminal 'expired' for a permanently unreplayable row; verdict kept
+        (mirrors PgHitlQueueRepository.terminate)."""
+        for e in self._rows:
+            if e.hitl_id == hitl_id and e.org_id == org_id:
+                state = self._state[e.hitl_id]
+                if state[0] != from_status:
+                    return False
+                state[0] = "expired"
+                return True
+        return False
+
     async def update_verdict_json(
         self, hitl_id: UUID, org_id: str, verdict_json: dict[str, Any]
     ) -> None:
