@@ -17,8 +17,9 @@ tests/integration/test_cost_ledger_pg.py):
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
-from typing import Any
+from datetime import datetime
+from importlib import util as _importlib_util
+from pathlib import Path as _Path
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -49,11 +50,8 @@ from skylize.dal.cost_ledger import (
 
 ORG = "org_test"
 
-# The seeded price integers — imported from the migration so the fixture can
+# The seeded price integers — loaded from the migration so the fixture can
 # never drift from what actually lands in model_pricing.
-from importlib import util as _importlib_util
-from pathlib import Path as _Path
-
 _MIGRATION = (
     _Path(__file__).resolve().parents[2]
     / "migrations" / "versions" / "0013_seed_model_pricing.py"

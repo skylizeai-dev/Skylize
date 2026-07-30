@@ -15,7 +15,6 @@ Anthropic HTTP server. Skipped unless SKYLIZE_TEST_DB_URL (+ APP_DB_URL) are set
 
 from __future__ import annotations
 
-import uuid
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 

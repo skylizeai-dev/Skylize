@@ -15,7 +15,6 @@ monotonicity. That contract is what the old client-minted-id scheme violated.
 """
 from __future__ import annotations
 
-import json
 import uuid
 from collections import defaultdict
 from contextlib import asynccontextmanager
