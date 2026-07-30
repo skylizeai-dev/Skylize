@@ -79,14 +79,20 @@ async def _seed_decision(admin_conn: object, org: str, decision_id: uuid.UUID, c
 
 
 async def _cleanup(admin_conn: object, org: str) -> None:
+    """Remove the seeded rows, children before the `tenants` parent.
+
+    No foreign key to `tenants` cascades (every one is NO ACTION), so the parent
+    row must go last and only after its children -- and it must go at all: the
+    missing `tenants` delete here leaked one org per run into the shared dev
+    database. Failures are not swallowed, so a future ordering mistake surfaces
+    instead of silently accumulating rows.
+    """
     for sql in (
         "DELETE FROM hitl_queue WHERE org_id=$1",
         "DELETE FROM decisions WHERE org_id=$1",
+        "DELETE FROM tenants WHERE org_id=$1",
     ):
-        try:
-            await admin_conn.execute(sql, org)  # type: ignore[attr-defined]
-        except Exception:
-            pass
+        await admin_conn.execute(sql, org)  # type: ignore[attr-defined]
 
 
 @requires_app_role

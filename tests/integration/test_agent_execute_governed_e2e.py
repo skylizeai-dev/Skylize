@@ -175,17 +175,59 @@ async def _hitl_row(app_db: Database, org: str, hitl_id: uuid.UUID) -> dict | No
 
 
 async def _cleanup(admin_conn: object, org: str) -> None:
+    """Remove everything this suite's helpers create.
+
+    Shared teardown: test_hitl_approval_e2e and test_deliverable_readback_e2e
+    import this function, so it is the single cleanup for all three suites.
+
+    ORDER IS LOAD-BEARING. Not one of the 16 foreign keys to `tenants` is
+    ON DELETE CASCADE (all are NO ACTION), so every child row must go BEFORE the
+    `tenants` row or the parent DELETE raises ForeignKeyViolationError.
+
+    Failures are deliberately NOT swallowed. This used to wrap each statement in
+    `except Exception: pass`, which is how a missing `tenants` delete went
+    unnoticed while 501 `gov_*` tenants rows and 236 `governance_tokens` rows
+    piled up in the shared dev database.
+
+    NOT CLEANED, on purpose: `audit_log`. Its append-only trigger (migration
+    0001) raises on DELETE for every role including superuser, so per-org removal
+    is impossible. Unlike `ai_cost_ledger` below it holds NO foreign key to
+    `tenants`, so leftover rows block nothing and TRUNCATE is not forced on us.
+    The alternatives -- TRUNCATE (destroying other tenants' audit history in a
+    shared database) or moving this suite onto the disposable-schema fixture --
+    are design decisions rather than cleanup, so the gap is reported to the owner
+    instead of being papered over here.
+    """
+    # `ai_cost_ledger` is append-only (ADR-0006, migration 0012): a row-level
+    # trigger rejects DELETE for every role, so the `DELETE FROM ai_cost_ledger`
+    # that used to sit in the loop below NEVER RAN -- it raised straight into the
+    # blanket `except`. TRUNCATE fires only TRUNCATE-level triggers, which is why
+    # test_anthropic_transport_fake_http.py:241 already uses it. It is also
+    # REQUIRED here: ai_cost_ledger carries a NO ACTION foreign key to `tenants`,
+    # so a surviving ledger row blocks the `tenants` delete below. The cost is
+    # that this clears the table for every org, matching the sibling suite.
+    await admin_conn.execute("TRUNCATE ai_cost_ledger")  # type: ignore[attr-defined]
     for sql in (
+        # Children of `tenants` first.
         "DELETE FROM hitl_queue WHERE org_id=$1",
         "DELETE FROM decisions WHERE org_id=$1",
         "DELETE FROM deliverables WHERE org_id=$1",
-        "DELETE FROM ai_cost_ledger WHERE org_id=$1",
         "DELETE FROM org_spend_ceiling WHERE org_id=$1",
+        # Minted by every governed execution through the Authority; the FK child
+        # that actually blocked the `tenants` delete once it was added.
+        "DELETE FROM governance_tokens WHERE org_id=$1",
+        # Parent LAST.
+        "DELETE FROM tenants WHERE org_id=$1",
     ):
-        try:
-            await admin_conn.execute(sql, org)  # type: ignore[attr-defined]
-        except Exception:
-            pass
+        await admin_conn.execute(sql, org)  # type: ignore[attr-defined]
+
+    # The seeded price row is GLOBAL (org_id NULL), so it is keyed by model, not
+    # by org -- an org-scoped teardown can never reach it, which is exactly why it
+    # leaked. Mirrors test_anthropic_transport_fake_http.py's price cleanup; that
+    # suite's model id differs ("fake-sonnet-mvp"), so the two never collide.
+    await admin_conn.execute(  # type: ignore[attr-defined]
+        "DELETE FROM model_pricing WHERE model = $1", MODEL
+    )
 
 
 @requires_app_role

@@ -92,8 +92,14 @@ async def test_rls_blocks_cross_tenant_read(app_conn, admin_conn) -> None:
         seen = {r["org_id"] for r in rows}
         assert seen == {org_a}, f"RLS leaked another tenant's rows: {seen}"
     finally:
-        # Cleanup must delete audit rows (append-only blocks DELETE) — do it as
-        # admin which can DROP via cascade on the tenants we created.
+        # The audit_log rows inserted above are NOT removed, and cannot be: the
+        # append-only trigger (migration 0001) rejects DELETE for every role, and
+        # no cascade reaches them either -- audit_log carries no foreign key to
+        # `tenants`, and not one of the 16 FKs that do reference `tenants` is
+        # ON DELETE CASCADE (all are NO ACTION). The tenants delete therefore
+        # succeeds while the audit rows are orphaned; that leak is a known,
+        # reported gap needing a design decision (TRUNCATE would destroy other
+        # tenants' history; the disposable pg_schema fixture is the alternative).
         await admin_conn.execute("DELETE FROM tenants WHERE org_id = ANY($1::text[])",
                                  [org_a, org_b])
 
