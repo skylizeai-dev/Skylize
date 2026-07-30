@@ -57,6 +57,11 @@ state — test counts, open defects, what is wired, branch topology — read
 - `SKYLIZE_TEST_APP_DB_URL` MUST be the non-superuser, non-table-owner `skylize_app`
   role (tests/integration/conftest.py:26). A superuser or table owner bypasses RLS,
   so RLS / tenant-isolation tests prove nothing under the wrong role.
+- **The gate before claiming green:** `powershell -ExecutionPolicy Bypass -File
+  scripts/ci_unit_gate.ps1` runs every gate of CI's `unit` job in CI's order. `pytest`
+  alone is NOT that gate — `ruff check src tests` is a CI step, and omitting it left
+  CI red from `11b595e6` onward unnoticed. The script does not cover CI's `website`
+  job (npm) or `integration` job; run those yourself when you touch those areas.
 
 ## EVIDENCE DISCIPLINE
 - Code is ground truth. Docs, comments, and ADRs are CLAIMS to be tested against
