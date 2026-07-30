@@ -59,11 +59,66 @@ from .tools.builtin import default_tool_registry
 from .tools.proxy import ToolProxy
 
 
-class LLMConfigurationError(RuntimeError):
+class ConfigurationError(RuntimeError):
+    """The container cannot be wired from the current configuration.
+
+    Raised at composition time so a misconfigured deployment fails to build
+    rather than starting with a silently broken guarantee."""
+
+
+class LLMConfigurationError(ConfigurationError):
     """The LLM gateway cannot be wired from the current configuration.
 
     Raised at composition time so a misconfigured deployment fails to build
     rather than serving fake demo output under a real workload."""
+
+
+async def verify_app_role_is_rls_subject(db: "Database") -> None:
+    """Refuse to start when the runtime database role can bypass RLS.
+
+    The Settings interlock (config.py `_require_distinct_app_dsn_on_a_real_backend`)
+    is a raw string comparison: it catches SKYLIZE_DB_APP_URL left empty or
+    copy-pasted equal to SKYLIZE_DB_URL, but any respelling of the same
+    superuser DSN (localhost vs 127.0.0.1, an added query parameter, a password
+    moved to .pgpass, postgres:// vs postgresql://) sails through it. The
+    authoritative check is not a string comparison — it is asking the database:
+    connect as the configured role and read its own pg_roles row. A SUPERUSER
+    or BYPASSRLS role bypasses every RLS policy regardless of FORCE ROW LEVEL
+    SECURITY.
+
+    Mirrors the pg_roles probe in tests/integration/test_postgres_isolation.py::
+    test_app_role_is_not_superuser_or_bypassrls, folded into one statement run
+    on the runtime's own pool.
+
+    A connection failure is NOT a disqualified role: asyncpg's own errors from
+    acquire/fetch propagate untouched, so an unreachable database surfaces as a
+    connectivity error, never as an RLS finding. ConfigurationError is raised
+    only from a successfully read pg_roles row.
+    """
+    async with db.pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT current_user AS rolname, rolsuper, rolbypassrls "
+            "FROM pg_roles WHERE rolname = current_user"
+        )
+    if row is None:  # pragma: no cover — current_user always has a pg_roles row
+        raise ConfigurationError(
+            "Could not read the runtime role's pg_roles row to verify it is "
+            "subject to RLS; refusing to start rather than assuming it is."
+        )
+    disqualifiers = [
+        name
+        for flag, name in ((row["rolsuper"], "SUPERUSER"), (row["rolbypassrls"], "BYPASSRLS"))
+        if flag
+    ]
+    if disqualifiers:
+        raise ConfigurationError(
+            f"Runtime database role {row['rolname']!r} (SKYLIZE_DB_APP_URL) has "
+            f"{' and '.join(disqualifiers)}. Such a role bypasses every "
+            "row-level-security policy regardless of FORCE ROW LEVEL SECURITY, "
+            "so RLS tenant isolation would be silently inert while every "
+            "request still succeeds. Connect the runtime as the non-superuser, "
+            "NOBYPASSRLS skylize_app role created by migration 0003."
+        )
 
 
 @dataclass
@@ -177,6 +232,9 @@ async def build_container(settings: Settings | None = None) -> Container:
         # (migrations run separately as the admin role via `alembic upgrade`).
         db = Database(settings.runtime_db_url)
         await db.connect()
+        # The Settings string interlock cannot catch a respelled superuser DSN;
+        # ask the database itself before wiring anything onto this pool.
+        await verify_app_role_is_rls_subject(db)
         redis_bus = RedisEventBus(settings.redis_url)
         bus = redis_bus
         gov_repo = PgGovernanceRepository(db)
