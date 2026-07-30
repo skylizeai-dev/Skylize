@@ -1255,3 +1255,87 @@ async def test_one_attempt_budget_sends_exactly_one_http_request(
         assert rows[0]["idempotency_key"] == "msg_one_attempt"
     finally:
         await _cleanup(admin_conn, org)
+
+
+# ===========================================================================
+# P3 — ONE SDK client per adapter over a REAL socket, released by aclose().
+#      Both egresses used to construct a client per call and never close it;
+#      in the tool loop that leaked one AsyncAnthropic per iteration, each
+#      holding its own TCP pool until GC finalized it.
+# ===========================================================================
+
+
+@requires_app_role
+async def test_repeated_real_calls_reuse_one_client_object(
+    app_db, fake_provider, admin_conn
+) -> None:
+    """Three real HTTP round trips, one client object, one connection pool.
+
+    Identity is asserted on the object the SDK actually used, and the server's
+    own request count proves the calls really went out.
+    """
+    base_url, fake = fake_provider
+    org = _org()
+    try:
+        await _seed_all(app_db, admin_conn, org)
+        adapter, _bus, _repo, _ledger = _make_adapter(app_db, base_url)
+        assert adapter._sync_client_instance is None  # nothing opened yet
+
+        fake.program(success(text="first", message_id="msg_reuse_1"))
+        await adapter.generate(_request(org))
+        first_client = adapter._sync_client_instance
+        assert first_client is not None
+
+        fake.program(success(text="second", message_id="msg_reuse_2"))
+        await adapter.generate(_request(org))
+        fake.program(success(text="third", message_id="msg_reuse_3"))
+        await adapter.generate(_request(org))
+
+        assert adapter._sync_client_instance is first_client
+        assert fake.attempts == 1  # program() resets the recorder; 1 per program
+
+        # Three distinct served calls -> three ledger rows, so reuse did not
+        # collapse or drop a call.
+        keys = {r["idempotency_key"] for r in await _ledger_rows(app_db, org)}
+        assert keys == {"msg_reuse_1", "msg_reuse_2", "msg_reuse_3"}
+
+        # aclose() really closes the pool; the SDK reports it.
+        assert first_client.is_closed() is False
+        await adapter.aclose()
+        assert first_client.is_closed() is True
+    finally:
+        await _cleanup(admin_conn, org)
+
+
+@requires_app_role
+async def test_tool_egress_reuses_one_async_client_across_iterations(
+    app_db, fake_provider, admin_conn
+) -> None:
+    """The tool-loop leak, over real HTTP: N iterations, ONE async client."""
+    base_url, fake = fake_provider
+    org = _org()
+    try:
+        await _seed_all(app_db, admin_conn, org)
+        adapter, _bus, _repo, _ledger = _make_adapter(app_db, base_url)
+        tools = [_demo_tool()]
+
+        clients = []
+        for i in range(3):
+            fake.program(success(text=f"turn {i}", message_id=f"msg_tools_reuse_{i}"))
+            await adapter.generate_with_tools(
+                _tools_request(
+                    org,
+                    [LLMMessage(role="user", content=[LLMContentBlock(kind="text", text="hi")])],
+                ),
+                tools,
+            )
+            clients.append(adapter._async_client_instance)
+
+        assert clients[0] is not None
+        assert clients.count(clients[0]) == 3, "a new async client was built per iteration"
+
+        assert clients[0].is_closed() is False
+        await adapter.aclose()
+        assert clients[0].is_closed() is True
+    finally:
+        await _cleanup(admin_conn, org)

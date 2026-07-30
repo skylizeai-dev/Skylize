@@ -217,6 +217,13 @@ class AnthropicAdapter:
         # period-to-date spend plus a biased-high estimate would breach the
         # org-wide ceiling. None (memory backend / unit harnesses) => no gate.
         self._spend_ceiling = spend_ceiling
+        # ONE key per adapter, fixed here and never reassigned. This is the
+        # precondition that makes client reuse safe (see `_sync_client`): the
+        # adapter holds no CredentialVault, performs no per-org key lookup, and
+        # never reads CostObservation.byok, so every call this instance makes
+        # goes out under this one key. If per-org / BYOK key resolution is ever
+        # added, the cached clients below MUST become per-key or one tenant's
+        # call would be sent with another tenant's credential.
         self._api_key = api_key or str(getattr(settings, "anthropic_api_key", "") or "")
         # Empty string when unset; `_client_kwargs` omits base_url in that case so
         # the SDK falls back to its own default endpoint resolution (env + built-in).
@@ -257,6 +264,12 @@ class AnthropicAdapter:
                 float(getattr(settings, "llm_price_opus_out", 75.0)),
             ),
         }
+        # The two egress clients: built ONCE, on first use, and reused for every
+        # subsequent call (see `_sync_client` / `_async_client`). Both are
+        # released by `aclose()`, which bootstrap registers on the Container's
+        # closer list — never left to the garbage collector.
+        self._sync_client_instance: anthropic.Anthropic | None = None
+        self._async_client_instance: anthropic.AsyncAnthropic | None = None
 
     # -- helpers --------------------------------------------------------------
 
@@ -284,6 +297,63 @@ class AnthropicAdapter:
         if self._base_url:
             kwargs["base_url"] = self._base_url
         return kwargs
+
+    def _sync_client(self) -> anthropic.Anthropic:
+        """The ONE sync egress client for this adapter, built on first use.
+
+        Both egresses used to construct a fresh SDK client inside the request
+        path and never close it. In the tool loop that is one leaked
+        AsyncAnthropic per ITERATION, each holding its own TCP connection pool
+        until the garbage collector happens to finalize it — file descriptors and
+        idle sockets accumulating for the process lifetime.
+
+        Per-call construction bought nothing: every argument in
+        `_client_kwargs()` (api_key, max_retries, timeout, base_url) is fixed in
+        `__init__` and identical on every call, so the client built for call N is
+        indistinguishable from the one built for call N+1.
+
+        SAFE ONLY BECAUSE THE KEY IS FIXED PER ADAPTER. `self._api_key` is set
+        once in `__init__`; the adapter holds no CredentialVault and does no
+        per-org lookup. A shared client under per-org/BYOK keys would send one
+        tenant's call with another tenant's credential — silently. If that
+        resolution is ever added, this cache must be keyed by credential.
+
+        LAZY, not built in `__init__`, for two reasons: the SDK client is only
+        needed once a call is actually made (a container that never calls the
+        provider opens no pool), and the async sibling binds an httpx pool to the
+        event loop that first uses it, which must be the loop the calls run on.
+        `httpx.Client` is thread-safe, so the `asyncio.to_thread` hop in
+        `generate` may share this instance freely.
+        """
+        if self._sync_client_instance is None:
+            self._sync_client_instance = anthropic.Anthropic(**self._client_kwargs())
+        return self._sync_client_instance
+
+    def _async_client(self) -> anthropic.AsyncAnthropic:
+        """The ONE async egress client for this adapter (see `_sync_client`).
+
+        This is the instance the tool loop used to leak once per iteration.
+        """
+        if self._async_client_instance is None:
+            self._async_client_instance = anthropic.AsyncAnthropic(**self._client_kwargs())
+        return self._async_client_instance
+
+    async def aclose(self) -> None:
+        """Release both egress clients' connection pools.
+
+        Registered on the Container's `_closers` list at bootstrap, so
+        `Container.aclose()` disposes the pools deterministically on shutdown
+        rather than leaving them to GC finalization.
+
+        The instance references are deliberately NOT cleared: a call made after
+        shutdown then fails loudly on the closed client instead of silently
+        opening a replacement pool that nothing would ever close. Closing twice
+        is harmless (both SDK clients are idempotent on close).
+        """
+        if self._sync_client_instance is not None:
+            self._sync_client_instance.close()
+        if self._async_client_instance is not None:
+            await self._async_client_instance.close()
 
     def _concrete_model(self, logical: str) -> str:
         try:
@@ -655,7 +725,8 @@ class AnthropicAdapter:
             if request.system:
                 kwargs["system"] = request.system
 
-            client = anthropic.Anthropic(**self._client_kwargs())
+            # The adapter's ONE sync client, not a fresh one per call.
+            client = self._sync_client()
             message = await self._call_with_retry(
                 lambda: asyncio.to_thread(lambda: client.messages.create(**kwargs))
             )
@@ -722,7 +793,9 @@ class AnthropicAdapter:
         if request.system:
             kwargs["system"] = request.system
 
-        client = anthropic.AsyncAnthropic(**self._client_kwargs())
+        # The adapter's ONE async client. This construction was inside the tool
+        # loop's per-iteration path, leaking a connection pool every iteration.
+        client = self._async_client()
         message = await self._call_with_retry(lambda: client.messages.create(**kwargs))
         text, blocks = _normalize_anthropic_message(message, name_map=name_map)
         prompt_tokens = int(message.usage.input_tokens)

@@ -62,3 +62,34 @@ async def test_demo_mode_requires_explicit_flag_and_wires_demo_adapter() -> None
         assert isinstance(container.llm._gateway, DemoLLMAdapter)
     finally:
         await container.aclose()
+
+
+async def test_container_aclose_disposes_the_anthropic_egress_clients() -> None:
+    """P3: the adapter's SDK clients are released by Container.aclose(), not GC.
+
+    The adapter now builds ONE sync and ONE async client per instance and reuses
+    them for every call, so nothing else would ever close their TCP pools. The
+    disposal must be registered on the composition root's closer list — the
+    GuardedLLMGateway wrap hides `aclose`, so a bootstrap that forgot to register
+    it while the concrete adapter was in hand would leak silently.
+    """
+    from skylize.adapters.llm.anthropic_adapter import AnthropicAdapter
+
+    settings = Settings(backend="memory", anthropic_api_key="sk-test-not-a-real-key")
+    container = await build_container(settings)
+
+    assert isinstance(container.llm, GuardedLLMGateway)
+    adapter = container.llm._gateway
+    assert isinstance(adapter, AnthropicAdapter)
+
+    # Force both pools open WITHOUT any network call: the client objects are
+    # constructed lazily on first use, and constructing one opens no socket.
+    sync_client = adapter._sync_client()
+    async_client = adapter._async_client()
+    assert sync_client.is_closed() is False
+    assert async_client.is_closed() is False
+
+    await container.aclose()
+
+    assert sync_client.is_closed() is True, "sync egress pool survived aclose()"
+    assert async_client.is_closed() is True, "async egress pool survived aclose()"

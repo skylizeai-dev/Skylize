@@ -336,11 +336,21 @@ async def build_container(settings: Settings | None = None) -> Container:
             if spend_ceiling_dal is not None and cost_ledger is not None
             else None
         )
-        llm = AnthropicAdapter(
+        anthropic_adapter = AnthropicAdapter(
             settings=settings,
             cost_ledger=cost_ledger,
             spend_ceiling=spend_ceiling,
         )
+        # The adapter builds its two SDK egress clients once, on first use, and
+        # reuses them for every call; each owns a TCP connection pool. Register
+        # the disposal here, on the SAME `_closers` list Container.aclose()
+        # drains, so the pools are released deterministically at shutdown instead
+        # of waiting on GC finalization. Registered while the concrete adapter is
+        # still in hand — the GuardedLLMGateway wrap below hides `aclose`.
+        # `_closers` runs LIFO, so this closes before the db/redis pools, which
+        # is the right order: stop outbound HTTP first, tear down stores after.
+        closers.append(anthropic_adapter.aclose)
+        llm = anthropic_adapter
     elif settings.llm_demo_mode:
         llm = DemoLLMAdapter()
     else:

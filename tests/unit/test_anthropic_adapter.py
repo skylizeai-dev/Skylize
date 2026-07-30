@@ -500,6 +500,98 @@ async def test_sdk_internal_retry_disabled_and_timeout_set_on_async_client() -> 
 
 
 # ---------------------------------------------------------------------------
+# P3 — ONE SDK client per adapter, built on first use and reused; released by
+# aclose(), never left to GC. Both egresses used to build a fresh client inside
+# the request path and never close it — in the tool loop, one leaked
+# AsyncAnthropic (and its TCP pool) per ITERATION.
+# ---------------------------------------------------------------------------
+
+
+async def test_sync_client_built_once_and_reused_across_calls() -> None:
+    adapter = _make_adapter()
+    with patch("skylize.adapters.llm.anthropic_adapter.anthropic.Anthropic") as mock_cls:
+        mock_cls.return_value.messages.create.return_value = _mock_anthropic_response()
+        await adapter.generate(_request())
+        await adapter.generate(_request())
+        await adapter.generate(_request())
+
+    assert mock_cls.call_count == 1, (
+        f"expected ONE sync client for three calls, got {mock_cls.call_count}"
+    )
+    # Three real provider calls did go out — the reuse is not swallowing calls.
+    assert mock_cls.return_value.messages.create.call_count == 3
+    # And the cached instance is the one the SDK handed back.
+    assert adapter._sync_client_instance is mock_cls.return_value
+
+
+async def test_async_client_built_once_across_tool_loop_iterations() -> None:
+    """The leak this fixes: N tool-loop iterations = N calls to
+    generate_with_tools, which used to be N AsyncAnthropic clients."""
+    adapter = _make_adapter()
+    with patch(
+        "skylize.adapters.llm.anthropic_adapter.anthropic.AsyncAnthropic"
+    ) as mock_cls:
+        mock_cls.return_value.messages.create = AsyncMock(
+            return_value=_mock_tools_response()
+        )
+        for _ in range(4):
+            await adapter.generate_with_tools(_tools_request(), tools=[])
+
+    assert mock_cls.call_count == 1, (
+        f"expected ONE async client for four iterations, got {mock_cls.call_count}"
+    )
+    assert mock_cls.return_value.messages.create.await_count == 4
+    assert adapter._async_client_instance is mock_cls.return_value
+
+
+async def test_the_two_egresses_hold_separate_clients() -> None:
+    """One sync + one async per adapter — the sync egress must not be handed the
+    async client (its `messages.create` is awaited in a worker thread)."""
+    adapter = _make_adapter()
+    with patch("skylize.adapters.llm.anthropic_adapter.anthropic.Anthropic") as sync_cls:
+        with patch(
+            "skylize.adapters.llm.anthropic_adapter.anthropic.AsyncAnthropic"
+        ) as async_cls:
+            sync_cls.return_value.messages.create.return_value = _mock_anthropic_response()
+            async_cls.return_value.messages.create = AsyncMock(
+                return_value=_mock_tools_response()
+            )
+            await adapter.generate(_request())
+            await adapter.generate_with_tools(_tools_request(), tools=[])
+
+    assert sync_cls.call_count == 1
+    assert async_cls.call_count == 1
+    assert adapter._sync_client_instance is not adapter._async_client_instance
+
+
+async def test_aclose_closes_both_clients() -> None:
+    adapter = _make_adapter()
+    with patch("skylize.adapters.llm.anthropic_adapter.anthropic.Anthropic") as sync_cls:
+        with patch(
+            "skylize.adapters.llm.anthropic_adapter.anthropic.AsyncAnthropic"
+        ) as async_cls:
+            sync_cls.return_value.messages.create.return_value = _mock_anthropic_response()
+            async_cls.return_value.messages.create = AsyncMock(
+                return_value=_mock_tools_response()
+            )
+            async_cls.return_value.close = AsyncMock()
+            await adapter.generate(_request())
+            await adapter.generate_with_tools(_tools_request(), tools=[])
+            await adapter.aclose()
+
+    sync_cls.return_value.close.assert_called_once()
+    async_cls.return_value.close.assert_awaited_once()
+
+
+async def test_aclose_is_a_noop_when_no_call_was_ever_made() -> None:
+    """A container that never calls the provider opened no pool to close."""
+    adapter = _make_adapter()
+    assert adapter._sync_client_instance is None
+    assert adapter._async_client_instance is None
+    await adapter.aclose()  # must not raise
+
+
+# ---------------------------------------------------------------------------
 # D5 — an attempt budget below 1 is refused at boot, and _call_with_retry's
 # fallthrough is a REAL raise (not an assert, which `python -O` compiles out)
 # ---------------------------------------------------------------------------
