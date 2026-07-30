@@ -45,7 +45,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, NoReturn
 from uuid import UUID, uuid4
 
 from pydantic import ValidationError
@@ -144,7 +144,6 @@ class HitlQueueService:
         )
         if row is None:
             await self._raise_refusal(hitl_id, org_id, now=now, for_approve=True)
-            raise AssertionError("unreachable")  # _raise_refusal always raises
 
         try:
             envelope = HitlReplayEnvelope.model_validate(row.request_json)
@@ -254,7 +253,6 @@ class HitlQueueService:
         )
         if row is None:
             await self._raise_refusal(hitl_id, org_id, now=now, for_approve=False)
-            raise AssertionError("unreachable")
 
         reasons = [f"rejected by human reviewer {reviewed_by}"]
         if note:
@@ -295,9 +293,15 @@ class HitlQueueService:
 
     async def _raise_refusal(
         self, hitl_id: UUID, org_id: str, *, now: datetime, for_approve: bool
-    ) -> None:
+    ) -> NoReturn:
         """The claim predicate did not match — re-read the row and raise the
-        matching typed error. Always raises."""
+        matching typed error. Always raises.
+
+        Annotated ``NoReturn`` (as ``spend_ceiling._refuse`` already is) so the
+        type checker knows every path here raises. A ``-> None`` annotation made
+        callers look fallthrough-capable and forced a
+        ``raise AssertionError("unreachable")`` after each call site purely to
+        satisfy that; those sentinels are gone."""
         current = await self._repo.get(hitl_id, org_id)
         if current is None:
             raise HitlNotFound(f"no pending hitl item {hitl_id}")

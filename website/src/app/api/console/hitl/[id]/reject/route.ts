@@ -19,23 +19,15 @@ const verdictSchema = z.strictObject({
   note: z.string().max(2000).optional(),
 });
 
-function hitlIdFromPath(pathname: string): string | null {
-  const match = pathname.match(/\/api\/console\/hitl\/([^/]+)\/reject\/?$/);
-  if (!match) return null;
-  const candidate = decodeURIComponent(match[1]);
-  return z.uuid().safeParse(candidate).success ? candidate : null;
-}
-
-export const POST = consoleRoute<z.infer<typeof verdictSchema>>({
+export const POST = consoleRoute<z.infer<typeof verdictSchema>, { id: string }>({
   method: "POST",
   schema: verdictSchema,
-  handler: async ({ request, body }) => {
-    const hitlId = hitlIdFromPath(request.nextUrl.pathname);
-    if (hitlId === null) {
+  handler: async ({ body, params }) => {
+    if (!z.uuid().safeParse(params.id).success) {
       return errorResponse(400, "Invalid HITL id — expected a UUID.");
     }
     const result = await skylizeFetch<BackendHitlRejectResponse>(
-      `/api/v1/hitl/${hitlId}/reject`,
+      `/api/v1/hitl/${params.id}/reject`,
       { method: "POST", body },
     );
     return NextResponse.json(result);

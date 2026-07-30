@@ -9,22 +9,16 @@ import { skylizeFetch } from "@/lib/skylize/client";
 import { consoleRoute, errorResponse } from "@/lib/skylize/handler";
 import type { BackendDeliverableDetail } from "@/lib/skylize/types";
 
-function deliverableIdFromPath(pathname: string): string | null {
-  const match = pathname.match(/\/api\/console\/deliverables\/([^/]+)\/?$/);
-  if (!match) return null;
-  const candidate = decodeURIComponent(match[1]);
-  return z.uuid().safeParse(candidate).success ? candidate : null;
-}
-
-export const GET = consoleRoute({
+export const GET = consoleRoute<undefined, { id: string }>({
   method: "GET",
-  handler: async ({ request }) => {
-    const id = deliverableIdFromPath(request.nextUrl.pathname);
-    if (id === null) {
+  handler: async ({ params }) => {
+    // The framework's own dynamic segment, forwarded by consoleRoute — no
+    // pathname regex mirroring this file's folder name.
+    if (!z.uuid().safeParse(params.id).success) {
       return errorResponse(400, "Invalid deliverable id — expected a UUID.");
     }
     const deliverable = await skylizeFetch<BackendDeliverableDetail>(
-      `/api/v1/deliverables/${id}`,
+      `/api/v1/deliverables/${params.id}`,
     );
     return NextResponse.json(deliverable);
   },

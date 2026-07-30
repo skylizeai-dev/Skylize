@@ -446,7 +446,9 @@ class AgentExecutionService:
         # failure would report a decision as delivered that no subscriber ever
         # received.
         try:
-            await self._emit_decision(proposal, result)  # D5: audit + terminal event
+            # H2: the id derived (and enqueued) above is passed in, not derived
+            # a second time inside _emit_decision.
+            await self._emit_decision(proposal, result, hitl_id=hitl_id)
         except Exception:
             if hitl_id is not None:
                 log.error(
@@ -527,7 +529,13 @@ class AgentExecutionService:
             )
         )
 
-    async def _emit_decision(self, proposal: DecisionProposal, result: DecisionResult) -> None:
+    async def _emit_decision(
+        self,
+        proposal: DecisionProposal,
+        result: DecisionResult,
+        *,
+        hitl_id: UUID | None = None,
+    ) -> None:
         """Emit the terminal decision synchronously (owner decision D5).
 
         Reuses the inline engine's terminal event classes — DecisionEvaluated then
@@ -535,6 +543,13 @@ class AgentExecutionService:
         — published on the same EventBus as DecisionEngine._emit, plus the
         AuditService.record mirror. No new event type or stream is invented. A
         decision that approves is still a decision and is recorded like the others.
+
+        ``hitl_id`` is the id `_govern` already derived and ENQUEUED, passed in
+        rather than re-derived here. Both sites used to call
+        ``hitl_id_for(proposal.proposal_id)`` independently; they agreed only
+        because that helper happens to be pure, so the event's id and the written
+        row's id were two derivations that nothing forced to match. It is
+        required for a ``deferred_to_human`` result and unused otherwise.
         """
         if self._bus is None:
             raise RuntimeError(
@@ -597,6 +612,11 @@ class AgentExecutionService:
                 )
             )
         else:  # deferred_to_human
+            if hitl_id is None:  # pragma: no cover - _govern always supplies it
+                raise RuntimeError(
+                    "a deferred_to_human decision must carry the hitl_id of the "
+                    "row _govern already enqueued; none was passed"
+                )
             await self._bus.publish(
                 DecisionDeferredToHuman(
                     tenant_id=proposal.org_id,
@@ -607,7 +627,8 @@ class AgentExecutionService:
                     correlation_id=proposal.correlation_id,
                     payload=DecisionDeferredToHuman.Payload(
                         decision_id=result.decision_id,
-                        hitl_id=hitl_id_for(proposal.proposal_id),
+                        # The id of the row written above — not a second derivation.
+                        hitl_id=hitl_id,
                         trigger_reason=result.hitl_trigger or "unspecified",
                         routed_to=result.routed_to or "human_owner",
                     ),

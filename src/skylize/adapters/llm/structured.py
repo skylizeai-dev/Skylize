@@ -36,9 +36,12 @@ retry, auditing each fallback as `llm_gateway.structured_fallback`. A second
 failure raises `StructuredValidationError` — no silent malformed return.
 
 Token budget (AC #7): structured generation routes through the gateway's normal
-budget-checked egress (`LLMGenerateRequest`/`generate`), so the per-run
-`max_token_budget` ceiling and `TokenBudgetExceeded` apply unchanged. Schema
-construction never bypasses the budget.
+egress (`LLMGenerateRequest`/`generate`) and never bypasses whatever that path
+enforces — it adds no side channel. Note what that path actually enforces
+today: `to_generate_request` does NOT set `max_token_budget`, so the adapter's
+request-level `_check_budget` is inert here exactly as it is everywhere else
+(gateway.py's GAP note). The live pre-egress ceilings on this route are the
+GovernanceToken BUDGET stage and the org spend ceiling.
 """
 
 from __future__ import annotations

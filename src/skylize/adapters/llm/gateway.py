@@ -6,10 +6,26 @@ name a provider; they request `llm.generate` through the tool proxy, which calls
 this gateway after governance-token validation. The gateway:
 
   1. selects provider/model per tenant policy and cost routing;
-  2. enforces the per-run **token budget ceiling** BEFORE egress
-     (a call that would exceed `max_token_budget` is refused → TokenBudgetExceeded);
+  2. carries an OPTIONAL per-run token-budget ceiling checked before egress —
+     see the gap note below: nothing populates it today, so this check is
+     currently inert on every live path;
   3. records cost/quality in Langfuse keyed by `governance_token_id`;
   4. normalizes the provider response to a provider-neutral shape.
+
+GAP — the request-level token budget is UNWIRED (documented, not fixed here).
+`max_token_budget` / `tokens_used_so_far` on both request models default to
+None, and no live construction site sets them: AgentExecutionService
+(execution.py, both egresses), LLMStepRunner (orchestrator/runner.py), the
+Temporal judge, and StructuredRequest all omit them. `_check_budget` in the
+Anthropic adapter therefore returns immediately on its `is None` guard every
+time, and `TokenBudgetExceeded` is never raised from that path.
+
+What IS live is a DIFFERENT budget mechanism: the signed GovernanceToken's
+`max_token_budget`, enforced by `contracts/token.py:validate_tool_call` (BUDGET
+stage) which AgentExecutionService calls before each egress with the real
+running total. That is what actually stops an over-budget run today, and it
+raises the same `TokenBudgetExceeded` type — which is why the inert path looks
+covered. Wiring the request-level fields is a separate, deliberate decision.
 
 Foundation scope: the `LLMGateway` Protocol and the request/response/usage
 models. Concrete provider adapters (Anthropic primary, OpenAI failover) are
@@ -19,11 +35,12 @@ provider never touches agent or domain code (anti-lock-in invariant).
 CONTRACT NOTES for Sprint 2 implementers:
   - `model` is a logical name (e.g. "default", "fast", "reasoning"), NOT a
     provider model id. The gateway maps logical → concrete per tenant policy.
-  - Token accounting: `requested_max_tokens` is checked against the remaining
-    run budget (`max_token_budget - tokens_used_so_far`) by the tool proxy
-    before this gateway is called; the gateway additionally records ACTUAL usage
-    from the provider response and the proxy debits the run ledger by
-    `usage.total_tokens`.
+  - Token accounting, AS BUILT: the live pre-egress budget check is the
+    GovernanceToken BUDGET stage (`contracts/token.py:validate_tool_call`),
+    which AgentExecutionService runs before each call with the real running
+    total. The `max_token_budget - tokens_used_so_far` check described on the
+    request models below is a SECOND, currently unwired mechanism (see the GAP
+    note above). The gateway records ACTUAL usage from the provider response.
   - Streaming is out of scope for MVP; `generate` returns a complete response.
   - The gateway is the ONLY module permitted to import a provider SDK.
 """
@@ -150,6 +167,12 @@ class LLMGenerateRequest(BaseModel):
     # Optional run-budget context. When set, adapters refuse a call whose
     # requested_max_tokens exceeds (max_token_budget - tokens_used_so_far)
     # BEFORE any provider egress → TokenBudgetExceeded.
+    # UNWIRED TODAY: no live construction site sets either field, so the
+    # adapter's `_check_budget` short-circuits on its `is None` guard every
+    # time. The budget actually enforced pre-egress is the GovernanceToken's
+    # (contracts/token.py BUDGET stage). See the GAP note in the module
+    # docstring. Left in place — wiring them is a separate decision, not dead
+    # code to delete.
     max_token_budget: int | None = None
     tokens_used_so_far: int | None = None
 
@@ -181,6 +204,12 @@ class LLMGenerateWithToolsRequest(BaseModel):
     # Optional run-budget context. When set, adapters refuse a call whose
     # requested_max_tokens exceeds (max_token_budget - tokens_used_so_far)
     # BEFORE any provider egress → TokenBudgetExceeded.
+    # UNWIRED TODAY: no live construction site sets either field, so the
+    # adapter's `_check_budget` short-circuits on its `is None` guard every
+    # time. The budget actually enforced pre-egress is the GovernanceToken's
+    # (contracts/token.py BUDGET stage). See the GAP note in the module
+    # docstring. Left in place — wiring them is a separate decision, not dead
+    # code to delete.
     max_token_budget: int | None = None
     tokens_used_so_far: int | None = None
 

@@ -3,8 +3,11 @@ AnthropicAdapter — live LLM backend via the Anthropic Python SDK.
 
 Used when SKYLIZE_ANTHROPIC_API_KEY is present. Logical model names map to
 concrete Anthropic model IDs via Settings (llm_model_default / fast /
-reasoning). The adapter refuses over-budget calls BEFORE any provider egress,
-wraps BOTH egress paths (generate + generate_with_tools) in one bounded retry
+reasoning). The adapter carries a request-level budget check that is INERT on
+every live path today (nothing populates `max_token_budget` — see
+`_check_budget` and gateway.py's GAP note; the live pre-egress budget is the
+GovernanceToken's). It refuses UNPRICED and over-CEILING calls before any
+provider egress, wraps BOTH egress paths (generate + generate_with_tools) in one bounded retry
 policy (Settings-driven: 429 honours Retry-After else jittered backoff → then
 LLMRateLimited; 5xx jittered backoff → then LLMProviderUnavailable; 400 /
 context overflow re-raised immediately; 401 fails closed with no key material
@@ -385,7 +388,22 @@ class AnthropicAdapter:
 
     @staticmethod
     def _check_budget(request: LLMGenerateRequest | LLMGenerateWithToolsRequest) -> None:
-        """Refuse before egress when the request cannot fit the remaining budget."""
+        """Refuse before egress when the request cannot fit the remaining budget.
+
+        INERT ON EVERY LIVE PATH TODAY. `max_token_budget` defaults to None on
+        both request models and no live construction site sets it — not
+        AgentExecutionService's single-shot or tool egress, not LLMStepRunner,
+        not the Temporal judge, not StructuredRequest — so this returns at the
+        guard below on every call and never raises.
+
+        The budget that IS enforced pre-egress is the signed GovernanceToken's,
+        via `contracts/token.py:validate_tool_call` (BUDGET stage), which
+        AgentExecutionService runs before each call with the real running total.
+        It raises the same `TokenBudgetExceeded` type, which is why this inert
+        path reads as covered. Kept, not deleted: the check is correct and the
+        fields are part of the gateway contract; POPULATING them is a separate,
+        deliberate decision. See the GAP note in gateway.py's module docstring.
+        """
         if request.max_token_budget is None:
             return
         remaining = request.max_token_budget - (request.tokens_used_so_far or 0)

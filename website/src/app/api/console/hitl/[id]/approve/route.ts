@@ -32,25 +32,16 @@ const verdictSchema = z.strictObject({
 
 const APPROVE_TIMEOUT_MS = 120_000;
 
-/** consoleRoute passes only the request, so the dynamic segment is read from
- *  the pathname; anything that is not a UUID is refused before the backend. */
-function hitlIdFromPath(pathname: string): string | null {
-  const match = pathname.match(/\/api\/console\/hitl\/([^/]+)\/approve\/?$/);
-  if (!match) return null;
-  const candidate = decodeURIComponent(match[1]);
-  return z.uuid().safeParse(candidate).success ? candidate : null;
-}
-
-export const POST = consoleRoute<z.infer<typeof verdictSchema>>({
+export const POST = consoleRoute<z.infer<typeof verdictSchema>, { id: string }>({
   method: "POST",
   schema: verdictSchema,
-  handler: async ({ request, body }) => {
-    const hitlId = hitlIdFromPath(request.nextUrl.pathname);
-    if (hitlId === null) {
+  handler: async ({ body, params }) => {
+    // Anything that is not a UUID is refused before the backend is called.
+    if (!z.uuid().safeParse(params.id).success) {
       return errorResponse(400, "Invalid HITL id — expected a UUID.");
     }
     const result = await skylizeFetch<BackendHitlApproveResponse>(
-      `/api/v1/hitl/${hitlId}/approve`,
+      `/api/v1/hitl/${params.id}/approve`,
       { method: "POST", body, timeoutMs: APPROVE_TIMEOUT_MS },
     );
     return NextResponse.json(result);
