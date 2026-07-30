@@ -167,7 +167,9 @@ def _generate_input_chars(request: LLMGenerateRequest) -> int:
 
 
 def _tools_input_chars(
-    request: LLMGenerateWithToolsRequest, tools: list["ToolDefinition"]
+    request: LLMGenerateWithToolsRequest,
+    tools: list["ToolDefinition"],
+    anthropic_tools: list[dict[str, Any]],
 ) -> int:
     """Total input character count for the `generate_with_tools` egress.
 
@@ -175,6 +177,24 @@ def _tools_input_chars(
     and the tool definitions (id, description, JSON schema) — all of which count
     toward the provider's input tokens. Feeds the spend-ceiling estimate, which
     then biases the token count high.
+
+    ``anthropic_tools`` is the ALREADY-BUILT payload from `_to_anthropic_tools`,
+    positionally aligned with ``tools``. Each entry's ``input_schema`` is the
+    very object that payload carries, so ``model_json_schema()`` is called once
+    per tool per turn instead of twice: this function used to rebuild every
+    schema itself, and `_to_anthropic_tools` rebuilt them again two lines later
+    (Pydantic v2 does not memoize it), so every tool-loop iteration built every
+    schema twice.
+
+    THE COUNT IS BYTE-IDENTICAL to the previous formula — deliberately. The
+    summands are unchanged (``tool_id`` + ``description`` + the serialized
+    schema); only the schema OBJECT is now reused rather than regenerated, and
+    ``json.dumps`` is deterministic for a given object. Measuring the outer
+    payload entry instead would also have been safe (it is strictly longer, by
+    the JSON framing and key names) but it would have RAISED the estimate, and
+    this number feeds the spend-ceiling gate: silently moving it, in either
+    direction, changes which borderline calls are refused. Keeping it exact
+    makes "behaviour unchanged" checkable rather than argued.
     """
     total = len(request.system or "")
     for message in request.messages:
@@ -183,9 +203,9 @@ def _tools_input_chars(
             total += len(block.tool_output or "")
             if block.tool_input:
                 total += len(json.dumps(block.tool_input, default=str))
-    for tool in tools:
+    for tool, built in zip(tools, anthropic_tools, strict=True):
         total += len(tool.tool_id) + len(tool.description)
-        total += len(json.dumps(tool.input_schema.model_json_schema(), default=str))
+        total += len(json.dumps(built["input_schema"], default=str))
     return total
 
 
@@ -773,6 +793,16 @@ class AnthropicAdapter:
     ) -> LLMGenerateResponse:
         self._check_budget(request)
         model_id = self._concrete_model(request.model)
+        # Build the tool payload ONCE, before the pre-egress reads: the
+        # character-count estimate below then measures the schemas already built
+        # here instead of regenerating every one of them (Pydantic v2 does not
+        # memoize model_json_schema(), so each tool-loop iteration built every
+        # schema twice). Hoisting it above the DB round trips also means a tool
+        # registry with a post-sanitization name collision — a construction-time
+        # programming error — is refused without touching the database at all,
+        # rather than after the price and ceiling reads. Both orders refuse
+        # before any provider egress, so nothing is spent either way.
+        anthropic_tools, name_map = _to_anthropic_tools(tools)
         price = await self._require_price(org_id=request.org_id, model_id=model_id)
         # Org spend-ceiling gate — same pre-egress refusal as generate(), on the
         # second egress. Refuses before the async SDK client is built/called.
@@ -780,9 +810,8 @@ class AnthropicAdapter:
             request,
             price=price,
             attempted_tool="llm.generate_with_tools",
-            input_chars=_tools_input_chars(request, tools),
+            input_chars=_tools_input_chars(request, tools, anthropic_tools),
         )
-        anthropic_tools, name_map = _to_anthropic_tools(tools)
         kwargs: dict[str, Any] = dict(
             model=model_id,
             max_tokens=request.requested_max_tokens,
