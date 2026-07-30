@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import logging
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
+from pydantic import ValidationError
 
 from skylize.adapters.llm.anthropic_adapter import AnthropicAdapter
 from skylize.adapters.llm.gateway import (
@@ -16,6 +18,7 @@ from skylize.adapters.llm.gateway import (
     LLMGenerateWithToolsRequest,
     LLMMessage,
     LLMModelNotPriced,
+    LLMProviderUnavailable,
     TokenBudgetExceeded,
 )
 from skylize.config import Settings
@@ -494,3 +497,53 @@ async def test_sdk_internal_retry_disabled_and_timeout_set_on_async_client() -> 
         await adapter.generate_with_tools(req, tools=[])
     assert mock_cls.call_args.kwargs["max_retries"] == 0
     assert mock_cls.call_args.kwargs["timeout"] == 7.5  # the override reaches the client
+
+
+# ---------------------------------------------------------------------------
+# D5 — an attempt budget below 1 is refused at boot, and _call_with_retry's
+# fallthrough is a REAL raise (not an assert, which `python -O` compiles out)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("bad", [0, -1])
+def test_settings_rejects_attempt_budget_below_one(bad: int) -> None:
+    """Setting 0 to 'disable retries' is a plausible operator action; it would
+    make `range(1, 1)` empty, so no provider request would ever be sent."""
+    with pytest.raises(ValidationError) as ei:
+        _settings(llm_retry_max_attempts=bad)
+    message = str(ei.value)
+    assert "SKYLIZE_LLM_RETRY_MAX_ATTEMPTS must be >= 1" in message
+    # The error must explain that 1 means a single attempt with no retries.
+    assert "Use 1 to disable retries: one attempt, no retry." in message
+
+
+def test_settings_accepts_one_attempt() -> None:
+    """1 is the legitimate 'no retries' value and must remain constructible."""
+    assert _settings(llm_retry_max_attempts=1).llm_retry_max_attempts == 1
+
+
+async def test_zero_attempt_budget_raises_typed_error_not_attributeerror() -> None:
+    """The fallthrough must not depend on assertions being enabled.
+
+    Settings now refuses < 1, so this drives the adapter with a plain settings
+    stub that bypasses that validation — the same state `python -O` would reach
+    with the old `assert last_exc is not None` compiled out, where the next line
+    raised AttributeError on None.
+    """
+    stub = SimpleNamespace(
+        anthropic_api_key="sk-test",
+        anthropic_base_url="",
+        llm_model_default="claude-sonnet-4-6",
+        llm_model_fast="claude-haiku-4-5-20251001",
+        llm_model_reasoning="claude-opus-4-6",
+        llm_retry_max_attempts=0,  # not reachable through Settings any more
+    )
+    adapter = AnthropicAdapter(settings=stub)
+    invoke = AsyncMock()
+
+    with pytest.raises(LLMProviderUnavailable) as ei:
+        await adapter._call_with_retry(invoke)
+
+    invoke.assert_not_awaited()  # no provider request was attempted
+    assert "llm_retry_max_attempts=0 is below 1" in str(ei.value)
+    assert "TOTAL attempt count" in str(ei.value)

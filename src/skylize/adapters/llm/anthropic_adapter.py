@@ -480,7 +480,21 @@ class AnthropicAdapter:
                     break
                 await asyncio.sleep(self._retry_delay(attempt, exc))
 
-        assert last_exc is not None  # loop only breaks after a retryable failure
+        if last_exc is None:
+            # The loop only breaks after a retryable failure, so reaching here
+            # means it never ran: `range(1, self._retry_max_attempts + 1)` was
+            # empty, i.e. the attempt budget is < 1. Settings refuses that at
+            # boot (config.Settings._require_at_least_one_llm_attempt), but this
+            # is a REAL raise, not an assert: under `python -O` an assert is
+            # compiled out and the next line would raise AttributeError on None
+            # -- an error unrelated to the cause, for a call in which no provider
+            # request was ever attempted. Correctness must not depend on
+            # assertions being enabled.
+            raise LLMProviderUnavailable(
+                f"llm_retry_max_attempts={self._retry_max_attempts} is below 1, "
+                "so no anthropic request was attempted; it is a TOTAL attempt "
+                "count (use 1 for a single attempt with no retries)"
+            )
         if last_exc.response.status_code == 429:
             raise LLMRateLimited(
                 f"anthropic rate limited after {self._retry_max_attempts} attempts"

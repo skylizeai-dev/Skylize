@@ -1208,3 +1208,50 @@ async def test_happy_path_cost_unchanged_by_single_resolution(
         )
     finally:
         await _cleanup(admin_conn, org)
+
+
+# ===========================================================================
+# D5 — llm_retry_max_attempts is a TOTAL attempt count. A value of 1 is the
+#      legitimate "no retries" setting and must send EXACTLY ONE real request.
+#      (0 is refused by Settings; see tests/unit/test_anthropic_adapter.py.)
+# ===========================================================================
+
+
+@requires_app_role
+async def test_one_attempt_budget_sends_exactly_one_http_request(
+    app_db, fake_provider, admin_conn
+) -> None:
+    """One attempt, one socket write, on both the success and the failure path.
+
+    Counted server-side: the adapter builds both SDK clients with max_retries=0,
+    so the fake's request count IS the adapter's attempt count.
+    """
+    base_url, fake = fake_provider
+    org = _org()
+    try:
+        await _seed_all(app_db, admin_conn, org)
+        adapter, _bus, _repo, _ledger = _make_adapter(
+            app_db, base_url, llm_retry_max_attempts=1
+        )
+        assert adapter._retry_max_attempts == 1
+
+        # Success: exactly one request reaches the server.
+        fake.program(success(text="one shot", message_id="msg_one_attempt"))
+        resp = await adapter.generate(_request(org))
+        assert resp.text == "one shot"
+        assert fake.attempts == 1
+
+        # A retryable status is NOT retried at this budget: still one request.
+        fake.program(status(500, message="boom"))
+        with _delay_spy(adapter) as delays:
+            with pytest.raises(LLMProviderUnavailable):
+                await adapter.generate(_request(org))
+        assert fake.attempts == 1
+        assert delays == []  # no backoff was even computed
+
+        # And one ledger row for the one served call (the 500 settles nothing).
+        rows = await _ledger_rows(app_db, org)
+        assert len(rows) == 1
+        assert rows[0]["idempotency_key"] == "msg_one_attempt"
+    finally:
+        await _cleanup(admin_conn, org)

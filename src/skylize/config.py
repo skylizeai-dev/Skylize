@@ -204,6 +204,26 @@ class Settings(BaseSettings):
             )
         return self
 
+    @model_validator(mode="after")
+    def _require_at_least_one_llm_attempt(self) -> "Settings":
+        # Fail closed at boot. This is a TOTAL attempt count, not a retry count,
+        # and the adapter's loop is `range(1, llm_retry_max_attempts + 1)`. At 0
+        # that range is empty: the provider is never invoked, no HTTP request is
+        # made, and the adapter falls out of the loop into its "retries
+        # exhausted" tail with no exception to report -- an error unrelated to
+        # the real cause, for a call that was never attempted. Setting 0 to
+        # "disable retries" is a plausible operator action, so it is refused
+        # here rather than turned into a silent no-op at call time.
+        if self.llm_retry_max_attempts < 1:
+            raise ValueError(
+                "SKYLIZE_LLM_RETRY_MAX_ATTEMPTS must be >= 1; it is the TOTAL "
+                "number of attempts per call (initial attempt + retries), not a "
+                "retry count. Use 1 to disable retries: one attempt, no retry. "
+                f"Got {self.llm_retry_max_attempts}, which would make zero "
+                "provider requests."
+            )
+        return self
+
 
 _settings: Settings | None = None
 
