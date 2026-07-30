@@ -25,6 +25,9 @@ from skylize.config import Settings
 
 ORG = "org_test"
 
+#: Sentinel so a test can pass cost_ledger=None to assert the no-price refusal.
+_UNSET = object()
+
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -37,15 +40,47 @@ def _settings(**overrides: object) -> Settings:
         "llm_model_default": "claude-sonnet-4-6",
         "llm_model_fast": "claude-haiku-4-5-20251001",
         "llm_model_reasoning": "claude-opus-4-6",
-        "llm_price_sonnet_in": 3.0,
-        "llm_price_sonnet_out": 15.0,
-        "llm_price_haiku_in": 0.80,
-        "llm_price_haiku_out": 4.0,
-        "llm_price_opus_in": 15.0,
-        "llm_price_opus_out": 75.0,
     }
     defaults.update(overrides)
     return Settings(**defaults)  # type: ignore[arg-type]
+
+
+def _fake_cost_ledger(
+    *, input_micros: int = 3_000_000, output_micros: int = 15_000_000
+) -> MagicMock:
+    """A ledger that resolves a price and swallows the write.
+
+    Required now, not optional: the adapter refuses a call before egress when no
+    ledger is wired, because a deployment with no ledger has no price source and
+    guessing one produces a wrong charge. Cases that assert on transport,
+    tracing, or client construction still need a call to SUCCEED, so they need a
+    price to exist. The figures are the harness's own, not a fallback: nothing in
+    src/ supplies a default price any more.
+    """
+    from skylize.dal.cost_ledger import CostRecord, PriceSnapshot
+
+    ledger = MagicMock()
+    ledger.resolve_price_for = AsyncMock(
+        return_value=PriceSnapshot(
+            input_price_micros_per_mtok=input_micros,
+            output_price_micros_per_mtok=output_micros,
+            pricing_version=1,
+            currency="USD",
+        )
+    )
+    async def _record(observation: object, *, price: object) -> CostRecord:
+        # Mirror the DAL's arithmetic so `cost_usd_micros` on the response traces
+        # to the SNAPSHOT, not to a constant the fake invented.
+        micros = (
+            observation.input_tokens * price.input_price_micros_per_mtok  # type: ignore[attr-defined]
+            + observation.output_tokens * price.output_price_micros_per_mtok  # type: ignore[attr-defined]
+        ) // 1_000_000
+        return CostRecord(
+            entry_id=uuid4(), cost_micros=micros, currency="USD", inserted=True
+        )
+
+    ledger.record_cost = AsyncMock(side_effect=_record)
+    return ledger
 
 
 def _request(**kwargs: object) -> LLMGenerateRequest:
@@ -78,12 +113,14 @@ def _mock_anthropic_response(
 def _make_adapter(
     langfuse_client: object = None,
     tracer: object = None,
+    cost_ledger: object = _UNSET,
     **settings_overrides: object,
 ) -> AnthropicAdapter:
     return AnthropicAdapter(
         settings=_settings(**settings_overrides),
         langfuse_client=langfuse_client,
         tracer=tracer,
+        cost_ledger=_fake_cost_ledger() if cost_ledger is _UNSET else cost_ledger,
     )
 
 
@@ -244,45 +281,81 @@ async def test_normalization_usage_fields() -> None:
 
 
 async def test_normalization_cost_usd_micros_nonzero() -> None:
-    adapter = _make_adapter()
+    """The response's cost comes from the resolved model_pricing snapshot.
+
+    Rewritten: this used to assert the Settings-float arithmetic ($3/M in +
+    $15/M out) that the adapter no longer performs. The figure now traces to the
+    price the ledger resolved, which is the only price source there is.
+    """
+    adapter = _make_adapter(
+        cost_ledger=_fake_cost_ledger(input_micros=3_000_000, output_micros=15_000_000)
+    )
     req = _request(model="default")
     mock_resp = _mock_anthropic_response(input_tokens=1_000_000, output_tokens=1_000_000)
     with patch("skylize.adapters.llm.anthropic_adapter.anthropic.Anthropic") as mock_cls:
         mock_cls.return_value.messages.create.return_value = mock_resp
         result = await adapter.generate(req)
-    # sonnet: $3/M in + $15/M out → $18 → 18_000_000 micros
+    # 1M in at 3_000_000 micros/MTok + 1M out at 15_000_000 = 18_000_000 micros.
     assert result.cost_usd_micros == 18_000_000
 
 
-def _expected_micros(in_tok: int, out_tok: int, in_price: float, out_price: float) -> int:
-    """Mirror the adapter's cost arithmetic so tier assertions are float-robust."""
-    cost = (in_tok / 1_000_000) * in_price + (out_tok / 1_000_000) * out_price
-    return int(cost * 1_000_000)
+async def test_price_comes_from_the_resolved_snapshot_not_a_default() -> None:
+    """Replaces the per-tier float assertions.
+
+    Those pinned that `fast` was priced from `llm_price_haiku_*` and `reasoning`
+    from `llm_price_opus_*` — Settings floats that were the published prices of
+    RETIRED models. There is no tier map any more: whatever price the ledger
+    resolves for the concrete model is the price applied, so a deliberately
+    unusual snapshot must show up in the answer rather than a familiar default.
+    """
+    ledger = _fake_cost_ledger(input_micros=7_000_000, output_micros=11_000_000)
+    adapter = _make_adapter(cost_ledger=ledger)
+    mock_resp = _mock_anthropic_response(input_tokens=1_000_000, output_tokens=1_000_000)
+    with patch("skylize.adapters.llm.anthropic_adapter.anthropic.Anthropic") as mock_cls:
+        mock_cls.return_value.messages.create.return_value = mock_resp
+        await adapter.generate(_request(model="fast"))
+
+    # The gate resolved a price for the CONCRETE model id, once, before egress.
+    ledger.resolve_price_for.assert_awaited_once()
+    assert ledger.resolve_price_for.await_args.kwargs["model"] == "claude-haiku-4-5-20251001"
+    # ...and the ledger row was written from that same snapshot.
+    snapshot = ledger.record_cost.await_args.kwargs["price"]
+    assert snapshot.input_price_micros_per_mtok == 7_000_000
+    assert snapshot.output_price_micros_per_mtok == 11_000_000
 
 
-async def test_cost_keyed_exactly_per_configured_tier() -> None:
-    """Exact concrete-id keying prices each configured model from its own tier:
-    fast->haiku, reasoning->opus (default->sonnet is covered above). A wrong tier
-    would produce a different figure, so this proves the keying, not just non-zero."""
-    adapter = _make_adapter()
-    cases = {
-        "fast": _expected_micros(1_000_000, 1_000_000, 0.80, 4.0),    # haiku prices
-        "reasoning": _expected_micros(1_000_000, 1_000_000, 15.0, 75.0),  # opus prices
-    }
-    for logical, expected in cases.items():
-        mock_resp = _mock_anthropic_response(input_tokens=1_000_000, output_tokens=1_000_000)
-        with patch("skylize.adapters.llm.anthropic_adapter.anthropic.Anthropic") as mock_cls:
-            mock_cls.return_value.messages.create.return_value = mock_resp
-            result = await adapter.generate(_request(model=logical))
-        assert result.cost_usd_micros == expected, logical
+async def test_no_cost_ledger_refuses_before_egress() -> None:
+    """THE FIX. With no ledger there is no price source, so the call is refused
+    rather than priced from a Settings float — and refused BEFORE the provider is
+    called, so nothing is billed for a call that fails."""
+    adapter = _make_adapter(cost_ledger=None)
+    with patch("skylize.adapters.llm.anthropic_adapter.anthropic.Anthropic") as mock_cls:
+        with pytest.raises(LLMModelNotPriced, match="no cost ledger"):
+            await adapter.generate(_request())
+        mock_cls.return_value.messages.create.assert_not_called()
 
 
-def test_unknown_model_id_raises_not_priced() -> None:
-    """An unknown concrete model id raises rather than silently falling through
-    to a default (sonnet) price."""
-    adapter = _make_adapter()
-    with pytest.raises(LLMModelNotPriced, match="no price entry"):
-        adapter._estimate_cost("claude-unknown-9000", 1000, 1000)
+async def test_a_pricing_gap_in_the_ledger_also_refuses_before_egress() -> None:
+    """The other half of the same rule: a ledger that has no row for this model
+    is no better than no ledger."""
+    from skylize.dal.cost_ledger import PricingNotFound
+
+    ledger = _fake_cost_ledger()
+    ledger.resolve_price_for = AsyncMock(side_effect=PricingNotFound("no row"))
+    adapter = _make_adapter(cost_ledger=ledger)
+    with patch("skylize.adapters.llm.anthropic_adapter.anthropic.Anthropic") as mock_cls:
+        with pytest.raises(LLMModelNotPriced):
+            await adapter.generate(_request())
+        mock_cls.return_value.messages.create.assert_not_called()
+
+
+def test_no_settings_price_fields_remain() -> None:
+    """Guards the reintroduction. Two of the six removed floats were the prices
+    of models that no longer exist; a second price source is how the two
+    disagreed in the first place."""
+    from skylize.config import Settings as _S
+
+    assert [f for f in _S.model_fields if f.startswith("llm_price")] == []
 
 
 async def test_system_prompt_passed_to_api() -> None:

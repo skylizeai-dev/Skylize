@@ -128,9 +128,6 @@ def _settings(model: str) -> Settings:
         llm_model_default=model,
         llm_model_fast="claude-haiku-4-5-20251001",
         llm_model_reasoning="claude-opus-4-6",
-        llm_price_sonnet_in=3.0, llm_price_sonnet_out=15.0,
-        llm_price_haiku_in=0.80, llm_price_haiku_out=4.0,
-        llm_price_opus_in=15.0, llm_price_opus_out=75.0,
     )
 
 

@@ -175,13 +175,17 @@ class Settings(BaseSettings):
     # retried (see anthropic_adapter._call_with_retry).
     llm_timeout_seconds: float = 120.0
 
-    # Pricing per 1M tokens in USD (configurable so ops can update without redeploy)
-    llm_price_sonnet_in: float = 3.0
-    llm_price_sonnet_out: float = 15.0
-    llm_price_haiku_in: float = 0.80
-    llm_price_haiku_out: float = 4.0
-    llm_price_opus_in: float = 15.0
-    llm_price_opus_out: float = 75.0
+    # NO PRICE FIELDS HERE, DELIBERATELY. There used to be six `llm_price_*`
+    # floats used as a fallback when no cost ledger was wired. Two of the three
+    # tiers were the published prices of models that no longer exist — haiku
+    # 0.80/4.0 is RETIRED Haiku 3.5, opus 15.0/75.0 is DEPRECATED Opus 4.1 — so
+    # the fallback under-charged Haiku by 20% and over-charged Opus by 200%
+    # against the models actually configured above. `model_pricing` (migration
+    # 0013, read through the cost ledger) is the single source of truth for
+    # price, and a deployment with no ledger now REFUSES the call rather than
+    # estimating one (adapters/llm/anthropic_adapter.py `_require_price`).
+    # Do not reintroduce prices here: a second price source is how the two
+    # disagreed in the first place.
 
     @model_validator(mode="after")
     def _forbid_wildcard_cors(self) -> "Settings":

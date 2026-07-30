@@ -237,36 +237,37 @@ async def test_priced_model_proceeds_with_ledger_wired() -> None:
     assert result.text == "World"
 
 
-async def test_no_ledger_wired_skips_pricing_gate() -> None:
-    """Memory backend / unit harnesses: no ledger, no gate — unchanged behavior."""
+async def test_no_ledger_wired_refuses_before_egress() -> None:
+    """INVERTED. This case used to assert that no ledger meant no gate — the call
+    proceeded and was priced from Settings floats. Two of those three tiers were
+    the published prices of models that no longer exist (haiku 0.80/4.0 is
+    retired Haiku 3.5; opus 15.0/75.0 is deprecated Opus 4.1), so "no gate" meant
+    "charged the wrong amount". No ledger now means no price source, and no price
+    source is a refusal — taken BEFORE the provider is called, so nothing is
+    billed for a call that fails."""
     adapter = _adapter(None)
     with patch("skylize.adapters.llm.anthropic_adapter.anthropic.Anthropic") as mock_cls:
+        with pytest.raises(LLMModelNotPriced, match="no cost ledger"):
+            await adapter.generate(_request())
+        mock_cls.return_value.messages.create.assert_not_called()
+
+
+async def test_no_second_price_source_exists_to_warn_about() -> None:
+    """REPLACES the fallback-warning case.
+
+    That case pinned a WARNING emitted every time the Settings-float fallback
+    priced a call — an alarm that two price sources were in play. The alarm is
+    gone because the second source is gone: with a ledger the price is resolved
+    once at the gate, and without one the call is refused. A log line is a poor
+    substitute for not having the defect, so this asserts the stronger property.
+    """
+    adapter = _adapter(FakeCostLedger())
+    with patch("skylize.adapters.llm.anthropic_adapter.anthropic.Anthropic") as mock_cls:
         mock_cls.return_value.messages.create.return_value = _provider_message()
-        result = await adapter.generate(_request())
-    assert result.text == "World"
+        await adapter.generate(_request())
 
-
-async def test_settings_float_fallback_logs_warning(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """D2: the Settings floats are a DEMOTED fallback that warns on every use;
-    with a ledger wired the fallback (and its warning) never fires."""
-    with caplog.at_level(logging.WARNING, logger="skylize"):
-        adapter = _adapter(None)
-        with patch("skylize.adapters.llm.anthropic_adapter.anthropic.Anthropic") as mock_cls:
-            mock_cls.return_value.messages.create.return_value = _provider_message()
-            await adapter.generate(_request())
-    assert any("settings_price_fallback_used" in r.getMessage() for r in caplog.records)
-
-    caplog.clear()
-    with caplog.at_level(logging.WARNING, logger="skylize"):
-        adapter = _adapter(FakeCostLedger())
-        with patch("skylize.adapters.llm.anthropic_adapter.anthropic.Anthropic") as mock_cls:
-            mock_cls.return_value.messages.create.return_value = _provider_message()
-            await adapter.generate(_request())
-    assert not any(
-        "settings_price_fallback_used" in r.getMessage() for r in caplog.records
-    )
+    assert not hasattr(adapter, "_price_map")
+    assert not hasattr(adapter, "_estimate_cost")
 
 
 # ---------------------------------------------------------------------------

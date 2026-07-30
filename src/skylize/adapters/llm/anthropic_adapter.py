@@ -269,24 +269,11 @@ class AnthropicAdapter:
             "fast": str(settings.llm_model_fast),
             "reasoning": str(settings.llm_model_reasoning),
         }
-        # Explicit concrete-model-id -> (input_price, output_price) map for EXACT
-        # cost keying. Built from the three configured models paired with their
-        # price tier, keyed by the concrete id, so an unknown model id raises in
-        # _estimate_cost instead of being mispriced by substring guessing.
-        self._price_map: dict[str, tuple[float, float]] = {
-            str(settings.llm_model_default): (
-                float(getattr(settings, "llm_price_sonnet_in", 3.0)),
-                float(getattr(settings, "llm_price_sonnet_out", 15.0)),
-            ),
-            str(settings.llm_model_fast): (
-                float(getattr(settings, "llm_price_haiku_in", 0.80)),
-                float(getattr(settings, "llm_price_haiku_out", 4.0)),
-            ),
-            str(settings.llm_model_reasoning): (
-                float(getattr(settings, "llm_price_opus_in", 15.0)),
-                float(getattr(settings, "llm_price_opus_out", 75.0)),
-            ),
-        }
+        # There is deliberately NO price map here. Price comes from model_pricing
+        # via the cost ledger, resolved once per call by `_require_price`, or the
+        # call is refused. The Settings-float map that used to live here is gone;
+        # so is the `llm_price_*` block in config.py that fed it.
+        #
         # The two egress clients: built ONCE, on first use, and reused for every
         # subsequent call (see `_sync_client` / `_async_client`). Both are
         # released by `aclose()`, which bootstrap registers on the Container's
@@ -417,24 +404,36 @@ class AnthropicAdapter:
 
     async def _require_price(
         self, *, org_id: str, model_id: str
-    ) -> "PriceSnapshot | None":
+    ) -> "PriceSnapshot":
         """PRE-CALL pricing gate (owner decision D1); returns the resolved price.
 
-        This is the ONLY price resolution in a call (owner decision DEC-A). When
-        the cost ledger is wired, the concrete model must have an active
-        model_pricing row BEFORE any provider egress — a pricing gap refuses
-        the call with a typed error instead of producing an unrecordable
-        (budget-cap-evading) charge. The returned ``PriceSnapshot`` is then the
-        single source for all three money outputs of the call: the spend-ceiling
-        estimate (`_enforce_spend_ceiling`), the response's ``cost_usd_micros``,
-        and the ai_cost_ledger row (`_settle_cost` hands it to ``record_cost``
-        rather than letting the DAL re-resolve). No second lookup, no unit drift,
-        and no chance of the estimate and the charge disagreeing. Without a
-        ledger there is nothing to check against — returns None and the
-        documented Settings-float fallback applies.
+        This is the ONLY price resolution in a call (owner decision DEC-A). The
+        concrete model must have an active model_pricing row BEFORE any provider
+        egress — a pricing gap refuses the call with a typed error instead of
+        producing an unrecordable (budget-cap-evading) charge. The returned
+        ``PriceSnapshot`` is then the single source for all three money outputs
+        of the call: the spend-ceiling estimate (`_enforce_spend_ceiling`), the
+        response's ``cost_usd_micros``, and the ai_cost_ledger row
+        (`_settle_cost` hands it to ``record_cost`` rather than letting the DAL
+        re-resolve). No second lookup, no unit drift, and no chance of the
+        estimate and the charge disagreeing.
+
+        NO LEDGER MEANS NO PRICE SOURCE, AND THAT IS A REFUSAL. There used to be
+        a Settings-float fallback here for deployments with no ledger wired. Two
+        of its three prices were the published prices of models that no longer
+        exist — haiku 0.80/4.0 is retired Haiku 3.5, opus 15.0/75.0 is deprecated
+        Opus 4.1 — so it did not merely approximate, it silently under-charged
+        Haiku by 20% and over-charged Opus by 200%. A wrong number recorded as
+        money is worse than no call, so this refuses instead, and it refuses HERE,
+        before egress: refusing after the response would mean the provider had
+        already billed the account for a call that then failed.
         """
         if self._cost_ledger is None:
-            return None
+            raise LLMModelNotPriced(
+                f"no cost ledger is wired, so there is no price source for "
+                f"{model_id!r}; refusing the call before egress rather than "
+                "estimating one (a guessed price becomes a wrong charge)"
+            )
         from ...dal.cost_ledger import PricingNotFound
 
         try:
@@ -652,11 +651,16 @@ class AnthropicAdapter:
         resolved id differs from the gate's id, that is logged at ERROR with the
         org, correlation id, both ids, and the price actually applied.
 
-        Without a ledger (memory backend / unit harnesses) the documented
-        Settings-float fallback prices the response instead.
+        THERE IS NO LEDGER-LESS BRANCH. `_require_price` refuses the call before
+        egress when no cost ledger is wired, so reaching here without one would
+        mean a provider call had been made and billed with no way to record it.
+        The assertion states that invariant rather than silently pricing the
+        response from a Settings float, which is what used to happen.
         """
-        if self._cost_ledger is None:
-            return self._estimate_cost(gate_model_id, prompt_tokens, completion_tokens)
+        assert self._cost_ledger is not None, (
+            "_settle_cost reached with no cost ledger; _require_price must have "
+            "refused this call before egress"
+        )
 
         from ...dal.cost_ledger import CostObservation
 
@@ -882,28 +886,8 @@ class AnthropicAdapter:
         parsed = json.loads(response.text)
         return schema.model_validate(parsed)
 
-    def _estimate_cost(self, model_id: str, prompt_tokens: int, completion_tokens: int) -> int:
-        """DEMOTED FALLBACK (owner decision D2): Settings-float pricing.
-
-        model_pricing (via the cost ledger) is the single source of truth for
-        price. This float-based estimate remains ONLY for deployments with no
-        ledger wired (memory backend / unit harnesses) and logs at WARNING on
-        every use so two silent price sources can never coexist.
-        """
-        log.warning(
-            "settings_price_fallback_used model=%s (no cost ledger wired; "
-            "model_pricing is the price source of truth when available)",
-            model_id,
-        )
-        try:
-            in_price, out_price = self._price_map[model_id]
-        except KeyError:
-            raise LLMModelNotPriced(
-                f"no price entry for concrete model {model_id!r}; "
-                f"configured models: {sorted(self._price_map)}"
-            ) from None
-        cost_usd = (
-            (prompt_tokens / 1_000_000) * in_price
-            + (completion_tokens / 1_000_000) * out_price
-        )
-        return int(cost_usd * 1_000_000)
+    # `_estimate_cost` used to live here: the Settings-float fallback that priced
+    # a response when no cost ledger was wired. It is GONE, not stubbed — see
+    # `_require_price`, which now refuses before egress instead. Keeping a
+    # raise-only stub would have left the refusal at settle time, i.e. after the
+    # provider had already billed the call.
