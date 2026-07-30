@@ -50,7 +50,14 @@ from skylize.edge.routes import agents as agents_routes
 from skylize.events.memory_bus import InMemoryEventBus
 from tests.fakes.fake_provider_api import running_fake_provider, success
 
-from .conftest import APP_DB_URL, DB_URL, REDIS_URL, requires_app_role
+from .conftest import (
+    APP_DB_URL,
+    DB_URL,
+    REDIS_URL,
+    TEST_JWT_SECRET,
+    install_dev_header_auth,
+    requires_app_role,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -189,6 +196,10 @@ async def test_governed_execute_three_outcomes_e2e(app_db, admin_conn, fake_prov
 
     settings = Settings(
         backend="postgres",
+        # dev_auth is refused on a non-memory backend; the X-Dev-* headers
+        # these cases send are honoured by install_dev_header_auth below.
+        dev_auth=False,
+        jwt_secret=TEST_JWT_SECRET,
         db_url=DB_URL,
         db_app_url=APP_DB_URL,
         redis_url=REDIS_URL,
@@ -210,6 +221,7 @@ async def test_governed_execute_three_outcomes_e2e(app_db, admin_conn, fake_prov
     container = await build_container(settings)
     app = FastAPI()
     app.state.container = container
+    install_dev_header_auth(app)
     app.state.rate_limiter = RateLimiter(10_000)
     app.state.credential_resolve_limiter = RateLimiter(10_000)
     app.include_router(agents_routes.router)

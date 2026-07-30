@@ -205,6 +205,60 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def _forbid_dev_auth_on_a_real_backend(self) -> "Settings":
+        # Fail closed at boot. `dev_auth` makes edge/auth.py trust the X-Dev-Org /
+        # X-Dev-User / X-Dev-Roles headers VERBATIM (auth.py:39-50): any caller
+        # asserts any org and any role, with nothing verified. That is a local
+        # convenience, not authentication. On a real backend it means every
+        # tenant's data is readable by anyone who can reach the port, so the two
+        # settings are refused together rather than shipping that combination.
+        if self.dev_auth and self.backend != "memory":
+            raise ValueError(
+                "SKYLIZE_DEV_AUTH must be false when SKYLIZE_BACKEND is not "
+                f"'memory' (got backend={self.backend!r}). Dev auth trusts the "
+                "X-Dev-* headers verbatim, so it is not authentication at all. "
+                "Set SKYLIZE_DEV_AUTH=false (and SKYLIZE_JWT_SECRET, which the "
+                "check below then requires), or run SKYLIZE_BACKEND=memory."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _require_distinct_app_dsn_on_a_real_backend(self) -> "Settings":
+        # Fail closed at boot. `runtime_db_url` falls back to `db_url` when
+        # `db_app_url` is empty (see the property above), and `db_url` is the
+        # table-OWNING superuser used for migrations. A table owner bypasses RLS
+        # regardless of FORCE ROW LEVEL SECURITY
+        # (migrations/versions/0003_app_role_rls_subject.py:7-12), so forgetting
+        # SKYLIZE_DB_APP_URL silently disables every tenant-isolation policy in
+        # the schema while every request still succeeds.
+        #
+        # The comparison is deliberately a raw string equality after stripping
+        # surrounding whitespace: NOT a DSN parse. It catches the copy-paste case
+        # (the same string in both variables) without pretending to normalise
+        # hosts, ports, query parameters, or credentials. Two spellings of the
+        # same superuser DSN still pass this check -- see the .env.example note.
+        if self.backend != "memory":
+            app_dsn = self.db_app_url.strip()
+            if not app_dsn:
+                raise ValueError(
+                    "SKYLIZE_DB_APP_URL must be set when SKYLIZE_BACKEND is not "
+                    f"'memory' (got backend={self.backend!r}). Empty means the "
+                    "runtime connects as the table-owning superuser from "
+                    "SKYLIZE_DB_URL, which bypasses every RLS policy. Set it to "
+                    "the non-superuser skylize_app role created by migration 0003."
+                )
+            if app_dsn == self.db_url.strip():
+                raise ValueError(
+                    "SKYLIZE_DB_APP_URL must differ from SKYLIZE_DB_URL when "
+                    f"SKYLIZE_BACKEND is not 'memory' (got backend={self.backend!r}). "
+                    "SKYLIZE_DB_URL is the table-owning superuser used for "
+                    "migrations; connecting the runtime as that role bypasses "
+                    "every RLS policy. Set SKYLIZE_DB_APP_URL to the "
+                    "non-superuser skylize_app role created by migration 0003."
+                )
+        return self
+
+    @model_validator(mode="after")
     def _require_at_least_one_llm_attempt(self) -> "Settings":
         # Fail closed at boot. This is a TOTAL attempt count, not a retry count,
         # and the adapter's loop is `range(1, llm_retry_max_attempts + 1)`. At 0

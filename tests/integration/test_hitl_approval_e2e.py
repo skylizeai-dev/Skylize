@@ -42,7 +42,14 @@ from skylize.edge.routes import agents as agents_routes
 from skylize.edge.routes import hitl as hitl_routes
 from tests.fakes.fake_provider_api import running_fake_provider, success
 
-from .conftest import APP_DB_URL, DB_URL, REDIS_URL, requires_app_role
+from .conftest import (
+    APP_DB_URL,
+    DB_URL,
+    REDIS_URL,
+    TEST_JWT_SECRET,
+    install_dev_header_auth,
+    requires_app_role,
+)
 from .test_agent_execute_governed_e2e import (
     _INPUT,
     MODEL,
@@ -87,6 +94,10 @@ async def _running(
 ) -> AsyncIterator[tuple[AsyncClient, Container]]:
     settings = Settings(
         backend="postgres",
+        # dev_auth is refused on a non-memory backend; the X-Dev-* headers
+        # these cases send are honoured by install_dev_header_auth below.
+        dev_auth=False,
+        jwt_secret=TEST_JWT_SECRET,
         db_url=DB_URL,
         db_app_url=APP_DB_URL,
         redis_url=REDIS_URL,
@@ -102,6 +113,7 @@ async def _running(
     container = await build_container(settings)
     app = FastAPI()
     app.state.container = container
+    install_dev_header_auth(app)
     app.state.rate_limiter = RateLimiter(10_000)
     app.state.credential_resolve_limiter = RateLimiter(10_000)
     app.include_router(agents_routes.router)

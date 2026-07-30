@@ -26,8 +26,27 @@ def _p384_pem() -> str:
     return ECCService.generate_key_pair(Curve.P384).private_pem().decode()
 
 
+def _prod(**kwargs: object) -> Settings:
+    """A minimally-valid non-memory Settings for the signing-key branch.
+
+    `backend="postgres"` is the only thing these cases care about — it selects
+    `load_signing_key`'s fail-closed branch. The three extra fields satisfy the
+    boot interlocks that guard that same backend: dev auth is refused on a real
+    backend, turning it off requires a JWT secret, and the runtime DSN must be a
+    distinct non-superuser role so RLS is not bypassed. None of them affects what
+    is under test here.
+    """
+    return Settings(
+        backend="postgres",
+        dev_auth=False,
+        jwt_secret="signing-key-test-secret-not-a-credential",
+        db_app_url="postgresql://skylize_app@localhost:5432/skylize",
+        **kwargs,  # type: ignore[arg-type]
+    )
+
+
 def test_production_without_key_fails_closed() -> None:
-    settings = Settings(backend="postgres", governance_signing_key_pem="")
+    settings = _prod(governance_signing_key_pem="")
     with pytest.raises(SigningKeyError, match="No governance signing key"):
         load_signing_key(settings)
 
@@ -40,14 +59,16 @@ def test_memory_backend_without_key_allows_ephemeral() -> None:
 
 def test_configured_pem_is_loaded() -> None:
     pem = _p384_pem()
-    for backend in ("memory", "postgres"):
-        settings = Settings(backend=backend, governance_signing_key_pem=pem)
+    for settings in (
+        Settings(backend="memory", governance_signing_key_pem=pem),
+        _prod(governance_signing_key_pem=pem),
+    ):
         pair = load_signing_key(settings)
         assert pair.private_key.curve.key_size == 384
 
 
 def test_garbage_pem_is_rejected() -> None:
-    settings = Settings(backend="postgres", governance_signing_key_pem="-----BEGIN nonsense-----")
+    settings = _prod(governance_signing_key_pem="-----BEGIN nonsense-----")
     with pytest.raises(SigningKeyError, match="could not be parsed"):
         load_signing_key(settings)
 
@@ -55,7 +76,7 @@ def test_garbage_pem_is_rejected() -> None:
 def test_wrong_curve_key_is_rejected() -> None:
     # A P-256 key is not acceptable for the P-384 governance curve.
     p256_pem = ECCService.generate_key_pair(Curve.P256).private_pem().decode()
-    settings = Settings(backend="postgres", governance_signing_key_pem=p256_pem)
+    settings = _prod(governance_signing_key_pem=p256_pem)
     with pytest.raises(SigningKeyError, match="P-384"):
         load_signing_key(settings)
 
@@ -73,8 +94,8 @@ def _mint_token(signer: TokenSigner):
 def test_same_key_cross_instance_validation() -> None:
     """A token minted on instance A validates on instance B when keys match."""
     pem = _p384_pem()
-    a = load_signing_key(Settings(backend="postgres", governance_signing_key_pem=pem))
-    b = load_signing_key(Settings(backend="postgres", governance_signing_key_pem=pem))
+    a = load_signing_key(_prod(governance_signing_key_pem=pem))
+    b = load_signing_key(_prod(governance_signing_key_pem=pem))
 
     token = _mint_token(TokenSigner(a.private_key))
     assert verify_token_signature(token, b.public_key) is True
@@ -82,8 +103,8 @@ def test_same_key_cross_instance_validation() -> None:
 
 def test_different_keys_do_not_cross_validate() -> None:
     """Distinct keys (the ephemeral-per-pod bug) must FAIL cross-validation."""
-    a = load_signing_key(Settings(backend="postgres", governance_signing_key_pem=_p384_pem()))
-    b = load_signing_key(Settings(backend="postgres", governance_signing_key_pem=_p384_pem()))
+    a = load_signing_key(_prod(governance_signing_key_pem=_p384_pem()))
+    b = load_signing_key(_prod(governance_signing_key_pem=_p384_pem()))
 
     token = _mint_token(TokenSigner(a.private_key))
     assert verify_token_signature(token, b.public_key) is False
