@@ -113,11 +113,55 @@ class OutboxPoller:
         stream_key = row["stream_key"]
         tenant_id = row["tenant_id"]
         db_id = row["id"]
-        # JSONB decodes to dict via the pool codec (dal.connection._init_connection).
-        payload_dict = row["payload"]
+        # JSONB decodes via the pool codec (dal.connection._init_connection) to
+        # whatever document is actually stored — a dict for a JSON object, but a
+        # list / str / int / bool / None for any other VALID JSONB value. The
+        # column constrains the row to valid JSONB, never to an object.
+        payload = row["payload"]
 
-        # Flatten payload for Redis stream fields (XADD expects flat key-value pairs)
-        fields = {k: str(v) for k, v in _flatten_for_stream(payload_dict).items()}
+        # SHAPE GUARD. Only a JSON object can become Redis stream fields; anything
+        # else makes _flatten_for_stream raise AttributeError on `.items()`. That
+        # exception escapes every except block below (they wrap the XADD only),
+        # escapes _poll_and_publish (no handler), and lands in run()'s blanket
+        # handler, which sleeps and re-polls — and since the batch query orders by
+        # created_at ASC, the SAME row is fetched first forever and NO decision
+        # event ever leaves the outbox again. A payload that cannot be relayed is
+        # permanently unrelayable, so it is stamped failed (retry count preserved)
+        # and skipped rather than retried. This guard predates the JSONB codec
+        # change that removed it: the codec makes malformed JSON unrepresentable,
+        # not non-object JSON.
+        if not isinstance(payload, dict):
+            log.error(
+                "outbox_payload_not_an_object",
+                extra={
+                    "outbox_row_id": row_id,
+                    "tenant_id": tenant_id,
+                    "payload_type": type(payload).__name__,
+                    "retry_count": row["retry_count"],
+                },
+            )
+            await self._mark_failed(db_id, row["retry_count"])
+            return
+
+        # Flatten payload for Redis stream fields (XADD expects flat key-value
+        # pairs). Same disposition as the shape guard for the same reason: a
+        # document this cannot render (e.g. nesting deep enough to exhaust the
+        # recursion limit) is unrelayable on every future poll, so failing it once
+        # is the only way the poller makes progress.
+        try:
+            fields = {k: str(v) for k, v in _flatten_for_stream(payload).items()}
+        except Exception:
+            log.error(
+                "outbox_payload_unflattenable",
+                extra={
+                    "outbox_row_id": row_id,
+                    "tenant_id": tenant_id,
+                    "retry_count": row["retry_count"],
+                },
+                exc_info=True,
+            )
+            await self._mark_failed(db_id, row["retry_count"])
+            return
         fields["event_type"] = row["event_type"]
 
         # Server-generated id (``XADD <stream> *``): Redis assigns a
