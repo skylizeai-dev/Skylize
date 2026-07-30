@@ -6,8 +6,11 @@ Human-user authentication routes.
   POST /api/v1/auth/refresh   — rotate refresh token → new pair
   GET  /api/v1/auth/me        — current user info (requires valid access token)
 
-No rate limiting here beyond the global gateway limiter; add per-endpoint
-throttling (login attempts, register spam) in a later sprint.
+register / login / refresh run BEFORE authentication, so they are throttled by
+`enforce_anonymous_rate_limit` (peer address, not org_id -- there is no
+authenticated org yet). That limit is what bounds credential stuffing on /login
+and org-id probing on /register; read its docstring for the two caveats (proxy
+collapsing and in-process state).
 """
 
 from __future__ import annotations
@@ -25,7 +28,7 @@ from ...app.auth.user_service import (
 from ...bootstrap import Container
 from ...memory.identity import InvalidIdentifier, validate_identifier
 from ...schemas.base import RequestContext
-from ..deps import get_container, get_current_user
+from ..deps import enforce_anonymous_rate_limit, get_container, get_current_user
 from ..errors import CodedHTTPException, ErrorCode
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
@@ -82,7 +85,10 @@ class UserResponse(BaseModel):
 
 # ── endpoints ─────────────────────────────────────────────────────────────────
 
-@router.post("/register", response_model=UserResponse, status_code=201)
+@router.post(
+    "/register", response_model=UserResponse, status_code=201,
+    dependencies=[Depends(enforce_anonymous_rate_limit)],
+)
 async def register(
     body: RegisterRequest,
     container: Container = Depends(get_container),
@@ -136,7 +142,10 @@ async def register(
     )
 
 
-@router.post("/login", response_model=TokenResponse)
+@router.post(
+    "/login", response_model=TokenResponse,
+    dependencies=[Depends(enforce_anonymous_rate_limit)],
+)
 async def login(
     body: LoginRequest,
     container: Container = Depends(get_container),
@@ -153,7 +162,10 @@ async def login(
     )
 
 
-@router.post("/refresh", response_model=TokenResponse)
+@router.post(
+    "/refresh", response_model=TokenResponse,
+    dependencies=[Depends(enforce_anonymous_rate_limit)],
+)
 async def refresh(
     body: RefreshRequest,
     container: Container = Depends(get_container),

@@ -70,6 +70,36 @@ class ErrorCode(str, Enum):
     #: consulted — the request never reached the handler.
     AUTHORIZATION_FAILED = "authorization_failed"
 
+    #: The org's spend ceiling for the current billing period would be breached
+    #: by this call, so it was refused BEFORE any provider egress
+    #: (adapters/llm/spend_ceiling.py ``OrgSpendCeilingExceeded``). Nothing was
+    #: sent, nothing was charged. The customer's remedy is to raise the ceiling
+    #: or wait for the next period.
+    SPEND_CEILING_EXCEEDED = "spend_ceiling_exceeded"
+
+    #: The same refusal, different cause: NO ceiling row exists for this org and
+    #: period, and the gate fails closed rather than treating "unset" as
+    #: "unlimited". A distinct code because the remedy is completely different —
+    #: an operator must provision the ceiling; the customer has not overspent.
+    #: This is what a brand-new org hits on its first call.
+    SPEND_CEILING_NOT_CONFIGURED = "spend_ceiling_not_configured"
+
+    #: The deployment has no ``model_pricing`` row for the concrete model the
+    #: agent would call, so the call was refused before egress rather than
+    #: producing an unrecordable charge (adapters/llm/gateway.py
+    #: ``LLMModelNotPriced``). A SERVER-side provisioning fault, not anything the
+    #: caller did.
+    MODEL_NOT_PRICED = "model_not_priced"
+
+    #: The LLM provider could not be reached, or returned a body that is not a
+    #: parseable Message. An upstream failure; nothing the caller can fix.
+    PROVIDER_UNAVAILABLE = "provider_unavailable"
+
+    #: The LLM provider did not answer within the configured timeout. Deliberately
+    #: distinct from PROVIDER_UNAVAILABLE: a timed-out call may have COMPLETED and
+    #: been billed by the provider, so it is never retried.
+    PROVIDER_TIMEOUT = "provider_timeout"
+
     #: Registration was refused because the requested ``org_id`` cannot be used
     #: to create a NEW organisation — either it already has at least one user, or
     #: a concurrent registration won the owner race. Registration is the only
