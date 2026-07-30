@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from ...bootstrap import Container
 from ...schemas.base import RequestContext
 from ..deps import get_container, require_any_role_or_user
+from ..errors import CodedHTTPException, ErrorCode
 
 router = APIRouter(prefix="/api/v1/agents", tags=["agents"])
 
@@ -84,7 +85,13 @@ async def execute_agent(
     except AgentGovernanceRejected as exc:
         # Decision engine rejected the request (owner decision D4): 403 carrying
         # the decision reason. No LLM call, no deliverable, no ledger row happened.
-        raise HTTPException(status_code=403, detail=f"decision rejected: {exc}") from exc
+        # Status and detail are unchanged; `code` is what lets a client tell this
+        # apart from the other two 403s this route can produce.
+        raise CodedHTTPException(
+            status_code=403,
+            detail=f"decision rejected: {exc}",
+            code=ErrorCode.DECISION_REJECTED,
+        ) from exc
     except AgentDeferredToHuman as exc:
         # Decision engine deferred to a human (owner decision D4): 202 carrying the
         # hitl_id of the queued escalation. No LLM call, no deliverable, no ledger
@@ -100,8 +107,14 @@ async def execute_agent(
         )
     except GovernanceDenied as exc:
         # Kill switch / suspension: the denial is already audited by the
-        # authority — surface it as forbidden, not a 500.
-        raise HTTPException(status_code=403, detail=f"governance denied: {exc}") from exc
+        # authority — surface it as forbidden, not a 500. The detail carries the
+        # authority's own reason, which names WHICH control fired (platform /
+        # tenant / agent kill switch, or agent suspension — snapshot.py:53-63).
+        raise CodedHTTPException(
+            status_code=403,
+            detail=f"governance denied: {exc}",
+            code=ErrorCode.GOVERNANCE_DENIED,
+        ) from exc
     except TokenBudgetExceeded as exc:
         raise HTTPException(status_code=429, detail=f"token budget exceeded: {exc}") from exc
     except AgentOutputError as exc:

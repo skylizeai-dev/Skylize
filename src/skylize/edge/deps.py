@@ -9,6 +9,7 @@ from fastapi import Depends, HTTPException, Request
 from ..bootstrap import Container
 from ..schemas.base import RequestContext
 from .auth import build_request_context
+from .errors import CodedHTTPException, ErrorCode
 from .rate_limit import RateLimiter
 
 
@@ -137,7 +138,15 @@ def require_role(
 ) -> Callable[..., Awaitable[RequestContext]]:
     async def _checker(ctx: RequestContext = Depends(resolver)) -> RequestContext:
         if role not in ctx.roles:
-            raise HTTPException(status_code=403, detail=f"requires role: {role}")
+            # AUTHORIZATION_FAILED, not a governance outcome: the presented
+            # credential lacks the role, so the handler never ran and nothing
+            # about the request's content was evaluated. Same 403 status and
+            # same detail string as before; only `code` is new.
+            raise CodedHTTPException(
+                status_code=403,
+                detail=f"requires role: {role}",
+                code=ErrorCode.AUTHORIZATION_FAILED,
+            )
         return ctx
 
     return _checker
@@ -156,8 +165,13 @@ def require_any_role(
 
     async def _checker(ctx: RequestContext = Depends(resolver)) -> RequestContext:
         if allowed.isdisjoint(ctx.roles):
-            raise HTTPException(
-                status_code=403, detail=f"requires one of roles: {sorted(allowed)}"
+            # See require_role: this 403 is about the CALLER, never about the
+            # proposal. On /agents/execute it is the case a bare 403 used to
+            # make indistinguishable from a decision-engine REJECT.
+            raise CodedHTTPException(
+                status_code=403,
+                detail=f"requires one of roles: {sorted(allowed)}",
+                code=ErrorCode.AUTHORIZATION_FAILED,
             )
         return ctx
 

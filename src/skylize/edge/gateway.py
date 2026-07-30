@@ -18,6 +18,7 @@ from fastapi import FastAPI
 
 from ..bootstrap import build_container
 from ..config import get_settings
+from .errors import install_error_handlers
 from .rate_limit import RateLimiter
 from .routes import (
     agent_prompts,
@@ -52,6 +53,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 def create_app() -> FastAPI:
     app = FastAPI(title="Skylize Gateway", version="0.1.0", lifespan=lifespan)
+
+    # Adds `code` alongside `detail` for the raise sites that carry one. Plain
+    # HTTPExceptions keep FastAPI's default {"detail": ...} shape untouched.
+    install_error_handlers(app)
 
     settings = get_settings()
     if settings.cors_origins:
