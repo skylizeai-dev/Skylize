@@ -117,8 +117,11 @@ class AgentGovernanceRejected(Exception):
 
 class AgentDeferredToHuman(Exception):
     """The synchronous decision gate deferred the request to a human (owner
-    decision D4: HTTP 202 carrying hitl_id). A hitl_queue row is written first;
-    no LLM call, no deliverable, no ledger row."""
+    decision D4: HTTP 202 carrying hitl_id). A hitl_queue row is written first —
+    guaranteed by _govern's ordering (D3): the row is durable before the terminal
+    DecisionDeferredToHuman event and the audit record are emitted, so this
+    exception is never raised for a hitl_id that does not exist. No LLM call, no
+    deliverable, no ledger row."""
 
     def __init__(self, *, hitl_id: UUID, reason: str) -> None:
         super().__init__(reason)
@@ -403,6 +406,17 @@ class AgentExecutionService:
         (execution proceeds unchanged); raises on the two non-approve terminals so
         the route can map them (D4): AgentGovernanceRejected -> 403,
         AgentDeferredToHuman -> 202.
+
+        ORDERING (D3). On a deferral the hitl_queue row is written BEFORE the
+        terminal event and the audit record. It used to be the other way round,
+        contradicting both AgentDeferredToHuman's docstring ("A hitl_queue row is
+        written first") and edge/routes/agents.py ("the hitl_queue row was
+        written before this response") — and, worse, a subscriber reacting to
+        DecisionDeferredToHuman raced an empty table, while an _enqueue_hitl
+        failure (Postgres down, FK violation, RLS refusal) 500'd the request with
+        a terminal "deferred, hitl_id=X" event and audit record already published
+        for a row that would never exist. A published terminal event now always
+        describes a row that is already durable.
         """
         if self._evaluator is None:
             raise RuntimeError(
@@ -413,7 +427,39 @@ class AgentExecutionService:
             contract=contract, org_id=org_id, agent_id=agent_id, correlation_id=correlation_id
         )
         result = await self._evaluator.evaluate(proposal)
-        await self._emit_decision(proposal, result)  # D5: audit + terminal event
+
+        # D3: durable row first. A raise here means NO terminal event and NO
+        # audit record were published — the caller gets the failure and there is
+        # nothing downstream claiming a hitl_id that was never written.
+        hitl_id: UUID | None = None
+        if result.outcome == "deferred_to_human":
+            hitl_id = hitl_id_for(proposal.proposal_id)
+            await self._enqueue_hitl(
+                contract, proposal, result, hitl_id,
+                validated_input=validated_input, user_id=user_id,
+            )
+
+        # D3: emission failure AFTER a written row is LOGGED AT ERROR NAMING THE
+        # ROW AND RE-RAISED — never swallowed. Justification: an unannounced but
+        # real 'pending' row stays visible and actionable in the reviewer's queue
+        # (a human approval re-emits the terminal event), whereas swallowing the
+        # failure would report a decision as delivered that no subscriber ever
+        # received.
+        try:
+            await self._emit_decision(proposal, result)  # D5: audit + terminal event
+        except Exception:
+            if hitl_id is not None:
+                log.error(
+                    "hitl_row_written_but_decision_emit_failed",
+                    extra={
+                        "hitl_id": str(hitl_id),
+                        "org_id": proposal.org_id,
+                        "correlation_id": str(proposal.correlation_id),
+                        "decision_id": str(result.decision_id),
+                    },
+                    exc_info=True,
+                )
+            raise
 
         if result.outcome == "approved":
             return
@@ -421,12 +467,8 @@ class AgentExecutionService:
             raise AgentGovernanceRejected(
                 "; ".join(result.reasons) or "governance rejected the request"
             )
-        # deferred_to_human — write the hitl_queue row, then surface the 202.
-        hitl_id = hitl_id_for(proposal.proposal_id)
-        await self._enqueue_hitl(
-            contract, proposal, result, hitl_id,
-            validated_input=validated_input, user_id=user_id,
-        )
+        # deferred_to_human — the row is already durable; surface the 202.
+        assert hitl_id is not None  # set above for exactly this outcome
         raise AgentDeferredToHuman(
             hitl_id=hitl_id,
             reason="; ".join(result.reasons) or result.hitl_trigger or "deferred to human",
