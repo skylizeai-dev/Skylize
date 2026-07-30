@@ -18,7 +18,7 @@ MONEY PATH PROVEN IN CI:       yes (ci.yml config) -- never proven to have RUN
 GATEWAY CONTAINER IMAGE:       exists (two, divergent)
 TABLES WITHOUT TENANT ISOLATION: 6 of 25 hold customer data
 AGENTS WITH FULL-PATH TESTS:   1 of 21
-DEMO BAR GAPS: 8   --   PILOT BAR GAPS: 19
+DEMO BAR GAPS: 8   --   PILOT BAR GAPS: 20
 EXPOSURE ITEMS: 15
 ```
 
@@ -351,6 +351,7 @@ Ordered by when a customer hits it. Sizes: SMALL <½ day, MEDIUM ~1 day, LARGE >
 | E17 | Wire Langfuse or OTel — the hooks exist and reach nothing (`anthropic_adapter.py:196,535-560`; no `opentelemetry` import in `src/`; `langfuse` not a dependency) | **MEDIUM** | adding the dependency and a construction site is small; deciding what to trace, and the PII posture against `audit/service.py:10-11`, is not |
 | E18 | Real Rego + a live OPA server, if OPA is to be the arbiter ADR-0004 designates (`policy/skylize/decision/*.rego`, 128 lines of deny-all) | **LARGE** | blocked on owner approval of `policy_inputs.md` (§26) |
 | E19 | Per-tenant Qdrant isolation, or accept application-level filtering as the boundary (`memory/qdrant_adapter.py:35`, one collection for all tenants) | **MEDIUM** | per-org collections or a payload-index guarantee, plus a re-index of existing points |
+| E20 | A governed invite flow — the only way to add a SECOND user to an organisation. `POST /api/v1/auth/register` is unauthenticated and now creates NEW orgs only, refusing any org that already has a user (409 `org_not_available`, `app/auth/user_service.py`); the read-then-write that admitted strangers as `viewer` is gone, and with it the last HTTP path to a second account. Intentional and fail-closed: registration mints owners for unknown callers, so it must never be the path that adds a user to someone else's tenant | **MEDIUM** | the write side already exists (`UserRepository.create_user` is unconditional and is what an invite would call); the work is the surface around it — an owner/admin-authorised endpoint, an invitation record with a single-use expiring token, an explicit role choice validated against `VALID_ROLES`, an audit record per acceptance, and the migration for the invitation table. Migration 0017's unique index is deliberately partial on the owner role so this stays possible without a schema change |
 
 #### OPERATIONS — not engineering (item 23)
 
@@ -368,7 +369,7 @@ These are frequently mistaken for missing features. They are provisioning steps 
 | O8 | Provision an OPA service in CI and set `SKYLIZE_TEST_OPA_URL`, or record that those tests are intentionally never run (§8) | **SMALL** |
 | O9 | Decide and document the demo posture: demo mode (fake output, no money path) vs live key (real output, real spend). They cannot be shown together (§20 gap 3) | **SMALL** |
 
-Counts: **19 engineering gaps** (E1-E19), **9 operations items** (O1-O9), **8 demo gaps**.
+Counts: **20 engineering gaps** (E1-E20), **9 operations items** (O1-O9), **8 demo gaps**.
 
 ---
 

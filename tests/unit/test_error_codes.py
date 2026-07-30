@@ -144,6 +144,7 @@ def test_error_code_vocabulary_is_a_closed_enum() -> None:
         "decision_rejected",
         "governance_denied",
         "authorization_failed",
+        "org_not_available",
     }
     with pytest.raises(ValueError):
         ErrorCode("not_a_real_code")

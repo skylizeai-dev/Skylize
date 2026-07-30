@@ -341,6 +341,25 @@ class InMemoryUserRepository:
         self._users[row.user_id] = row
         self._by_email[row.email.lower()] = row.user_id
 
+    async def create_owner_of_new_org(self, row: UserRow) -> bool:
+        """Mirror of the Pg conditional insert (dal/users.py).
+
+        The two guards there — "no user in this org" and "at most one owner per
+        org" — are both applied, so the memory backend refuses exactly what
+        Postgres refuses. There is no race to settle: this store is a plain dict
+        mutated from a single event loop, so the check and the write cannot be
+        interleaved. The Pg implementation needs migration 0017's unique index
+        precisely because that is not true there.
+        """
+        if any(u.org_id == row.org_id for u in self._users.values()):
+            return False
+        if any(
+            u.org_id == row.org_id and "owner" in u.roles for u in self._users.values()
+        ):  # pragma: no cover - implied by the check above; kept for parity
+            return False
+        await self.create_user(row)
+        return True
+
     async def get_by_email(self, email: str) -> UserRow | None:
         user_id = self._by_email.get(email.lower())
         return self._users.get(user_id) if user_id is not None else None

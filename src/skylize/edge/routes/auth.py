@@ -17,11 +17,16 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
-from ...app.auth.user_service import DuplicateEmailError, InvalidCredentialsError
+from ...app.auth.user_service import (
+    DuplicateEmailError,
+    InvalidCredentialsError,
+    OrgNotAvailableError,
+)
 from ...bootstrap import Container
 from ...memory.identity import InvalidIdentifier, validate_identifier
 from ...schemas.base import RequestContext
 from ..deps import get_container, get_current_user
+from ..errors import CodedHTTPException, ErrorCode
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 
@@ -82,6 +87,21 @@ async def register(
     body: RegisterRequest,
     container: Container = Depends(get_container),
 ) -> UserResponse:
+    """Create a NEW organisation and its owner.
+
+    UNAUTHENTICATED, so its blast radius is its whole security posture. It
+    creates new orgs only: registering against an org that already has a user is
+    refused (409 `org_not_available`). Before that rule, a stranger who knew an
+    org_id was admitted to that tenant as `viewer`, which reads `GET
+    /api/v1/agents` and every deliverable route.
+
+    CONSEQUENCE, INTENTIONAL: there is now NO way to add a second user to an
+    organisation over HTTP. That is fail-closed, and adding one is a separate
+    feature — a governed invite flow, tracked as PILOT BAR item E20 in
+    docs/MVP_GAP_ANALYSIS.md. Do not reopen this route to do it; a second user
+    must arrive through an authenticated, org-scoped path that chooses the role
+    deliberately, not through the path that mints owners for unknown callers.
+    """
     try:
         user = await container.user_auth.register(
             org_id=body.org_id,
@@ -91,6 +111,21 @@ async def register(
         )
     except DuplicateEmailError:
         raise HTTPException(status_code=409, detail="email already registered")
+    except OrgNotAvailableError as exc:
+        # Wording is deliberately non-confirming: "not available" is the minimum
+        # a registrant needs in order to choose another identifier, and unlike
+        # "already exists" it does not assert that a tenant with this org_id
+        # exists — the id could equally be reserved or previously used. (The 409
+        # status is itself a weak existence signal; the mitigation for probing is
+        # the rate limit on this route, not the phrasing.)
+        raise CodedHTTPException(
+            status_code=409,
+            detail=(
+                "registration creates a new organisation only; "
+                "this org_id is not available"
+            ),
+            code=ErrorCode.ORG_NOT_AVAILABLE,
+        ) from exc
     return UserResponse(
         user_id=user.user_id,
         org_id=user.org_id,

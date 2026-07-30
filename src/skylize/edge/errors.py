@@ -70,6 +70,15 @@ class ErrorCode(str, Enum):
     #: consulted — the request never reached the handler.
     AUTHORIZATION_FAILED = "authorization_failed"
 
+    #: Registration was refused because the requested ``org_id`` cannot be used
+    #: to create a NEW organisation — either it already has at least one user, or
+    #: a concurrent registration won the owner race. Registration is the only
+    #: org-creating path and it creates new orgs only
+    #: (app/auth/user_service.py). The wire value and the human message are
+    #: deliberately non-confirming: they say the identifier is unavailable, not
+    #: that a tenant with that id exists.
+    ORG_NOT_AVAILABLE = "org_not_available"
+
 
 class CodedHTTPException(HTTPException):
     """An ``HTTPException`` that also carries a stable ``ErrorCode``.

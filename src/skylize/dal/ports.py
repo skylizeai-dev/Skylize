@@ -241,7 +241,24 @@ class UserRepository(Protocol):
     """Human user store + refresh-token lifecycle. Email lookup is cross-tenant
     (login); everything else is scoped by `org_id` at the call site."""
 
-    async def create_user(self, row: UserRow) -> None: ...
+    async def create_user(self, row: UserRow) -> None:
+        """Unconditional insert. NOT the registration path — see below."""
+        ...
+
+    async def create_owner_of_new_org(self, row: UserRow) -> bool:
+        """Insert `row` as the org's owner ONLY IF the org has no users yet.
+
+        Returns True when the row was written, False when the org was already
+        claimed — by an existing user, or by a concurrent registration that won
+        the race. Never raises for the already-claimed case.
+
+        This exists instead of a read-then-write in the service because
+        registration is unauthenticated and is the only owner-minting path: two
+        simultaneous registrations for the same new org must not both become
+        owner. Implementations MUST settle that race in the store (a constraint
+        or an atomic conditional write), never by checking first.
+        """
+        ...
 
     async def get_by_email(self, email: str) -> UserRow | None: ...
 
