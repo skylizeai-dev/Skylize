@@ -118,7 +118,13 @@ class OrgSpendCeilingExceeded(Exception):
     for (org, current period) — fail closed (owner decision D6); or (b) the
     estimated post-call spend would breach the configured ceiling. Carries the
     full decision context (all micro-USD) so the refusal is auditable.
+
     ``ceiling_micros`` is ``None`` in case (a) — no ceiling was configured.
+    ``period_to_date_micros`` is ``None`` in case (a) too, and means NOT READ
+    rather than zero: with no ceiling to compare against, the period aggregate
+    cannot change the outcome, so it is never queried (it is the expensive read
+    of the pair). Reporting 0 there would assert an org had spent nothing, which
+    is a different and possibly false claim.
     """
 
     def __init__(
@@ -127,7 +133,7 @@ class OrgSpendCeilingExceeded(Exception):
         org_id: str,
         billing_period: str,
         ceiling_micros: int | None,
-        period_to_date_micros: int,
+        period_to_date_micros: int | None,
         estimated_micros: int,
         reason: str,
     ) -> None:
@@ -189,18 +195,39 @@ class SpendCeilingEnforcer:
         (Phase 2), and refuses when ``period_to_date + estimate > ceiling``. On
         refusal an audit record and a governance event are emitted and
         ``OrgSpendCeilingExceeded`` is raised — the caller must NOT reach the SDK.
+
+        READ ORDER (owner item 13). The ceiling is read FIRST and the period
+        aggregate is issued ONLY if a ceiling exists. It used to be computed
+        unconditionally, before the ``ceiling_micros is None`` check, where its
+        only consumer was an attribute on the refusal exception — the outcome on
+        that path is "refuse" whatever the aggregate says. Skipping it matters
+        because that is the misconfiguration path: an org with no ceiling row
+        refuses EVERY call, and each refusal was paying for the most expensive
+        read in the pair (see migration 0016 — without its covering index the
+        aggregate degrades to a full parallel seq scan of every tenant's rows).
+
+        This is why the two reads are NOT issued concurrently: whether the
+        aggregate is needed at all is only knowable once the ceiling read has
+        returned, so overlapping them would reinstate exactly the unconditional
+        aggregate this removes. The pair stays sequential on the allowed path
+        (2 round trips, unchanged); what got cheaper is the refused path (1) and,
+        via migration 0016, the aggregate itself.
         """
         billing_period = self._now().strftime("%Y-%m")
-        ceiling_micros = await self._ceiling_dal.read_ceiling_micros(org_id, billing_period)
-        period_to_date = await self._cost_ledger.org_period_total_micros(org_id, billing_period)
         estimate = estimate_max_micros(
             input_chars=input_chars,
             requested_max_tokens=requested_max_tokens,
             input_price_micros_per_mtok=price.input_price_micros_per_mtok,
             output_price_micros_per_mtok=price.output_price_micros_per_mtok,
         )
+        ceiling_micros = await self._ceiling_dal.read_ceiling_micros(org_id, billing_period)
 
         if ceiling_micros is None:
+            # Refuse WITHOUT touching ai_cost_ledger: no ceiling means no
+            # comparison, so period-to-date cannot change this outcome. The
+            # message still names the org, the period, the estimate that was
+            # refused and the fail-closed rule, and says outright that spend was
+            # not read — rather than reporting a 0 nobody measured.
             await self._refuse(
                 org_id=org_id,
                 agent_id=agent_id,
@@ -209,13 +236,19 @@ class SpendCeilingEnforcer:
                 attempted_tool=attempted_tool,
                 billing_period=billing_period,
                 ceiling_micros=None,
-                period_to_date=period_to_date,
+                period_to_date=None,
                 estimate=estimate,
                 reason=(
                     f"no org spend ceiling configured for org={org_id!r} "
-                    f"period={billing_period!r}; failing closed (D6)"
+                    f"period={billing_period!r}; failing closed (D6). "
+                    f"Refused a call estimated at {estimate} micro-USD; "
+                    f"period-to-date spend was not read (no ceiling to compare it "
+                    f"against)"
                 ),
             )
+
+        # A ceiling exists, so the aggregate is genuinely needed.
+        period_to_date = await self._cost_ledger.org_period_total_micros(org_id, billing_period)
 
         if period_to_date + estimate > ceiling_micros:
             await self._refuse(
@@ -246,11 +279,14 @@ class SpendCeilingEnforcer:
         attempted_tool: str,
         billing_period: str,
         ceiling_micros: int | None,
-        period_to_date: int,
+        period_to_date: int | None,
         estimate: int,
         reason: str,
     ) -> NoReturn:
         """Record the refusal (audit + governance event) and raise. Never returns.
+
+        ``period_to_date`` is ``None`` on the no-ceiling path, where the
+        aggregate is deliberately not read (see ``enforce``).
 
         Two writes, mirroring how the Governance Authority records a governed
         refusal: an ``AuditService`` record (append-only ``audit_log`` row +

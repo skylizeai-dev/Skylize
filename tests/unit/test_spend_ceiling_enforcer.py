@@ -63,11 +63,16 @@ class _FakeCostLedger:
         self._period_to_date = period_to_date
         self._price = price
         self.record_cost_calls = 0
+        # Every org-wide aggregate this fake was asked for. The aggregate is the
+        # expensive read of the pre-egress pair (migration 0016), so a test can
+        # assert it is not issued when it cannot change the outcome.
+        self.aggregate_reads: list[tuple[str, str]] = []
 
     async def resolve_price_for(self, **_kwargs: object) -> PriceSnapshot:
         return self._price
 
     async def org_period_total_micros(self, org_id: str, billing_period: str) -> int:
+        self.aggregate_reads.append((org_id, billing_period))
         return self._period_to_date
 
     async def record_cost(self, *_args: object, **_kwargs: object) -> object:
@@ -160,6 +165,48 @@ async def test_missing_ceiling_row_fails_closed() -> None:
     assert "failing closed" in ei.value.reason
     assert len(bus.published_of_type("governance.scope_violation")) == 1
     assert len(repo.rows) == 1
+
+
+# ---------------------------------------------------------------------------
+# Read economy — the org-wide aggregate is the expensive half of the pre-egress
+# pair (migration 0016). It must not be issued when it cannot change the outcome.
+# ---------------------------------------------------------------------------
+
+
+async def test_no_ceiling_refuses_without_reading_the_ledger_aggregate() -> None:
+    """The aggregate used to run unconditionally, BEFORE the None check, on a
+    path whose outcome is 'refuse' regardless — and that is the path a
+    misconfigured org takes on EVERY call."""
+    enforcer, _bus, _repo, ledger = _enforcer(ceiling=None, period_to_date=999)
+    with pytest.raises(OrgSpendCeilingExceeded):
+        await _enforce(enforcer)
+    assert ledger.aggregate_reads == [], (
+        "ai_cost_ledger was queried on the no-ceiling path, where the answer "
+        "cannot affect the refusal"
+    )
+
+
+async def test_no_ceiling_reports_not_read_rather_than_a_zero_nobody_measured() -> None:
+    """period_to_date_micros is None (= not read), not 0 (= measured as empty),
+    and the reason still names the org, period, estimate and the D6 rule."""
+    enforcer, _bus, _repo, _ledger = _enforcer(ceiling=None, period_to_date=999)
+    with pytest.raises(OrgSpendCeilingExceeded) as ei:
+        await _enforce(enforcer, requested_max_tokens=1_000, input_chars=0)
+    assert ei.value.period_to_date_micros is None
+    assert ei.value.estimated_micros == 1_000
+    reason = ei.value.reason
+    assert ORG in reason
+    assert "2026-07" in reason  # the pinned billing period
+    assert "failing closed (D6)" in reason
+    assert "1000 micro-USD" in reason
+    assert "period-to-date spend was not read" in reason
+
+
+async def test_ceiling_present_still_reads_the_aggregate_exactly_once() -> None:
+    """When a ceiling exists the aggregate IS needed — and one read, not two."""
+    enforcer, _bus, _repo, ledger = _enforcer(ceiling=10_000_000, period_to_date=0)
+    await _enforce(enforcer)
+    assert ledger.aggregate_reads == [(ORG, "2026-07")]
 
 
 async def test_projected_equal_to_ceiling_is_allowed() -> None:

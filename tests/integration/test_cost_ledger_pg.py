@@ -22,7 +22,7 @@ import pytest_asyncio
 from skylize.dal.connection import Database
 from skylize.dal.cost_ledger import CostLedgerDAL, CostObservation, PricingNotFound
 
-from .conftest import APP_DB_URL, requires_app_role
+from .conftest import APP_DB_URL, requires_app_role, requires_pg
 
 pytestmark = pytest.mark.integration
 
@@ -324,3 +324,34 @@ async def test_missing_price_raises(app_db, admin_conn) -> None:
             await dal.record_cost(_obs(org, provider, model, i=1, o=1, key="np"))
     finally:
         await _cleanup(admin_conn, [org], provider)
+
+
+# ---------------------------------------------------------------------------
+# Schema guard: the covering index the pre-egress aggregate depends on
+# ---------------------------------------------------------------------------
+
+
+@requires_pg
+async def test_org_period_aggregate_has_its_covering_index(
+    migrated_public, admin_conn
+) -> None:
+    """Migration 0016's index must survive.
+
+    ``org_period_total_micros`` runs before EVERY LLM generation. Measured on
+    PostgreSQL 16 with 200,000 rows in the (org, period) under test, the planner
+    without this index abandons ``idx_ai_cost_ledger_reconcile`` and falls back
+    to a Parallel Seq Scan of the WHOLE table (11,583 buffers, every tenant's
+    heap pages); with it the same query is an Index Only Scan with
+    ``Heap Fetches: 0`` (1,209 buffers). The INCLUDE column is what makes the
+    heap unnecessary, so a "tidy-up" that drops it back to a plain two-column
+    index would silently undo the fix.
+    """
+    definition = await admin_conn.fetchval(
+        "SELECT indexdef FROM pg_indexes "
+        "WHERE tablename = 'ai_cost_ledger' AND indexname = $1",
+        "idx_ai_cost_ledger_org_period",
+    )
+    assert definition is not None, "migration 0016's covering index is missing"
+    normalized = " ".join(definition.lower().split())
+    assert "(org_id, billing_period)" in normalized
+    assert "include (cost_micros)" in normalized
