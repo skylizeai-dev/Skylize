@@ -75,11 +75,15 @@ class FakeCostLedger:
     def __init__(self, *, priced: bool = True) -> None:
         self.priced = priced
         self.observations: list[CostObservation] = []
+        self.prices_used: list[PriceSnapshot] = []
         self.record_error: Exception | None = None
+        # Every price lookup this fake performs, in order — the DEC-A counter.
+        self.resolved_models: list[str] = []
 
     async def resolve_price_for(
         self, *, org_id: str, provider: str, model: str, occurred_at: datetime
     ) -> PriceSnapshot:
+        self.resolved_models.append(model)
         if not self.priced or model not in SEED_PRICES:
             raise PricingNotFound(f"no price for {model!r}")
         in_p, out_p = SEED_PRICES[model]
@@ -90,13 +94,21 @@ class FakeCostLedger:
             currency="USD",
         )
 
-    async def record_cost(self, obs: CostObservation) -> CostRecord:
+    async def record_cost(
+        self, obs: CostObservation, *, price: PriceSnapshot | None = None
+    ) -> CostRecord:
+        """Mirrors CostLedgerDAL.record_cost, including its DEC-A price param:
+        a caller-supplied snapshot is used as-is; omitted, the price is resolved
+        from ``obs`` exactly as before. ``prices_resolved`` counts the lookups
+        this fake performs, so a test can assert the adapter resolves ONCE."""
         if self.record_error is not None:
             raise self.record_error
-        price = await self.resolve_price_for(
-            org_id=obs.org_id, provider=obs.provider, model=obs.model,
-            occurred_at=obs.occurred_at,
-        )
+        if price is None:
+            price = await self.resolve_price_for(
+                org_id=obs.org_id, provider=obs.provider, model=obs.model,
+                occurred_at=obs.occurred_at,
+            )
+        self.prices_used.append(price)
         self.observations.append(obs)
         return CostRecord(
             entry_id=uuid4(),
@@ -327,6 +339,110 @@ async def test_row_records_resolved_model_id_not_requested_alias() -> None:
     # Requested concrete id was claude-haiku-4-5-20251001; recorded is the
     # provider's first-hand resolved id.
     assert ledger.observations[0].model == "claude-haiku-4-5"
+
+
+# ---------------------------------------------------------------------------
+# DEC-A — the price is resolved EXACTLY ONCE per call
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("resolved_model", ["claude-sonnet-4-6", "claude-haiku-4-5"])
+async def test_price_resolved_exactly_once_per_call(resolved_model: str) -> None:
+    """One lookup, whether or not the provider resolves to a different id.
+
+    Before DEC-A there were two: the pre-call gate resolved for the REQUESTED
+    concrete id, and record_cost re-resolved from the RESOLVED id.
+    """
+    ledger = FakeCostLedger()
+    adapter = _adapter(ledger)
+    with patch("skylize.adapters.llm.anthropic_adapter.anthropic.Anthropic") as mock_cls:
+        mock_cls.return_value.messages.create.return_value = _provider_message(
+            model=resolved_model
+        )
+        await adapter.generate(_request())
+
+    assert ledger.resolved_models == ["claude-sonnet-4-6"], (
+        "expected exactly one price resolution, for the id the GATE priced; "
+        f"got {ledger.resolved_models}"
+    )
+
+
+async def test_price_resolved_exactly_once_on_tools_egress() -> None:
+    ledger = FakeCostLedger()
+    adapter = _adapter(ledger)
+    with patch("skylize.adapters.llm.anthropic_adapter.anthropic.AsyncAnthropic") as mock_cls:
+        mock_cls.return_value.messages.create = AsyncMock(
+            return_value=_provider_message(model="claude-haiku-4-5")
+        )
+        await adapter.generate_with_tools(_tools_request(), tools=[])
+
+    assert ledger.resolved_models == ["claude-sonnet-4-6"]
+
+
+# ---------------------------------------------------------------------------
+# DEC-B — an unpriced RESOLVED id still writes a row (money owed is never lost)
+# DEC-D — and the divergence is reported at ERROR, not absorbed
+# ---------------------------------------------------------------------------
+
+
+async def test_unpriced_resolved_id_still_writes_one_row(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The gate passes on the requested id; the provider serves an id with NO
+    model_pricing row. The account has been billed, so the row MUST be written —
+    priced from the gate's snapshot — and the call must not fail."""
+    ledger = FakeCostLedger()
+    adapter = _adapter(ledger)
+    req = _request()
+    unpriced = "claude-sonnet-4-6-99999999"
+    assert unpriced not in SEED_PRICES
+
+    with caplog.at_level(logging.ERROR, logger="skylize"):
+        with patch("skylize.adapters.llm.anthropic_adapter.anthropic.Anthropic") as mock_cls:
+            mock_cls.return_value.messages.create.return_value = _provider_message(
+                model=unpriced, input_tokens=1_000_000, output_tokens=1_000_000
+            )
+            response = await adapter.generate(req)  # must NOT raise
+
+    # DEC-B: exactly one row, despite the resolved id being unpriced.
+    assert len(ledger.observations) == 1
+    # DEC-C: it records what actually served the request.
+    assert ledger.observations[0].model == unpriced
+    # DEC-A: priced from the GATE's snapshot (sonnet 4-6), never re-resolved.
+    assert ledger.resolved_models == ["claude-sonnet-4-6"]
+    in_p, out_p = SEED_PRICES["claude-sonnet-4-6"]
+    assert response.cost_usd_micros == compute_cost_micros(
+        input_tokens=1_000_000, output_tokens=1_000_000,
+        input_price_micros_per_mtok=in_p, output_price_micros_per_mtok=out_p,
+    )
+
+    # DEC-D: reported at ERROR with org, correlation, both ids, applied price.
+    diverged = [
+        r for r in caplog.records
+        if r.levelno >= logging.ERROR and "llm_resolved_model_diverged" in r.getMessage()
+    ]
+    assert diverged, "divergence must be logged at ERROR"
+    msg = diverged[0].getMessage()
+    assert ORG in msg
+    assert str(req.correlation_id) in msg
+    assert "claude-sonnet-4-6" in msg
+    assert unpriced in msg
+    assert str(in_p) in msg and str(out_p) in msg
+
+
+async def test_no_divergence_log_when_ids_match(caplog: pytest.LogCaptureFixture) -> None:
+    """DEC-D fires on divergence ONLY — the happy path stays quiet."""
+    ledger = FakeCostLedger()
+    adapter = _adapter(ledger)
+    with caplog.at_level(logging.ERROR, logger="skylize"):
+        with patch("skylize.adapters.llm.anthropic_adapter.anthropic.Anthropic") as mock_cls:
+            mock_cls.return_value.messages.create.return_value = _provider_message(
+                model="claude-sonnet-4-6"
+            )
+            await adapter.generate(_request())
+    assert not any(
+        "llm_resolved_model_diverged" in r.getMessage() for r in caplog.records
+    )
 
 
 # ---------------------------------------------------------------------------

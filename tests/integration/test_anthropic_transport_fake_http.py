@@ -46,7 +46,10 @@ import anthropic
 import pytest
 import pytest_asyncio
 
-from skylize.adapters.llm.anthropic_adapter import AnthropicAdapter
+from skylize.adapters.llm.anthropic_adapter import (
+    AnthropicAdapter,
+    _generate_input_chars,
+)
 from skylize.adapters.llm.demo_adapter import DemoLLMAdapter
 from skylize.adapters.llm.gateway import (
     LLMAuthenticationError,
@@ -59,11 +62,15 @@ from skylize.adapters.llm.gateway import (
     LLMRateLimited,
     LLMTimeout,
 )
-from skylize.adapters.llm.spend_ceiling import SpendCeilingEnforcer
+from skylize.adapters.llm.spend_ceiling import (
+    OrgSpendCeilingExceeded,
+    SpendCeilingEnforcer,
+    estimate_max_micros,
+)
 from skylize.app.audit.service import AuditService
 from skylize.config import Settings
 from skylize.dal.connection import Database
-from skylize.dal.cost_ledger import CostLedgerDAL
+from skylize.dal.cost_ledger import CostLedgerDAL, compute_cost_micros
 from skylize.dal.memory import InMemoryAuditRepository
 from skylize.dal.org_spend_ceiling import OrgSpendCeilingDAL
 from skylize.events.memory_bus import InMemoryEventBus
@@ -206,7 +213,7 @@ async def _seed_tenant(admin_conn: object, org: str) -> None:
     )
 
 
-async def _seed_price(admin_conn: object, model: str) -> None:
+async def _seed_price(admin_conn: object, model: str, rate: int = SYNTH_RATE) -> None:
     await admin_conn.execute(  # type: ignore[attr-defined]
         """
         INSERT INTO model_pricing (org_id, provider, model,
@@ -214,7 +221,7 @@ async def _seed_price(admin_conn: object, model: str) -> None:
             currency, version, effective_from)
         VALUES (NULL, $1, $2, $3, $3, 'USD', 1, $4)
         """,
-        _PROVIDER, model, SYNTH_RATE, _EPOCH,
+        _PROVIDER, model, rate, _EPOCH,
     )
 
 
@@ -251,6 +258,17 @@ async def _ledger_rows(app_db: Database, org: str) -> list[dict[str, object]]:
     async with app_db.tenant_session(org) as conn:
         rows = await conn.fetch(
             "SELECT model, idempotency_key, cost_micros FROM ai_cost_ledger ORDER BY created_at"
+        )
+    return [dict(r) for r in rows]
+
+
+async def _ledger_rows_priced(app_db: Database, org: str) -> list[dict[str, object]]:
+    """Ledger rows including the FROZEN price columns — the rate actually applied."""
+    async with app_db.tenant_session(org) as conn:
+        rows = await conn.fetch(
+            "SELECT model, idempotency_key, cost_micros, input_tokens, output_tokens, "
+            "input_price_micros_per_mtok, output_price_micros_per_mtok "
+            "FROM ai_cost_ledger ORDER BY created_at"
         )
     return [dict(r) for r in rows]
 
@@ -955,5 +973,238 @@ async def test_new_error_paths_carry_no_key_material(app_db, fake_provider, admi
         span_attrs = " ".join(str(c) for c in span.set_attribute.call_args_list)
         assert secret not in span_attrs
         assert await _ledger_rows(app_db, org) == []  # none of the failures settled
+    finally:
+        await _cleanup(admin_conn, org)
+
+
+# ===========================================================================
+# D2 — ONE PRICE RESOLUTION PER CALL (owner decisions DEC-A .. DEC-D)
+#
+# The pre-call gate priced the REQUESTED concrete id; the post-call ledger write
+# re-priced from the provider's RESOLVED id. Anthropic resolves aliases, so the
+# two are not always the same id — which meant the call could be gated at one
+# rate and charged at another, or, when model_pricing carried no row for the
+# resolved form, PricingNotFound aborted the ledger write AFTER the provider had
+# already billed: money spent, untracked.
+#
+# Everything below runs the real SDK against the fake server over a real socket
+# and reads the real ai_cost_ledger back through Postgres.
+# ===========================================================================
+
+# An id the provider "resolves" to that model_pricing does NOT carry.
+UNLISTED_MODEL = "fake-sonnet-mvp-unlisted"
+# An id model_pricing DOES carry, at a deliberately different (10x) rate — the
+# case where re-resolving would silently charge a rate the ceiling never saw.
+DIVERGENT_MODEL = "fake-sonnet-mvp-20990101"
+DIVERGENT_RATE = SYNTH_RATE * 10
+
+
+async def _cleanup_extra_prices(admin_conn: object, *models: str) -> None:
+    for model in models:
+        try:
+            await admin_conn.execute(  # type: ignore[attr-defined]
+                "DELETE FROM model_pricing WHERE model = $1", model
+            )
+        except Exception:  # noqa: BLE001 — best-effort teardown
+            pass
+
+
+@requires_app_role
+async def test_dec_b_unpriced_resolved_id_still_writes_exactly_one_row(
+    app_db, fake_provider, admin_conn, caplog
+) -> None:
+    """DEC-B: after real spend, a ledger row is ALWAYS written.
+
+    The gate prices the requested id (seeded). The provider reports serving an
+    id with NO model_pricing row at all. Before DEC-A this raised PricingNotFound
+    inside record_cost, _settle_cost re-raised, the caller got a 5xx, and NO
+    ai_cost_ledger row existed for a call the account had already been billed for.
+    """
+    base_url, fake = fake_provider
+    org = _org()
+    try:
+        await _seed_all(app_db, admin_conn, org)  # seeds MODEL only
+        adapter, _bus, _repo, _ledger = _make_adapter(app_db, base_url)
+
+        fake.program(success(
+            text="Served by an alias we do not price.",
+            model=UNLISTED_MODEL,
+            input_tokens=1_000, output_tokens=500,
+            message_id="msg_unlisted_1",
+        ))
+        with caplog.at_level(logging.ERROR, logger="skylize"):
+            # The call must SUCCEED. A raise here is the defect: the caller saw a
+            # 502 while the provider had already billed.
+            resp = await adapter.generate(_request(org))
+
+        assert resp.text == "Served by an alias we do not price."
+        assert fake.attempts == 1  # one real HTTP round trip, and it was billed
+
+        rows = await _ledger_rows_priced(app_db, org)
+        assert len(rows) == 1, "money was spent; exactly one ledger row must exist"
+        # DEC-C — the row records what actually SERVED the request.
+        assert rows[0]["model"] == UNLISTED_MODEL
+        assert rows[0]["idempotency_key"] == "msg_unlisted_1"
+        # DEC-A — priced from the GATE's snapshot (the seeded synthetic rate).
+        assert rows[0]["input_price_micros_per_mtok"] == SYNTH_RATE
+        assert rows[0]["output_price_micros_per_mtok"] == SYNTH_RATE
+        assert rows[0]["cost_micros"] == 1_500  # 1500 tokens at 1 micro/token
+        # ...and the response reports the SAME number the row stores.
+        assert resp.cost_usd_micros == rows[0]["cost_micros"]
+
+        # DEC-D — reported at ERROR with org, correlation, both ids, applied price.
+        diverged = [
+            r for r in caplog.records
+            if r.levelno >= logging.ERROR and "llm_resolved_model_diverged" in r.getMessage()
+        ]
+        assert diverged, "an unpriced resolved id must be reported at ERROR"
+        msg = diverged[0].getMessage()
+        assert org in msg
+        assert MODEL in msg and UNLISTED_MODEL in msg
+        assert str(SYNTH_RATE) in msg
+    finally:
+        await _cleanup(admin_conn, org)
+
+
+@requires_app_role
+async def test_dec_a_diverged_id_priced_at_the_gate_rate_not_its_own(
+    app_db, fake_provider, admin_conn, caplog
+) -> None:
+    """DEC-A: when BOTH ids are priced at DIFFERENT rates, the GATE's rate wins.
+
+    This is the divergence that never raised and so never announced itself: the
+    ceiling was checked at the requested id's rate and the ledger charged at the
+    resolved id's. One call, two rates. The gate's snapshot is now the single
+    price, and the divergence is reported rather than absorbed.
+    """
+    base_url, fake = fake_provider
+    org = _org()
+    try:
+        await _seed_all(app_db, admin_conn, org)
+        await _seed_price(admin_conn, DIVERGENT_MODEL, rate=DIVERGENT_RATE)
+        adapter, _bus, _repo, _ledger = _make_adapter(app_db, base_url)
+
+        fake.program(success(
+            model=DIVERGENT_MODEL,
+            input_tokens=1_000, output_tokens=1_000,
+            message_id="msg_divergent_1",
+        ))
+        with caplog.at_level(logging.ERROR, logger="skylize"):
+            resp = await adapter.generate(_request(org))
+
+        rows = await _ledger_rows_priced(app_db, org)
+        assert len(rows) == 1
+        assert rows[0]["model"] == DIVERGENT_MODEL          # DEC-C
+        assert rows[0]["input_price_micros_per_mtok"] == SYNTH_RATE   # DEC-A
+        assert rows[0]["output_price_micros_per_mtok"] == SYNTH_RATE  # DEC-A
+        assert rows[0]["cost_micros"] == 2_000              # 2000 tok x 1 micro
+        assert rows[0]["cost_micros"] != 20_000             # NOT the 10x rate
+        assert resp.cost_usd_micros == 2_000
+
+        assert any(
+            "llm_resolved_model_diverged" in r.getMessage()
+            for r in caplog.records if r.levelno >= logging.ERROR
+        )
+    finally:
+        await _cleanup_extra_prices(admin_conn, DIVERGENT_MODEL)
+        await _cleanup(admin_conn, org)
+
+
+@requires_app_role
+async def test_ceiling_estimate_and_ledger_row_use_the_same_rate(
+    app_db, fake_provider, admin_conn
+) -> None:
+    """One call, one rate: the pre-call ceiling estimate and the ledger row agree.
+
+    The ceiling is seeded at EXACTLY the estimate computed from the seeded rate,
+    then one micro-USD below it. Passing at the first and refusing at the second
+    pins the estimate to that rate to the micro; the surviving call's ledger row
+    is then asserted against ``compute_cost_micros`` at the SAME rate. Both
+    numbers therefore provably derive from one price snapshot.
+    """
+    base_url, fake = fake_provider
+    request = _request(_org())  # shape only; org is replaced per sub-case below
+    estimate = estimate_max_micros(
+        input_chars=_generate_input_chars(request),
+        requested_max_tokens=request.requested_max_tokens,
+        input_price_micros_per_mtok=SYNTH_RATE,
+        output_price_micros_per_mtok=SYNTH_RATE,
+    )
+
+    # (a) ceiling one micro BELOW the estimate -> refused before egress.
+    org_tight = _org()
+    try:
+        await _seed_tenant(admin_conn, org_tight)
+        await _seed_price(admin_conn, MODEL)
+        await _seed_ceiling_audited(app_db, org_tight, estimate - 1)
+        adapter, _bus, _repo, _ledger = _make_adapter(app_db, base_url)
+        fake.program(success(message_id="msg_should_not_happen"))
+        with pytest.raises(OrgSpendCeilingExceeded) as ei:
+            await adapter.generate(_request(org_tight))
+        assert ei.value.estimated_micros == estimate
+        assert fake.attempts == 0  # refused BEFORE any egress
+        assert await _ledger_rows(app_db, org_tight) == []
+    finally:
+        await _cleanup(admin_conn, org_tight)
+
+    # (b) ceiling EXACTLY at the estimate -> allowed; the row uses that same rate.
+    org_ok = _org()
+    try:
+        await _seed_tenant(admin_conn, org_ok)
+        await _seed_price(admin_conn, MODEL)
+        await _seed_ceiling_audited(app_db, org_ok, estimate)
+        adapter, _bus, _repo, _ledger = _make_adapter(app_db, base_url)
+        fake.program(success(input_tokens=37, output_tokens=11, message_id="msg_same_rate"))
+        resp = await adapter.generate(_request(org_ok))
+
+        rows = await _ledger_rows_priced(app_db, org_ok)
+        assert len(rows) == 1
+        assert rows[0]["input_price_micros_per_mtok"] == SYNTH_RATE
+        assert rows[0]["output_price_micros_per_mtok"] == SYNTH_RATE
+        assert rows[0]["cost_micros"] == compute_cost_micros(
+            input_tokens=37,
+            output_tokens=11,
+            input_price_micros_per_mtok=SYNTH_RATE,
+            output_price_micros_per_mtok=SYNTH_RATE,
+        )
+        assert resp.cost_usd_micros == rows[0]["cost_micros"]
+    finally:
+        await _cleanup(admin_conn, org_ok)
+
+
+@requires_app_role
+async def test_happy_path_cost_unchanged_by_single_resolution(
+    app_db, fake_provider, admin_conn, caplog
+) -> None:
+    """Same ids in and out: cost is byte-identical to before DEC-A, and quiet.
+
+    Mirrors G1's call exactly (123 in / 45 out at the synthetic 1 micro/token
+    rate == 168 micro-USD) and additionally pins the frozen price columns and
+    the absence of a divergence report — a no-divergence call must not change
+    in any observable way.
+    """
+    base_url, fake = fake_provider
+    org = _org()
+    try:
+        await _seed_all(app_db, admin_conn, org)
+        adapter, _bus, _repo, _ledger = _make_adapter(app_db, base_url)
+
+        fake.program(success(
+            text="Meeting summary.", input_tokens=123, output_tokens=45,
+            message_id="msg_happy_same",
+        ))
+        with caplog.at_level(logging.ERROR, logger="skylize"):
+            resp = await adapter.generate(_request(org))
+
+        assert resp.cost_usd_micros == 168
+        rows = await _ledger_rows_priced(app_db, org)
+        assert len(rows) == 1
+        assert rows[0]["model"] == MODEL  # provider echoed the requested id
+        assert rows[0]["cost_micros"] == 168
+        assert rows[0]["input_price_micros_per_mtok"] == SYNTH_RATE
+        assert rows[0]["output_price_micros_per_mtok"] == SYNTH_RATE
+        assert not any(
+            "llm_resolved_model_diverged" in r.getMessage() for r in caplog.records
+        )
     finally:
         await _cleanup(admin_conn, org)

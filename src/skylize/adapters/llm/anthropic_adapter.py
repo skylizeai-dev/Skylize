@@ -12,6 +12,14 @@ in the error, logs, or events), accounts cost in USD micros from Settings
 prices, and optionally reports every generation to Langfuse and OpenTelemetry —
 observability failures never fail the call, and prompt text is never logged.
 
+Price is resolved EXACTLY ONCE per call (owner decision DEC-A): the pre-call
+gate's ``PriceSnapshot`` is threaded through to the spend-ceiling estimate, the
+response's cost_usd_micros, and the ai_cost_ledger row, so the rate a call is
+gated at is always the rate it is charged at, and a pricing gap on the model id
+the provider RESOLVES to can never abort the ledger write after real spend
+(DEC-B). The row still records the resolved id (DEC-C), and a divergence
+between requested and resolved id is logged at ERROR (DEC-D).
+
 The adapter is the SOLE retry authority (owner decision D1): both SDK clients
 are built with max_retries=0 so exactly one HTTP request reaches the provider
 per adapter attempt. Requests are bounded by Settings.llm_timeout_seconds
@@ -304,14 +312,18 @@ class AnthropicAdapter:
     ) -> "PriceSnapshot | None":
         """PRE-CALL pricing gate (owner decision D1); returns the resolved price.
 
-        When the cost ledger is wired, the concrete model must have an active
+        This is the ONLY price resolution in a call (owner decision DEC-A). When
+        the cost ledger is wired, the concrete model must have an active
         model_pricing row BEFORE any provider egress — a pricing gap refuses
         the call with a typed error instead of producing an unrecordable
-        (budget-cap-evading) charge. The resolved ``PriceSnapshot`` is returned
-        so the spend-ceiling gate can estimate the pending call's cost from the
-        SAME prices the ledger will later charge with (no second price lookup, no
-        unit drift). Without a ledger there is nothing to check against — returns
-        None and the documented Settings-float fallback applies.
+        (budget-cap-evading) charge. The returned ``PriceSnapshot`` is then the
+        single source for all three money outputs of the call: the spend-ceiling
+        estimate (`_enforce_spend_ceiling`), the response's ``cost_usd_micros``,
+        and the ai_cost_ledger row (`_settle_cost` hands it to ``record_cost``
+        rather than letting the DAL re-resolve). No second lookup, no unit drift,
+        and no chance of the estimate and the charge disagreeing. Without a
+        ledger there is nothing to check against — returns None and the
+        documented Settings-float fallback applies.
         """
         if self._cost_ledger is None:
             return None
@@ -484,7 +496,8 @@ class AnthropicAdapter:
         message: Any,
         prompt_tokens: int,
         completion_tokens: int,
-        fallback_model_id: str,
+        gate_model_id: str,
+        price: "PriceSnapshot | None",
     ) -> int:
         """Record the served call in the cost ledger; return its cost in micros.
 
@@ -492,19 +505,57 @@ class AnthropicAdapter:
         timeout / retry-exhausted / 401 paths can never write a row. With a
         wired ledger, ONE CostObservation is built from first-hand response
         data — the provider's RESOLVED model id (owner decision D3) and the
-        provider message id as the idempotency key — and the SAME price
-        resolution that lands on the ledger row prices the returned
-        cost_usd_micros (owner decision D2). A ledger write failure is logged
-        at ERROR with the correlation_id and re-raised: a call whose charge
-        cannot be recorded must not be reported as a silent success.
+        provider message id as the idempotency key. A ledger write failure is
+        logged at ERROR with the correlation_id and re-raised: a call whose
+        charge cannot be recorded must not be reported as a silent success.
+
+        ONE PRICE PER CALL (owner decision DEC-A). ``price`` is the snapshot the
+        PRE-CALL gate (`_require_price`) resolved for ``gate_model_id``, and it
+        is handed to ``record_cost`` rather than letting the DAL re-resolve from
+        ``observation.model``. Those two ids are NOT always the same: Anthropic
+        resolves aliases, so the provider can report serving a different id than
+        the one requested. Re-resolving from the resolved id priced the ledger
+        row at a rate the spend ceiling was never checked against, or — when
+        model_pricing carries no row for that form — raised PricingNotFound
+        AFTER the provider had already billed the account, aborting the write
+        and losing the record of money owed entirely.
+
+        AFTER REAL SPEND, A ROW IS ALWAYS WRITTEN (owner decision DEC-B): a
+        pricing gap on the resolved id can no longer fail this write, because no
+        price lookup happens here at all. The row still records what actually
+        served the request (DEC-C: ``model`` is the provider's resolved id);
+        only the PRICE comes from the gate's snapshot.
+
+        A DIVERGENCE IS REPORTABLE, NOT SILENT (owner decision DEC-D): when the
+        resolved id differs from the gate's id, that is logged at ERROR with the
+        org, correlation id, both ids, and the price actually applied.
 
         Without a ledger (memory backend / unit harnesses) the documented
         Settings-float fallback prices the response instead.
         """
         if self._cost_ledger is None:
-            return self._estimate_cost(fallback_model_id, prompt_tokens, completion_tokens)
+            return self._estimate_cost(gate_model_id, prompt_tokens, completion_tokens)
 
         from ...dal.cost_ledger import CostObservation
+
+        resolved_model_id = str(message.model)
+        if resolved_model_id != gate_model_id:
+            # DEC-D. The call is NOT failed and the price is NOT re-resolved —
+            # the gate's snapshot is the single price for this call by DEC-A —
+            # but the divergence is surfaced loudly so an alias the price list
+            # does not carry is fixed in model_pricing rather than absorbed.
+            log.error(
+                "llm_resolved_model_diverged org_id=%s correlation_id=%s "
+                "requested_model=%s resolved_model=%s applied_input_micros_per_mtok=%s "
+                "applied_output_micros_per_mtok=%s applied_pricing_version=%s",
+                request.org_id,
+                request.correlation_id,
+                gate_model_id,
+                resolved_model_id,
+                price.input_price_micros_per_mtok if price is not None else None,
+                price.output_price_micros_per_mtok if price is not None else None,
+                price.pricing_version if price is not None else None,
+            )
 
         occurred_at = datetime.now(timezone.utc)
         observation = CostObservation(
@@ -513,7 +564,8 @@ class AnthropicAdapter:
             agent_id=request.agent_id,
             run_id=request.governance_token_id,
             provider=self._PROVIDER,
-            model=str(message.model),
+            # DEC-C — first-hand observation of what actually served the request.
+            model=resolved_model_id,
             input_tokens=prompt_tokens,
             output_tokens=completion_tokens,
             occurred_at=occurred_at,
@@ -521,7 +573,7 @@ class AnthropicAdapter:
             idempotency_key=str(message.id),
         )
         try:
-            record = await self._cost_ledger.record_cost(observation)
+            record = await self._cost_ledger.record_cost(observation, price=price)
         except Exception:
             log.error(
                 "cost_ledger_write_failed correlation_id=%s model=%s idempotency_key=%s",
@@ -606,7 +658,9 @@ class AnthropicAdapter:
                 message=message,
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
-                fallback_model_id=model_id,
+                gate_model_id=model_id,
+                # DEC-A: the gate's snapshot, not a second resolution.
+                price=price,
             )
             response = LLMGenerateResponse(
                 text=text,
@@ -664,7 +718,9 @@ class AnthropicAdapter:
             message=message,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
-            fallback_model_id=model_id,
+            gate_model_id=model_id,
+            # DEC-A: the gate's snapshot, not a second resolution.
+            price=price,
         )
         return LLMGenerateResponse(
             text=text,

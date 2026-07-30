@@ -214,15 +214,32 @@ class CostLedgerDAL:
             currency=row["currency"],
         )
 
-    async def record_cost(self, obs: CostObservation) -> CostRecord:
+    async def record_cost(
+        self, obs: CostObservation, *, price: PriceSnapshot | None = None
+    ) -> CostRecord:
         """Record one immutable cost row transactionally.
 
         Resolves + snapshots the price, computes ``cost_micros`` (Decimal,
         HALF-UP), and INSERTs with ``ON CONFLICT (org_id, idempotency_key) DO
         NOTHING`` — a retried call collapses to the single existing row
         (``inserted=False``). A retried LLM call never double-charges.
+
+        ``price`` — OPTIONAL pre-resolved snapshot (owner decision DEC-A: resolve
+        the price ONCE per call). The gateway adapter's pre-call pricing gate has
+        already resolved a price for this exact call, and ``obs.model`` is the
+        provider's RESOLVED model id, which can differ from the id the gate
+        priced (Anthropic resolves aliases). Re-resolving from ``obs.model``
+        therefore risks two outcomes, both wrong AFTER the provider has already
+        billed: a DIFFERENT rate than the one the spend ceiling was checked
+        against, or ``PricingNotFound`` — which would abort the write and lose
+        the record of money already owed. Passing the gate's snapshot makes it
+        the single price for the estimate, the returned cost, and this row.
+
+        Omitted (the default), behaviour is exactly as before: the price is
+        resolved here from ``obs``. Existing callers are unaffected.
         """
-        price = await self.resolve_price(obs)
+        if price is None:
+            price = await self.resolve_price(obs)
         cost_micros = compute_cost_micros(
             input_tokens=obs.input_tokens,
             output_tokens=obs.output_tokens,
