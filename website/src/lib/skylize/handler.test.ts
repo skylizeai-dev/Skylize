@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { describe, expect, it } from "vitest";
 
-import { consoleRoute } from "@/lib/skylize/handler";
+import { consoleRoute, errorResponse } from "@/lib/skylize/handler";
 
 // consoleRoute used to drop the route-context argument Next passes to dynamic
 // handlers, so each dynamic route re-derived its [id] from a bespoke pathname
@@ -87,6 +87,32 @@ describe("consoleRoute params forwarding", () => {
     expect(response.status).toBe(500);
     await expect(response.json()).resolves.toEqual({
       error: "Internal server error.",
+    });
+  });
+});
+
+// The browser reads `{ error }`. Adding the backend's machine-readable `code`
+// must be purely additive: an envelope with no code has to stay byte-identical
+// to what every existing reader already handles.
+describe("errorResponse envelope", () => {
+  it("emits exactly { error } when there is no code to forward", async () => {
+    const response = errorResponse(502, "Backend unreachable.");
+    expect(response.status).toBe(502);
+    await expect(response.json()).resolves.toEqual({
+      error: "Backend unreachable.",
+    });
+  });
+
+  it("adds `code` beside the unchanged message when one is forwarded", async () => {
+    const response = errorResponse(
+      403,
+      "requires one of roles: ['admin', 'operator', 'owner']",
+      "authorization_failed",
+    );
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toEqual({
+      error: "requires one of roles: ['admin', 'operator', 'owner']",
+      code: "authorization_failed",
     });
   });
 });

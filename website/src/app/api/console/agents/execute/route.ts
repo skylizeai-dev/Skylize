@@ -6,12 +6,20 @@
 //   202 deferred  -> the hitl_id body, re-emitted with status 202 (skylizeFetch
 //                    treats any 2xx as success, so the two are told apart by
 //                    the presence of `hitl_id` — a field only the 202 body has)
-//   403 rejected  -> caught HERE and re-emitted as 403 with the backend's
-//                    decision reason. This deliberately bypasses the shared
-//                    mapSkylizeError rule that treats 403 as a service-
-//                    credential failure (502): on THIS route a 403 carries a
-//                    governance verdict ("decision rejected: ..."), not a
-//                    credential problem.
+//   403 refused   -> caught HERE and re-emitted as 403 with the backend's own
+//                    message VERBATIM, plus the backend's machine-readable
+//                    `code`. This deliberately bypasses the shared
+//                    mapSkylizeError rule that collapses 403 into a service-
+//                    credential failure (502): on THIS route a 403 has THREE
+//                    distinct causes and the browser must tell them apart —
+//                      decision_rejected     a governance verdict on the request
+//                      governance_denied     a platform control (kill switch /
+//                                            suspension) blocked it
+//                      authorization_failed  the SERVER's service credential
+//                                            lacks the required role; the
+//                                            request was never evaluated
+//                    Forwarding the code is additive: the message is passed
+//                    through unchanged, exactly as before.
 //   404 / 422 / 429 pass through via the shared error mapping.
 
 import { NextResponse } from "next/server";
@@ -53,7 +61,7 @@ export const POST = consoleRoute<z.infer<typeof executeSchema>>({
       return NextResponse.json(result, { status: 201 });
     } catch (error) {
       if (error instanceof SkylizeApiError && error.status === 403) {
-        return errorResponse(403, error.message);
+        return errorResponse(403, error.message, error.code);
       }
       throw error;
     }

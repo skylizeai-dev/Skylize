@@ -5,6 +5,7 @@ import { AltitudeLine, CtaButton, Eyebrow } from "@/components/skylize";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
+import { asBackendErrorCode } from "@/lib/skylize/client";
 import type {
   BackendAgentInfo,
   ConsoleDeliverable,
@@ -137,13 +138,61 @@ function buildInput(
 type Outcome =
   | { kind: "approved"; response: ConsoleExecuteApproved }
   | { kind: "deferred"; response: ConsoleExecuteDeferred }
-  | { kind: "rejected"; reason: string };
+  | { kind: "rejected"; reason: string }
+  | { kind: "blocked"; reason: string };
 
 type RunState =
   | { phase: "idle" }
   | { phase: "running" }
   | { phase: "done"; outcome: Outcome }
   | { phase: "error"; message: string };
+
+/**
+ * A backend 403 on this route has THREE causes, and until the backend carried a
+ * machine-readable `code` the console could not tell them apart: all three
+ * arrived as a bare message and were all rendered as a decision-engine REJECTED
+ * verdict. An operator whose SERVICE CREDENTIAL lacked the required role was
+ * therefore shown a governance verdict for a configuration fault.
+ *
+ * Each cause now gets its own honest rendering:
+ *
+ *   decision_rejected    A verdict. The decision engine evaluated the proposal
+ *                        and rejected it — show it as the verdict it is.
+ *   governance_denied    NOT a verdict. A platform control refused the action
+ *                        before evaluation; the backend's own reason names WHICH
+ *                        control (platform / tenant / agent kill switch, or an
+ *                        agent suspension) and is shown verbatim.
+ *   authorization_failed NOT a governance outcome at all. The console's own
+ *                        server-side service credential lacks the role, so the
+ *                        request never reached governance. Blaming the request
+ *                        here would be a lie — this is the console's own
+ *                        misconfiguration and is named as such.
+ *
+ * An UNCODED 403 (an older backend, or a proxy that stripped the key) cannot be
+ * attributed, so it keeps the pre-existing rendering rather than guessing.
+ */
+export type Refusal =
+  | { render: "verdict"; outcome: Outcome }
+  | { render: "error"; message: string };
+
+export function refusalFor(code: unknown, message: string): Refusal {
+  switch (asBackendErrorCode(code)) {
+    case "governance_denied":
+      return { render: "verdict", outcome: { kind: "blocked", reason: message } };
+    case "authorization_failed":
+      return {
+        render: "error",
+        message:
+          `This console's own service credential is not authorized for this ` +
+          `action — ${message} Nothing was submitted to governance and no ` +
+          `verdict was reached; the request itself was not refused. Fix the ` +
+          `roles on the console's backend service credential.`,
+      };
+    case "decision_rejected":
+    default:
+      return { render: "verdict", outcome: { kind: "rejected", reason: message } };
+  }
+}
 
 type AgentsState =
   | { phase: "loading" }
@@ -191,11 +240,17 @@ function GovernanceOutcome({ outcome }: { outcome: Outcome }) {
       ? "APPROVED"
       : outcome.kind === "deferred"
         ? "DEFERRED TO HUMAN"
-        : "REJECTED";
+        : outcome.kind === "blocked"
+          ? "BLOCKED BY PLATFORM CONTROL"
+          : "REJECTED";
+  // A platform control fires BEFORE the decision gate, so calling that strip a
+  // "decision engine verdict" would be false — no verdict was ever reached.
+  const eyebrow =
+    outcome.kind === "blocked" ? "Platform control" : "Decision engine verdict";
   return (
     <div>
       <p className="font-mono text-xs tracking-[0.2em] text-muted-foreground uppercase">
-        Decision engine verdict
+        {eyebrow}
       </p>
       <p
         role="status"
@@ -212,8 +267,12 @@ function GovernanceOutcome({ outcome }: { outcome: Outcome }) {
       <div className="mt-4 grid gap-3 sm:grid-cols-3">
         <StepBox
           label="1 · evaluated"
-          state="Proposal ran the synchronous decision gate"
-          active={false}
+          state={
+            outcome.kind === "blocked"
+              ? "Never evaluated — a platform control refused the action first"
+              : "Proposal ran the synchronous decision gate"
+          }
+          active={outcome.kind === "blocked"}
         />
         {outcome.kind === "approved" ? (
           <StepBox
@@ -225,6 +284,14 @@ function GovernanceOutcome({ outcome }: { outcome: Outcome }) {
           <StepBox
             label="2 · human gate"
             state={`REQUIRED — ${outcome.response.reason}`}
+            active
+          />
+        ) : outcome.kind === "blocked" ? (
+          // The backend's own reason names the control: platform / tenant /
+          // agent kill switch, or an agent suspension.
+          <StepBox
+            label="2 · control"
+            state={outcome.reason}
             active
           />
         ) : (
@@ -364,13 +431,17 @@ export function AgentRunner({
       }
       const body = (await res.json().catch(() => null)) as {
         error?: string;
+        code?: unknown;
       } | null;
       const detailMessage = body?.error ?? `HTTP ${res.status}`;
       if (res.status === 403) {
-        setState({
-          phase: "done",
-          outcome: { kind: "rejected", reason: detailMessage },
-        });
+        // Three different causes arrive here; `code` is what tells them apart.
+        const refusal = refusalFor(body?.code, detailMessage);
+        setState(
+          refusal.render === "verdict"
+            ? { phase: "done", outcome: refusal.outcome }
+            : { phase: "error", message: refusal.message },
+        );
         return;
       }
       if (res.status === 401) {

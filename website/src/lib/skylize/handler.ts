@@ -6,6 +6,7 @@ import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import type { ZodType } from "zod";
 
+import type { BackendErrorCode } from "./client";
 import { SkylizeApiError } from "./client";
 import { getConsoleAuthConfig } from "./config";
 import { SESSION_COOKIE_NAME, verifySessionToken } from "./session";
@@ -49,9 +50,22 @@ export interface ConsoleRouteOptions<TBody, TParams = Record<string, never>> {
   ) => Promise<NextResponse>;
 }
 
-/** Uniform error envelope: NextResponse.json({ error }, { status }). */
-export function errorResponse(status: number, message: string): NextResponse {
-  return NextResponse.json({ error: message }, { status });
+/**
+ * Uniform error envelope: NextResponse.json({ error }, { status }).
+ *
+ * `code` is OPTIONAL and purely additive — the key is omitted entirely when
+ * there is no backend code to forward, so every existing browser-side reader of
+ * `{ error }` sees exactly the body it saw before.
+ */
+export function errorResponse(
+  status: number,
+  message: string,
+  code: BackendErrorCode | null = null,
+): NextResponse {
+  return NextResponse.json(
+    code === null ? { error: message } : { error: message, code },
+    { status },
+  );
 }
 
 async function hasValidSession(request: NextRequest): Promise<boolean> {
