@@ -157,8 +157,8 @@ async def test_recall_uses_qdrant_primary() -> None:
     await qdrant.upsert_vector(
         doc_id="org-1:marketing:abc123",
         vector=_fake_embed("marketing KPI"),
+        org_id="org-1",
         metadata={
-            "org_id": "org-1",
             "namespace": "marketing",
             "entry_id": str(uuid4()),
             "agent_id": "ceo",
@@ -429,10 +429,12 @@ async def test_org_id_isolation_commit_stores_correct_org() -> None:
 async def test_in_memory_vector_store_upsert_search() -> None:
     store = InMemoryVectorStore()
     vec = [1.0, 0.0, 0.0, 0.0]
-    await store.upsert_vector("doc-1", vec, {"org_id": "org-1", "namespace": "ops", "text": "hello"})
-    await store.upsert_vector("doc-2", [0.0, 1.0, 0.0, 0.0], {"org_id": "org-2", "namespace": "ops", "text": "bye"})
+    await store.upsert_vector("doc-1", vec, {"namespace": "ops", "text": "hello"}, org_id="org-1")
+    await store.upsert_vector(
+        "doc-2", [0.0, 1.0, 0.0, 0.0], {"namespace": "ops", "text": "bye"}, org_id="org-2"
+    )
 
-    results = await store.search([1.0, 0.0, 0.0, 0.0], top_k=5, filters={"org_id": "org-1"})
+    results = await store.search([1.0, 0.0, 0.0, 0.0], top_k=5, org_id="org-1")
     assert len(results) == 1
     assert results[0]["text"] == "hello"
 
@@ -440,9 +442,9 @@ async def test_in_memory_vector_store_upsert_search() -> None:
 @pytest.mark.asyncio
 async def test_in_memory_vector_store_filters_namespace() -> None:
     store = InMemoryVectorStore()
-    await store.upsert_vector("a", [1.0], {"org_id": "org-1", "namespace": "marketing", "text": "a"})
-    await store.upsert_vector("b", [1.0], {"org_id": "org-1", "namespace": "ops", "text": "b"})
+    await store.upsert_vector("a", [1.0], {"namespace": "marketing", "text": "a"}, org_id="org-1")
+    await store.upsert_vector("b", [1.0], {"namespace": "ops", "text": "b"}, org_id="org-1")
 
-    results = await store.search([1.0], top_k=5, filters={"org_id": "org-1", "namespace": "marketing"})
+    results = await store.search([1.0], top_k=5, filters={"namespace": "marketing"}, org_id="org-1")
     assert len(results) == 1
     assert results[0]["text"] == "a"

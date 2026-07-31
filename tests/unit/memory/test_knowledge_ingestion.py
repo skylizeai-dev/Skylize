@@ -37,14 +37,16 @@ class _FakeQdrant:
         self.upserts: list = []
         self.deletes: list[dict] = []
 
-    async def verify_point(self, point_id: str, content_hash: str) -> bool:
+    async def verify_point(self, point_id: str, content_hash: str, *, org_id: str) -> bool:
         return False
 
-    async def point_doc_hash(self, point_id: str) -> str | None:
+    async def point_doc_hash(self, point_id: str, *, org_id: str) -> str | None:
         return None
 
-    async def delete_by_filter(self, filters: dict) -> None:
-        self.deletes.append(filters)
+    async def delete_by_filter(
+        self, filters: dict | None = None, *, org_id: str
+    ) -> None:
+        self.deletes.append({**(filters or {}), "org_id": org_id})
 
     async def upsert_points(self, points) -> None:
         self.upserts.extend(points)

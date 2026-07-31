@@ -116,7 +116,7 @@ class KnowledgeIngestionService:
         self._gate.check(content)
         pid = identity.point_id(org_id, doc_id)
         content_hash = _sha256(content)
-        if await self._qdrant.verify_point(pid, content_hash):
+        if await self._qdrant.verify_point(pid, content_hash, org_id=org_id):
             log.debug(
                 "knowledge_ingestion.skipped",
                 org_id=org_id,
@@ -138,7 +138,14 @@ class KnowledgeIngestionService:
             ingested_at=_now_iso(),
         )
         await self._qdrant.upsert_points(
-            [QdrantPoint(point_id=pid, vector=vector, payload=payload.model_dump())]
+            [
+                QdrantPoint(
+                    org_id=org_id,
+                    point_id=pid,
+                    vector=vector,
+                    payload=payload.model_dump(),
+                )
+            ]
         )
         log.info("knowledge_ingested", org_id=org_id, doc_id=doc_id, source=source_path)
 
@@ -168,11 +175,12 @@ class KnowledgeIngestionService:
         doc_hash = _sha256(content)
         # doc-level idempotency: chunk 0 carries the whole-document hash.
         chunk0_pid = identity.chunk_point_id(org_id, doc_id, 0)
-        if await self._qdrant.point_doc_hash(chunk0_pid) == doc_hash:
+        if await self._qdrant.point_doc_hash(chunk0_pid, org_id=org_id) == doc_hash:
             log.debug("knowledge_ingestion.doc_unchanged", org_id=org_id, doc_id=doc_id)
             return len(chunks)
         # content changed (or new): purge any prior chunks of this document.
-        await self._qdrant.delete_by_filter({"org_id": org_id, "parent_doc_id": doc_id})
+        # The org condition is the adapter's, not ours — it cannot be omitted.
+        await self._qdrant.delete_by_filter({"parent_doc_id": doc_id}, org_id=org_id)
         vectors = await self._embed.embed_batch(chunks)
         now = _now_iso()
         points: list[QdrantPoint] = []
@@ -191,6 +199,7 @@ class KnowledgeIngestionService:
             )
             points.append(
                 QdrantPoint(
+                    org_id=org_id,
                     point_id=identity.chunk_point_id(org_id, doc_id, i),
                     vector=vector,
                     payload=payload.model_dump(),
@@ -214,9 +223,14 @@ class KnowledgeIngestionService:
         top_k: int = 5,
         department: str | None = None,
     ) -> list[dict[str, object]]:
-        """Org-scoped semantic search. The org_id filter is non-optional."""
+        """Org-scoped semantic search. The org_id filter is non-optional.
+
+        ``org_id`` goes to the adapter as its own argument, not as a dict entry:
+        the adapter builds the org condition, so this call site cannot express
+        an unscoped search even by mistake.
+        """
         vector = await self._embed.embed(query)
-        filters: dict[str, object] = {"org_id": org_id}
+        filters: dict[str, object] = {}
         if department is not None:
             filters["department"] = department
-        return await self._qdrant.search(vector, top_k, filters)
+        return await self._qdrant.search(vector, top_k, filters, org_id=org_id)
