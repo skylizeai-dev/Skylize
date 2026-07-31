@@ -48,6 +48,16 @@ state — test counts, open defects, what is wired, branch topology — read
 ## WORKFLOW
 - One terminal, one worktree, one branch, cut from main. Never run two terminals
   against the same working tree. Commit incrementally.
+- **PRE-FLIGHT, before your first commit.** On 2026-07-31 three sessions shared
+  this tree; one `git commit --amend` rewrote another's commit and swept in four
+  of its files. Two commands, then a rule:
+  1. `git rev-parse --show-toplevel` and `git branch --show-current` — confirm you
+     are in YOUR worktree on YOUR branch, not the primary tree.
+  2. `git status --porcelain` — every path listed must be yours. A path you did
+     not touch means another agent is live in this tree: STOP, do not commit.
+  3. Commit as `git commit -m ... -- <your paths>`, never `git add -A`. Before any
+     `--amend`, confirm `git rev-parse HEAD` is still your own last commit: a
+     pathspec limits which FILES land, never which COMMIT gets rewritten.
 
 ## TESTING
 - Postgres-backed integration tests SKIP silently without their env vars. Before
