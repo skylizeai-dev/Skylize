@@ -17,8 +17,10 @@ CI EVER RUN ON THIS WORK:      UNVERIFIED  (deploy workflow: never)
 MONEY PATH PROVEN IN CI:       yes (ci.yml config) -- never proven to have RUN
 GATEWAY CONTAINER IMAGE:       exists (two, divergent)
 TABLES WITHOUT TENANT ISOLATION: 6 of 25 hold customer data
-AGENTS WITH FULL-PATH TESTS:   1 of 21
-DEMO BAR GAPS: 8   --   PILOT BAR GAPS: 20
+AGENTS WITH FULL-PATH TESTS:   3 of 21   -- mocked-only: 0
+AGENTS TYPED BY OMISSION:      0 of 21   -- was 11
+DEMO MODE: 7 of 21 demoable; 14 raise a typed error naming themselves
+DEMO BAR GAPS: 8   --   PILOT BAR GAPS: 22
 EXPOSURE ITEMS: 15
 ```
 
@@ -297,7 +299,11 @@ Two instances are built at lifespan: the general limiter, default 120/min (`edge
 **Requires narration or visibly fails — 8 gaps:**
 
 1. **Every demo string is literally prefixed `[DEMO]`** (`adapters/llm/demo_adapter.py:42-95`). Output content is templated, not generated. This is by design and correct, but it is on screen.
-2. **Only 7 of 21 agents have canned demo responses** (`demo_adapter.py:50-93`: hook_generator, ad_copy, caption_writer, script_writer, cta_optimizer, seo_keyword, cfo). The other 14 fall to `_FALLBACK_RESPONSE = {"result": ...}` (`demo_adapter.py:95`), which cannot satisfy their output schemas — e.g. `ToneAdjustedOut` requires `brief_id`, `adjusted_content`, `notes` (`schemas/agents/brand.py:32-35`) — so validation fails at `execution.py:331` and the API returns **HTTP 502** (`agents.py:107-108`). Demoing an agent outside the seven fails visibly.
+2. **Only 7 of 21 agents have canned demo responses** (`demo_adapter.py`: hook_generator, ad_copy, caption_writer, script_writer, cta_optimizer, seo_keyword, cfo). The other **14 now raise `DemoResponseUnavailable`** naming themselves, and the caller sees **HTTP 500** — the exception is typed but unmapped in `edge/routes/agents.py:96-203`, so it reaches FastAPI's default handler (measured, not inferred). Demoing an agent outside the seven fails visibly, and always did; what changed is *how*.
+
+   **Before** (`_pick_response` sniffed keywords out of the system + user prompt): 13 of the 14 fell to `_FALLBACK_RESPONSE = {"result": ...}`, which satisfies no agent's output schema — e.g. `ToneAdjustedOut` requires `brief_id`, `adjusted_content`, `notes` (`schemas/agents/brand.py:32-35`) — so validation failed at `execution.py` and the API returned **HTTP 502** "the model provider is unavailable or returned an unusable response" (`agents.py:193-201`). That message was false: in demo mode there is no provider. The 14th, **`director_growth`, was served `cfo_agent`'s budget summary on every call** — its own `agent_role` ("Director Growth — proposes campaigns & budget reallocations") matched `if "budget" in combined`. That is not a failure at all; it is another agent's output returned under this agent's name, schema-valid and therefore invisible to every check downstream. The sniff also read **customer content**: `tone_of_voice_agent` asked to soften *"Cut your ad budget in half"* received `cfo_agent`'s payload; the same agent asked about a *"hook"* received `hook_generator_agent`'s. Routing was a function of the caller's text, not of who was acting.
+
+   **Now**: dispatch is an exact lookup on `agent_id`, a required field on every request model reaching the adapter (`gateway.py:165,202`; `structured.py:122`) that every live construction site sources from the resolved contract or the validated `GovernanceToken`. Mis-routed agents: **1 before, 0 after**. A 500 with a typed, agent-naming message in the log is more honest than a 502 blaming a provider that was never called — but it is still an unhandled exception with a generic body, which is why **E21** maps it.
 3. **Demo mode and the money path are mutually exclusive.** `DemoLLMAdapter` reports `cost_usd_micros=0` (`demo_adapter.py:170`) and the spend-ceiling enforcer + cost ledger are wired only in the Anthropic branch (`bootstrap.py:318-343`). You can demonstrate governance **or** billing, not both, unless you run against a live key.
 4. **The OPA engine — the designated production arbiter — decides nothing.** All 7 Rego files are `default allow := false` with no allow rule, 128 lines total (`policy/skylize/decision/*.rego`). `infra/docker-compose.yml:36,108-109` accurately says "denies everything". The live arbiter is the inline evaluator (`bootstrap.py:294`), which `bootstrap.py:276-282` hard-fails on any other selection.
 5. **The one live LangGraph path is hardwired to a single agent and skips the gate.** `POST /api/v1/workflows/creative` always invokes `hook_generator_agent` (`edge/routes/workflows.py:58`) and runs no decision gate — it requires no role at all, only authentication (`workflows.py:47`).
@@ -351,6 +357,8 @@ Ordered by when a customer hits it. Sizes: SMALL <½ day, MEDIUM ~1 day, LARGE >
 | E17 | Wire Langfuse or OTel — the hooks exist and reach nothing (`anthropic_adapter.py:196,535-560`; no `opentelemetry` import in `src/`; `langfuse` not a dependency) | **MEDIUM** | adding the dependency and a construction site is small; deciding what to trace, and the PII posture against `audit/service.py:10-11`, is not |
 | E18 | Real Rego + a live OPA server, if OPA is to be the arbiter ADR-0004 designates (`policy/skylize/decision/*.rego`, 128 lines of deny-all) | **LARGE** | blocked on owner approval of `policy_inputs.md` (§26) |
 | E19 | Per-tenant Qdrant isolation, or accept application-level filtering as the boundary (`memory/qdrant_adapter.py:35`, one collection for all tenants) | **MEDIUM** | per-org collections or a payload-index guarantee, plus a re-index of existing points |
+| E21 | Map `DemoResponseUnavailable` to a typed HTTP response instead of an unhandled 500 (`demo_adapter.py`; `agents.py:96-203` catches it nowhere) | **SMALL** | one `except` clause on the existing pattern, mirroring `LLMModelNotPriced` -> 503 `MODEL_NOT_PRICED` (`agents.py:169-184`): both are "this deployment cannot serve this agent", decided before any spend. The exception already carries `agent_id`. Status choice is an owner call, not a mechanical one, which is why it is an item and not part of the dispatch fix |
+| E22 | Decouple demo payload validity from `execution.py`'s `brief_id` echo before any move to `generate_structured` (`execution.py:329-333`) | **SMALL** (add the four `brief_id`s) / **MEDIUM** (decide the echo's contract first) | see §27 |
 | E20 | A governed invite flow — the only way to add a SECOND user to an organisation. `POST /api/v1/auth/register` is unauthenticated and now creates NEW orgs only, refusing any org that already has a user (409 `org_not_available`, `app/auth/user_service.py`); the read-then-write that admitted strangers as `viewer` is gone, and with it the last HTTP path to a second account. Intentional and fail-closed: registration mints owners for unknown callers, so it must never be the path that adds a user to someone else's tenant | **MEDIUM** | the write side already exists (`UserRepository.create_user` is unconditional and is what an invite would call); the work is the surface around it — an owner/admin-authorised endpoint, an invitation record with a single-use expiring token, an explicit role choice validated against `VALID_ROLES`, an audit record per acceptance, and the migration for the invitation table. Migration 0017's unique index is deliberately partial on the owner role so this stays possible without a schema change |
 
 #### OPERATIONS — not engineering (item 23)
@@ -369,7 +377,7 @@ These are frequently mistaken for missing features. They are provisioning steps 
 | O8 | Provision an OPA service in CI and set `SKYLIZE_TEST_OPA_URL`, or record that those tests are intentionally never run (§8) | **SMALL** |
 | O9 | Decide and document the demo posture: demo mode (fake output, no money path) vs live key (real output, real spend). They cannot be shown together (§20 gap 3) | **SMALL** |
 
-Counts: **20 engineering gaps** (E1-E20), **9 operations items** (O1-O9), **8 demo gaps**.
+Counts: **22 engineering gaps** (E1-E22), **9 operations items** (O1-O9), **8 demo gaps**.
 
 ---
 
@@ -392,19 +400,54 @@ Counts: **20 engineering gaps** (E1-E20), **9 operations items** (O1-O9), **8 de
 | 11 | Governance token `max_token_budget` protects per-org spend | it is per-run, keyed `(correlation_id, agent_id)` (`runtime/run_ledger.py:46,163`); the per-org control is the soft ceiling (`spend_ceiling.py:9-19`) |
 | 12 | The gateway runs in a container | two divergent Dockerfiles; the one CI builds omits `src/` from the builder stage (`Dockerfile:14-16` vs `infra/Dockerfile:10-12`), and neither has been built or run (§10) |
 | 13 | Staging exists on AWS ECS (`infra/terraform/staging/`, `deploy.ps1`, `deploy-staging.yml`) | no terraform state anywhere; the task definition omits two variables that each fail the process closed at boot (`ecs/main.tf:73-100` vs `config.py:197-205`, `bootstrap.py:346-352`); `docs/08_operations/opa_staging_bring_up.md:137` — "*ECS path:* **does not exist yet.**" |
-| 14 | 21 agents are available for execution (`GET /api/v1/agents` lists all of them, `edge/routes/agents.py:119-136`) | 1 of 21 has a test proving execution through to a persisted deliverable; 3 reach `create_deliverable` at all (§25). In demo mode, 14 of 21 cannot produce schema-valid output (`demo_adapter.py:95`) |
+| 14 | 21 agents are available for execution (`GET /api/v1/agents` lists all of them, `edge/routes/agents.py:119-136`) | **3** of 21 have a test proving execution through to a persisted deliverable, and no agent now reaches `create_deliverable` only against a mock (§25). In demo mode, 14 of 21 have no canned payload and raise `DemoResponseUnavailable`; 4 of the remaining 7 validate only because of the `brief_id` echo (§27) |
 | 15 | RLS protects tenant data | true for 18 of 25 tables, and only when `SKYLIZE_DB_APP_URL` is set — the default DSN is the table-owning superuser, which bypasses RLS regardless of FORCE (`config.py:36-43`, `0003_app_role_rls_subject.py:7-12`). Six customer-data tables have no RLS at all (§14) |
 
-### 25. Agents with a proven full path to a persisted deliverable — **2 of 21**
+### 25. Agents with a proven full path to a persisted deliverable — **3 of 21**
 
-**Proven, persisted to Postgres — 2:**
+**Proven, persisted to Postgres — 3:**
 - **`hook_generator_agent`** — `tests/integration/test_deliverable_readback_e2e.py:106-153`: execute → 202 defer → approve → `GET /api/v1/deliverables/{id}` → 200 with metadata intact. Also `tests/integration/test_agent_execute_governed_e2e.py` and `tests/integration/test_jsonb_readback_pg.py`.
 - **`seo_keyword_agent`** — `tests/integration/test_seo_deliverable_e2e.py:215-313`: execute → **201 approve** → `GET /api/v1/deliverables/{id}` → 200 with `deliverable_type="seo_report"`, the model's keywords present in the markdown, and attribution metadata intact. A structurally different path from hook_generator's, which is why it is a second *vertical* and not a second instance of the same one: it **approves** rather than defers (`human_in_loop_triggers=[]` at `contracts/mvp/seo.py:36` → `evaluator.py:230-240`, owner decision D6), so there is no HITL hop; and it runs the **tool loop** rather than the single-shot path (`invocable_tools` non-empty at `seo.py:29` → `execution.py:233`), so the provider is called twice and **two** `ai_cost_ledger` rows are written, one per completed call. Its audit chain is linked by a shared `correlation_id`, not `causation_id` — that field is populated only on a HITL replay (`execution.py:377-379`), so on an approve path it is correctly NULL.
 
-**Reach `create_deliverable` but against a mocked `DeliverableService` (nothing persists) — 1:**
-- **`cfo_agent`** — `tests/unit/test_finance_agent_execution.py:57-143` (`AsyncMock` at `:62`).
+- **`cfo_agent`** — `tests/integration/test_cfo_deliverable_e2e.py`: execute → **202 deferred** → `POST /api/v1/hitl/{id}/approve` → tool loop → `GET /api/v1/deliverables/{id}` → 200. A third structurally distinct path, and the one that closes the mocked-only category. It **defers** where seo approves and it defers for a *different reason* than hook_generator: its triggers are `[SPEND_OVER_CEILING, LOW_CONFIDENCE_IRREVERSIBLE]` (`contracts/mvp/finance.py:183-186`), neither of which is `FIRST_EXTERNAL_LAUNCH`, so the evaluator takes its final branch — the unmatched-trigger fail-closed defer (`evaluator.py:247-260`) — and the queue row's `trigger_reason` records *both* triggers, `"spend_over_ceiling, low_confidence_irreversible"`. Because it executes on a HITL **replay**, its audit chain is linked by **`causation_id`** (`execution.py:377-379`), the mirror image of seo's correlation-only chain; the replay mints a fresh `run_id`, so the test asserts `causation_id == the original correlation` *and* `correlation_id != it`. It runs the tool loop (`invocable_tools=["utility.current_datetime"]`, `finance.py:176`), so **two** `ai_cost_ledger` rows are written, one per completed provider call (`idempotency_key = message.id`, `anthropic_adapter.py:699`). Uniquely, it is the only e2e covering the **post-validation recompute** (`execution.py:342-344`): the fake provider returns a schema-*valid* response whose arithmetic is deliberately wrong (`total: 7.77` plus a fabricated concentration flag) and the persisted deliverable is asserted to carry the Python-computed `$100,000.00` and the real `paid_media` flag instead — while the model's *narrative* fields survive untouched, so the test cannot pass by discarding the response. Proven to bind: with the recompute disabled the deliverable persists `$7.77` and the fabricated flag.
 
-**The remaining 18 are invocable but unproven.** They are registered, listed by `GET /api/v1/agents`, and validated for contract *shape* by `tests/contract/test_agent_contracts.py:47-95` — registry membership, schema-path resolution, canonical authority levels, escalation paths ending at `human_owner`. No test executes them. Named: `ad_copy_agent`, `agency_deliverable_drafter`, `agency_requirements_analyst`, `art_director`, `brand_guardian_agent`, `caption_writer_agent`, `ceo`, `cmo`, `copy_director`, `creative_operations_manager`, `cta_optimizer_agent`, `director_growth`, `fraud_detection_agent`, `lead_qualifier_agent`, `script_writer_agent`, `sdr_outreach_agent`, `tone_of_voice_agent`, `vp_creative`. (Several appear in decision-evaluator and governance tests — `tests/unit/test_decision_evaluator.py`, `tests/unit/test_multiturn_execution.py` — which exercise the gate or the token, not the deliverable path.)
+**Reach `create_deliverable` but against a mocked `DeliverableService` (nothing persists) — 0.** This category is now empty; `cfo_agent` was its last member (`tests/unit/test_finance_agent_execution.py:57-143`, `AsyncMock` at `:62`, which still runs as a unit test).
+
+**The remaining 18 are invocable but unproven.** They are registered, listed by `GET /api/v1/agents`, and validated for contract *shape* by `tests/contract/test_agent_contracts.py` — registry membership, schema-path resolution, canonical authority levels, escalation paths ending at `human_owner`, and (new) an explicit `_AGENT_DELIVERABLE_TYPE` entry. No test executes them. Named: `ad_copy_agent`, `agency_deliverable_drafter`, `agency_requirements_analyst`, `art_director`, `brand_guardian_agent`, `caption_writer_agent`, `ceo`, `cmo`, `copy_director`, `creative_operations_manager`, `cta_optimizer_agent`, `director_growth`, `fraud_detection_agent`, `lead_qualifier_agent`, `script_writer_agent`, `sdr_outreach_agent`, `tone_of_voice_agent`, `vp_creative`. (Several appear in decision-evaluator and governance tests — `tests/unit/test_decision_evaluator.py`, `tests/unit/test_multiturn_execution.py` — which exercise the gate or the token, not the deliverable path.)
+
+**Deliverable typing, for all 21.** `_AGENT_DELIVERABLE_TYPE` (`execution.py`) covered 10 of 21; the other 11 fell through `.get(agent_id, "other")` and were **typed by omission** — the type is part of the audit record, and it was being set by an absence. All 21 now have an explicit entry, each `"other"` carrying the reason it is `"other"`. Disposition (b) of the two considered: (a) — a distinct type per agent — cannot be honoured without inventing, because the vocabulary is fixed by migration `0006:42-47` (ten named types plus `other`) and for those 11 agents nothing in the contract determines which of the ten a run produces. Three contract-gate tests hold the line, including one that proves a *newly registered* agent without an entry is caught. **Agents typed by omission: 0.**
+
+### 27. Demo payload validity is coupled to `execution.py`'s `brief_id` echo — E22
+
+**REPORTED, NOT FIXED.** Four of the seven canned demo payloads do not satisfy their own output schema. They validate today only because `execution.py:329-333` copies input-provided fields the model is not expected to invent — in practice `brief_id` — from the validated input onto the raw output dict *before* `model_validate`:
+
+```python
+if isinstance(raw, dict):
+    input_data_json = validated_input.model_dump(mode="json")
+    for field in output_cls.model_fields:
+        if field not in raw and field in input_data_json:
+            raw[field] = input_data_json[field]
+```
+
+Measured against the real schemas — validating each `_DEMO_RESPONSES` entry directly, then again after applying the echo:
+
+| agent | payload alone | after the echo | field the echo supplies |
+|---|---|---|---|
+| `hook_generator_agent` | valid | valid | — |
+| `seo_keyword_agent` | valid | valid | — |
+| `cfo_agent` | valid | valid | — |
+| `ad_copy_agent` | **invalid** | valid | `brief_id` |
+| `caption_writer_agent` | **invalid** | valid | `brief_id` |
+| `script_writer_agent` | **invalid** | valid | `brief_id` |
+| `cta_optimizer_agent` | **invalid** | valid | `brief_id` |
+
+**7 of 7 valid today; 3 of 7 valid without the echo.**
+
+Why that is a live risk rather than trivia: `adapters/llm/structured.py:generate_structured` is the intended provider-native structured-output path (its module docstring frames it as replacing "generate free text → JSON.loads → validate"). It calls `gateway.generate` and then `_parse(schema, response.text)` **directly** (`structured.py:348-353`) — there is no echo on that route, and none of the fallback/retry machinery adds one. So a migration of `execution.py` onto `generate_structured` silently drops demo mode from 7 demoable agents to 3, and the four losses surface as schema-validation failures attributed to the provider, not to the migration.
+
+This is not an argument that the echo is wrong. It is deterministic pass-through of a correlation id the model has no business inventing, and it is the same principle as the `cfo_agent` recompute two lines below it. The defect is that the echo is an *undocumented precondition* of four payloads, recorded nowhere, in a file whose stated contract is "each payload satisfies its agent's output schema".
+
+**Fix, when it is taken (E22):** either add the literal `brief_id` to the four payloads (SMALL — but `brief_id` is a UUID that must match the *request's*, so a fixed literal only works because nothing asserts the correlation; that is a second coupling, not a removal of the first), or decide the echo's contract explicitly and give `generate_structured` the same pre-validation hook (MEDIUM — it is a shared-behaviour decision across two egress paths, plus tests on both). Sizing assumes no change to any output schema, which is out of scope. **Not fixed here, by instruction.**
 
 ### 26. OWNER DECISIONS the code is waiting on
 
