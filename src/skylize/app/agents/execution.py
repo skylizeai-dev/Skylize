@@ -83,17 +83,60 @@ _DECISION_AUDIT_RESULT: dict[str, str] = {
     "deferred_to_human": "escalated",
 }
 
+# Deliverable type per agent. EVERY registered agent must appear here — a
+# deliverable's type is part of the audit record this product sells, so no agent
+# may be typed by omission. `tests/contract/test_agent_contracts.py` fails when a
+# registered agent is missing, which is what makes that a rule rather than a
+# convention.
+#
+# "other" is a DELIBERATE value, not a default. The vocabulary is fixed by the
+# CHECK constraint on `deliverables.deliverable_type` (migration 0006:42-47:
+# marketing_copy, seo_report, ad_creative, strategy_doc, social_post, email_copy,
+# landing_page, blog_post, research_report, competitor_analysis, other) and is
+# mirrored at the edge (`edge/routes/deliverables.py:18-22`). Where an agent's
+# contract does not determine which of those ten a run produces — because the
+# contract carries no output-kind field and the output schema names no artefact
+# type — the honest entry is "other". Picking a narrower one would be a guess
+# stamped onto an audit record. Each such entry below records why.
 _AGENT_DELIVERABLE_TYPE: dict[str, str] = {
+    # -- Derived from the agent's output schema / contract role ---------------
     "hook_generator_agent": "marketing_copy",
     "ad_copy_agent": "ad_creative",
     "caption_writer_agent": "social_post",
-    "script_writer_agent": "other",
     "cta_optimizer_agent": "marketing_copy",
     "copy_director": "marketing_copy",
     "vp_creative": "strategy_doc",
     "director_growth": "strategy_doc",
     "seo_keyword_agent": "seo_report",
+    # -- Deliberately "other": no vocabulary term describes the artefact -----
+    # A video/ad script is not any of the ten (nearest, blog_post, is a
+    # different medium).
+    "script_writer_agent": "other",
+    # A budget summary is a finance artefact; the vocabulary has no finance term.
     "cfo_agent": "other",
+    # Executive judgement/decision records. `strategy_doc` would over-claim:
+    # these contracts approve, veto, and route rather than author a strategy.
+    "ceo": "other",
+    "cmo": "other",
+    # Art direction is a visual brief; `ad_creative` means the finished asset.
+    "art_director": "other",
+    # Production scheduling and resourcing output; no vocabulary term applies.
+    "creative_operations_manager": "other",
+    # Brand/tone verdicts on someone else's copy — a review, not copy. Calling
+    # them `marketing_copy` would mistype a compliance record as the asset.
+    "brand_guardian_agent": "other",
+    "tone_of_voice_agent": "other",
+    # A fraud/risk verdict. `research_report` would misrepresent a control.
+    "fraud_detection_agent": "other",
+    # Outreach drafts. NOT `email_copy`: the contract does not fix the channel,
+    # so the type would be right only when the channel happens to be email.
+    "sdr_outreach_agent": "other",
+    # A qualification verdict on a lead, not a document.
+    "lead_qualifier_agent": "other",
+    # Agency intake/drafting whose artefact kind is set by the engagement, not
+    # by the contract.
+    "agency_requirements_analyst": "other",
+    "agency_deliverable_drafter": "other",
 }
 
 
