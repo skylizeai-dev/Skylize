@@ -2,6 +2,7 @@
 
 **Generated:** 2026-07-29 by a read-only audit (no source files modified; the only write is this file).
 **Describes commit:** `834153c9cc3c3da3415b0b22714e79d87440aacd` on branch `feat/durable-governance` (figures re-verified and some resolved through 2026-07-29; see the dated notes inline).
+**Figures re-measured 2026-07-31** at `4c6f4511`, after three sessions ran concurrently in this one working tree (`8d2055c0`, `be1397aa`, `b5c5813f`, `2b8a2912`, `cd02456a`, `14e959a2`, `38e1818e`, `137c1534`, `4c6f4511`). Corrections are marked inline with the commit that invalidated the old figure, or with "drifted" where no session commit caused it. Suite, static gates, alembic head, branch topology and worktree count all moved; OPEN DEFECTS 1 is resolved.
 **See also:** `/CLAUDE.md` at the repo root — the short, durable orientation (architecture constraints, the two engines, the three ledgers, environment, testing) that points here for changing state.
 **Method:** code is ground truth; docs/comments/ADRs are claims tested against code. Every line carries a `file:line` citation, or an explicit **ABSENT** / **UNVERIFIED**. This is a mirror, not a plan — no recommendations.
 
@@ -12,13 +13,13 @@
 ## OPENS SUMMARY
 
 ```
-SUITE: 1255 / 2 / 0            (passed / skipped / failed, services up)
-OPEN DEFECTS: 4          (was 5; #5 resolved 2026-07-29, see below)
+SUITE: 1408 / 2 / 0            (passed / skipped / failed, services up; was 1255 at 834153c9)
+OPEN DEFECTS: 3          (was 4; #1 resolved by deletion 2026-07-31, 4c6f4511)
 STALE CLAIMS: 14
-NOT WIRED SUBSYSTEMS: 7
+NOT WIRED SUBSYSTEMS: 7   (unchanged: 4c6f4511 deleted PgMemoryAdapter, but entry 3's MemoryGateway is still unwired)
 OWNER DECISIONS OUTSTANDING: 5
 UNMERGED BRANCHES: 12
-COMMITS LOCAL ONLY: 62    (at 834153c9; see Branch topology for the drift note)
+COMMITS LOCAL ONLY: 40    (re-measured 2026-07-31; was 62 at 834153c9)
 STRANDED BRANCHES: 10
 MYPY UNCHECKED SUBTREES: 4 — live: 0   (was 5/live-1; app.decision_engine.* now checked)
 ```
@@ -28,31 +29,34 @@ MYPY UNCHECKED SUBTREES: 4 — live: 0   (was 5/live-1; app.decision_engine.* no
 ## MEASURED STATE
 
 ### Test suite (services up: Postgres + Redis + OPA, all four SKYLIZE_TEST_* set session-scoped)
-- **1255 passed, 2 skipped, 0 failed** (`pytest -q -rs`, 121s). Both skips are **dead-code class**, not service-conditional:
+- **1408 passed, 2 skipped, 0 failed** — re-measured 2026-07-31 at `4c6f4511` (`python -m pytest -q`, 324s), and again in a **different collection order** (files reversed, 318s) with an **identical** tally, so nothing in the suite is order-dependent. Was 1255 at `834153c9`; the three concurrent sessions added the cfo e2e (`2b8a2912`), the Qdrant org-scope suite (`b5c5813f`), and demo/contract cases (`8d2055c0`, `be1397aa`). Both skips are **dead-code class**, not service-conditional, and both survived the `PgMemoryAdapter` deletion because neither used it:
   - `tests/unit/test_llm_agent_runner.py:61` — "runtime/ LLMAgentRunner ctor drifted; the runtime alt-stack is dead code with no tracked removal plan (LLMStepRunner is the live runner)".
   - `tests/unit/test_memory_gateway.py:79` — "chief_security_officer contract not in MVP registry; memory gateway is unwired from bootstrap (dead code, no tracked rework plan)".
 - Postgres-backed tests **ran** (did not skip): `test_postgres_isolation.py` 6 passed, `test_jsonb_readback_pg.py` / `test_org_spend_ceiling_pg.py` / `test_spend_position_endpoint.py` / `test_workflow_repository.py` all executed.
 
 ### Static gates (raw)
-- **mypy:** `Success: no issues found in 205 source files` — **but** 5 subtrees are excluded via `ignore_errors` (see OPEN DEFECTS / mypy). "Clean" is qualified.
-- **lint-imports:** `Analyzed 260 files, 1188 dependencies. ... Contracts: 5 kept, 0 broken.` (exit 0)
+Re-measured 2026-07-31 at `4c6f4511` via `scripts/ci_unit_gate.ps1` — **all 7 gates PASS, exit 0**:
+- **mypy:** `Success: no issues found in 206 source files` (was 205; `b5c5813f` added `memory/org_scope.py`, `4c6f4511` removed `dal/memory_adapter.py`, and other pre-session commits net +1) — **but** 4 subtrees are excluded via `ignore_errors`, live: 0 (see OPEN DEFECTS 5). "Clean" is qualified.
+- **lint-imports:** `Analyzed 262 files, 1195 dependencies. ... Contracts: 5 kept, 0 broken.` (exit 0; was 260/1188)
 - **check_forbidden_imports.py:** `OK: no direct LangChain/CrewAI imports in scanned sources.` (exit 0)
+- **check_all_modules_importable.py:** `OK: 206 modules under src/skylize import cleanly.` (exit 0)
+- **find_orphan_modules.py:** `OK: no new orphan modules (13 known, allowlisted).` (exit 0; **was 14** — `4c6f4511` dropped `skylize.dal.memory_adapter`)
 
 ### Alembic
-- **Head: `0015`** (`migrations/versions/0015_hitl_request_json.py`). Unbroken chain `<base> → 0001 → … → 0015`, files `0001_initial_schema.py` … `0015_hitl_request_json.py` (15 files, one per revision).
+- **Head: `0018`** (`migrations/versions/0018_seed_fable_mythos_pricing.py`). Unbroken chain `<base> → 0001 → … → 0018`, **18 files**, one per revision. Was `0015`/15 files at `834153c9`; `0016` came from `d4ccb6d`, `0017` from `1357f8d`, `0018` from `5e6d24c` — all three **predate** the concurrent sessions, so this figure had already drifted before them. A live database confirms the head: `select * from alembic_version` returns `0018`.
 
 ### Branch topology / remote (A4, raw)
 - `git rev-parse main` = `603936a010b8c5ad08d6b893e5d07ba141951198`; `git rev-parse origin/main` = same. **main is fully pushed** — `git log origin/main..main` and `git log main..origin/main` both empty.
-- Current branch `feat/durable-governance` = `834153c9`, tracks `origin/feat/durable-governance` (`603936a0`) but is **46 commits ahead of that upstream** — all 46 unpushed.
-- **62 commits exist only on this machine** (`git log --oneline --all --not --remotes | wc -l` = 62 at `834153c9`): reachable from local refs, on no remote. **Verified 2026-07-29 (Part 1):** this does **not** contradict "main fully pushed". The fast-forward hypothesis was tested — `git merge-base --is-ancestor feat/durable-governance origin/main` returns non-zero, so `feat/durable-governance`'s commits are genuinely absent from `origin/main`; the 62 live on unpushed feature branches, not on `main`. The count drifts +1 per new local commit (63 after the audit commit `65c2451a`, and higher after each Part-1/2/3 commit) until branches are pushed.
+- Current branch `feat/durable-governance` tracks `origin/feat/durable-governance` and is **38 commits ahead / 0 behind** it as of `bf2703e` (`git rev-list --left-right --count origin/feat/durable-governance...HEAD` = `0  38`) — all unpushed. Was "46 ahead" at `834153c9`; the number fell because the upstream moved, not because commits were lost. It drifts +1 per new local commit.
+- **40 commits exist only on this machine** (`git log --oneline --all --not --remotes` = 40 at `bf2703e`; was 62 at `834153c9`): reachable from local refs, on no remote. **Verified 2026-07-29 (Part 1):** this does **not** contradict "main fully pushed". The fast-forward hypothesis was tested — `git merge-base --is-ancestor feat/durable-governance origin/main` returns non-zero, so `feat/durable-governance`'s commits are genuinely absent from `origin/main`; the 62 live on unpushed feature branches, not on `main`. The count drifts +1 per new local commit (63 after the audit commit `65c2451a`, and higher after each Part-1/2/3 commit) until branches are pushed.
 - Remote: `origin https://github.com/skylizeai-dev/Skylize.git`. Only 6 local branches have upstreams (`feat/durable-governance`, `feat/grammar-gateway`, `feat/tool-dedup-convergence`, `release/console-m1`, plus `main`→origin/main and `fix/dal-ports-workflow-repo`→origin/main); **~44 local branches have never been pushed**.
-- 46 git worktrees registered (`git worktree list`); many `wt-*` worktrees sit exactly at `603936a0` (= main tip).
+- **59** git worktrees registered (`git worktree list`; was 46); many `wt-*` worktrees sit exactly at `603936a0` (= main tip). **None of them was used by the three concurrent sessions of 2026-07-31** — all three committed to `feat/durable-governance` in the PRIMARY worktree, which is how they collided (see the pre-flight check in `/CLAUDE.md`).
 
 ### Git status --porcelain (raw)
 ```
 ?? docs/04_decision_engine/policy_inputs.md
 ```
-(After this audit, `docs/REPO_STATE.md` is added as a second entry.) `.hypothesis/` does not appear: it is ignored via its own nested `.hypothesis/.gitignore:9` (`*`), not via the root `.gitignore` (which has **no** hypothesis entry).
+(`docs/REPO_STATE.md` and `docs/MVP_GAP_ANALYSIS.md` are both tracked now, so `policy_inputs.md` is the only entry; it stays unstaged as an unapproved DRAFT — owner decision 1.) `.hypothesis/` does not appear: it is ignored via its own nested `.hypothesis/.gitignore:9` (`*`), not via the root `.gitignore` (which has **no** hypothesis entry).
 
 ---
 
@@ -83,19 +87,19 @@ Composition root `src/skylize/edge/gateway.py:73-84` mounts 13 routers. Auth dep
 
 1. **OPA decision engine package** (`src/skylize/decision_engine/`) — runs only as its own worker (`python -m skylize.decision_engine.worker`), never inside the API process. `bootstrap.py:276-280` **raises RuntimeError** for any `SKYLIZE_DECISION_ENGINE` != `"inline"`; the worker refuses anything but `"opa"`. Consumer/pipeline/opa_client/publisher/outbox_poller/resume are implemented; docker-compose gates the worker behind `profiles: ["opa-engine"]`. *Needs:* real Rego (see below) + live OPA + production-readiness certification to flip the flag.
 2. **Temporal worker + LLMJudge** (`src/skylize/app/orchestrator/temporal/`) — `worker.py` exists but **no `temporal` reference in bootstrap.py or gateway.py**; nothing schedules it. Import-linter exemption (below) documents it as "unwired/paused". *Needs:* a live entrypoint + the concrete judge activity.
-3. **PgMemoryAdapter + MemoryGateway + `agent_memory_entries`** — `PgMemoryAdapter` (`dal/memory_adapter.py:35`) is constructed nowhere; `MemoryGateway` only in unit tests; the table it reads has **no migration** (see OPEN DEFECTS item 9). *Needs:* DDL + wiring + pgvector.
+3. **MemoryGateway** — constructed only in unit tests; still unwired from bootstrap. *Needs:* a decision to wire or delete, and a `chief_security_officer` contract that `MVP_REGISTRY` does not have (which is why `tests/unit/test_memory_gateway.py:79` skips). **CORRECTED 2026-07-31 (`4c6f4511`):** this entry previously read "PgMemoryAdapter + MemoryGateway + `agent_memory_entries` ... *Needs:* DDL + wiring + pgvector". **`PgMemoryAdapter` is deleted** — `src/skylize/dal/memory_adapter.py` no longer exists — so it needs no DDL, no wiring and no pgvector. Writing DDL for `agent_memory_entries` would have made an unreachable capability look real in the schema; the module was removed instead. The `MemoryAdapter` Protocol survives (`memory/ports.py`), implemented by `mem0_adapter` and consumed by `MemoryGateway`. **There is still no agent-memory persistence on any path**, and the one table built for it, `memory_records`, has no reader and no writer in `src/` (sole occurrence is a docstring at `schemas/memory.py:65`).
 4. **runtime alt-stack: `runtime/tool_proxy.py` + `LLMAgentRunner`** — bootstrap wires `tools/proxy.py::ToolProxy` (bootstrap.py:59), not the `runtime/` one; `LLMAgentRunner` is never constructed in `src/` (only re-exported). Dead. *Needs:* a decision to revive or delete.
 5. **mem0 adapter** (`memory/adapters/mem0_adapter.py`) — not imported in bootstrap. *Needs:* wiring + `mem0_api_key`.
 6. **obsidian_writer** (`services/obsidian_writer/`) — no live import. Dead.
 7. **n8n admin BFF** (`website/src/app/api/console/workflows/route.ts`) — gated **default-OFF** behind `SKYLIZE_ENABLE_N8N_ADMIN` (route.ts:36); returns HTTP 501 unless the env var is exactly `"true"` (route.ts:84-89). *Needs:* the governed rewrite in ADR-0003 §3 before any production enablement.
 
-- **UNVERIFIED:** `generate_sync` / `generate_structured` (`adapters/llm/structured.py`) live-caller status was not traced this session; confirming would take a `structured`-symbol caller sweep excluding tests.
+- ~~**UNVERIFIED:** `generate_sync` / `generate_structured` live-caller status~~ — **RESOLVED 2026-07-31 by the sweep the entry asked for.** A `generate_structured|generate_sync` sweep over all of `src/` returns **definitions and one intra-layer delegation only, and no caller from the request path**: `generate_structured` is defined at `structured.py:315`, implemented at `anthropic_adapter.py:877` and `demo_adapter.py:270`, and re-exported at `adapters/llm/__init__.py:18,35`; `generate_sync` is declared on the gateway protocol (`gateway.py:258`), implemented at `anthropic_adapter.py:809` and `demo_adapter.py:197`, and forwarded by the content-gate decorator (`content_gate.py:125`). **Nothing in `app/`, `edge/`, `runtime/` or `bootstrap.py` calls either.** So both are built, type-checked and unreachable from an HTTP request. This matters beyond inventory: `execution.py` does its own parse-and-validate and applies the `brief_id` echo (`execution.py:329-333`), which `generate_structured` does **not** — see `docs/MVP_GAP_ANALYSIS.md` §27/E22 for why migrating onto it would silently drop demo mode from 7 demoable agents to 3.
 
 ---
 
 ## OPEN DEFECTS
 
-1. **`agent_memory_entries` table has no DDL; `PgMemoryAdapter` is dead code** (item 9, STILL OPEN). Read/written at `dal/memory_adapter.py:64,92`; `grep agent_memory` over `migrations/` = 0 matches (migration 0001 creates `memory_records` instead, `0001_initial_schema.py:232`). No construction site for `PgMemoryAdapter` anywhere. *Consequence:* if ever invoked it raises `UndefinedTableError` (and a second latent failure — the INSERT casts `::vector` at memory_adapter.py:99 while `infra/postgres/init/00_extensions.sql` never installs pgvector). Currently unreachable, so latent.
+1. **~~`agent_memory_entries` table has no DDL; `PgMemoryAdapter` is dead code~~ (item 9) — RESOLVED BY DELETION 2026-07-31 (`4c6f4511`).** `src/skylize/dal/memory_adapter.py` is deleted; nothing in `src/` or `tests/` imported it (it sat on the orphan allowlist), so no caller changed. The orphan ratchet shrinks honestly, **14 known orphans to 13** (`scripts/orphan_modules.txt`; the gate reports "13 known, allowlisted"). *Resolution class:* the exposure was the **claim**, not the dead code — the repo appeared to have durable agent-memory persistence when it has none. Deleting says so; adding DDL would have hidden it. **The capability remains absent** (see NOT WIRED 3).
 2. **`APIConnectionError` collapses retry-safe failures with ambiguous ones** (item 10, STILL OPEN). `anthropic_adapter.py:435` catches `APIConnectionError` → raises field-less `LLMProviderUnavailable` (`gateway.py:76-84`) with no retry (adapter is sole retry authority, `max_retries=0` at anthropic_adapter.py:273). The SDK preserves `exc.__cause__` (`httpx.ConnectError` = connection-refused/DNS, request never sent, retry-safe; vs `ReadError`/`RemoteProtocolError` = mid-flight reset, may be billed) but the adapter inspects neither. *Consequence:* provably-safe retries are refused as terminal. The in-code comment `anthropic_adapter.py:436-441` ("this seam cannot distinguish...") is overstated (see STALE CLAIMS).
 3. **No sweep moves time-expired `hitl_queue` rows to `status='expired'`** (item 12, STILL OPEN). Both writers set `expires_at = now + 48h` (`decision_engine/hitl_writer.py:34,121`; `app/agents/execution.py:75,482` → `dal/hitl.py:119`). Verdicts on an expired row are refused with **HTTP 410** (`dal/hitl.py:173` predicate → `app/hitl/service.py:283-284` → `edge/routes/hitl.py:132-133,177-178`). But no cron/poller writes `'expired'` (grep over `src/` finds only migration 0015's one-time backfill keyed on `request_json IS NULL`, not on `expires_at`); no background task in the gateway lifespan (`edge/gateway.py:39-50`). `list_pending` filters only `status='pending'` with no `expires_at` predicate (`dal/hitl.py:133-142`). *Consequence:* expired rows linger in the pending list/count forever until someone attempts a verdict and gets the 410. (`'expired'` and `'modified'` are valid CHECK values, `0001_initial_schema.py:212-214`; `'modified'` is never written anywhere in `src/`.)
 4. **`_check_budget` (adapter-level token guard) is dormant on every live path** (item 11). `anthropic_adapter.py:288-300`: early-returns unless `request.max_token_budget` is set; both request models default it `None` (`gateway.py:153-154,184-185`); no production construction site populates it (all live callers — execution.py:298,664; runner.py:111; structured.py:125 — pass neither field; only unit tests set them). *Consequence:* this defense-in-depth layer never fires; the live budget control is the separate `validate_tool_call` BUDGET stage (`contracts/token.py:282-285`), which does bite.
