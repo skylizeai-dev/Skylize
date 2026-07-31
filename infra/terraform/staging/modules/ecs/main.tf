@@ -70,17 +70,68 @@ resource "aws_ecs_task_definition" "api" {
         }
       ]
 
+      # Every entry here is load-bearing at BOOT, not at first request. The
+      # process constructs Settings() at module import of skylize.edge.gateway
+      # (edge/gateway.py `app = create_app()`), so a missing or contradictory
+      # value exits uvicorn before it binds :8000 and the ALB health check
+      # below can never pass.
       environment = [
+        # backend != "memory" turns on three fail-closed validators in
+        # src/skylize/config.py: dev_auth must be false, db_app_url must be
+        # non-empty, and db_app_url must differ from db_url.
         { name = "SKYLIZE_BACKEND", value = "postgres" },
+        # Required by `_forbid_dev_auth_on_a_real_backend`. Dev auth trusts the
+        # X-Dev-Org / X-Dev-User / X-Dev-Roles headers verbatim, so leaving it
+        # true on postgres is an open door to every tenant; Settings refuses to
+        # construct on that combination rather than shipping it.
         { name = "SKYLIZE_DEV_AUTH", value = "false" },
-        { name = "PYTHONPATH", value = "/app/src" },
+
+        # STAGING LLM POSTURE: DEMO MODE (owner decision, 2026-07-31).
+        # src/skylize/bootstrap.py raises LLMConfigurationError during the
+        # lifespan when neither SKYLIZE_ANTHROPIC_API_KEY nor this flag is set,
+        # which kills the container at startup. There is no Anthropic key in
+        # any Secrets Manager shell today, and a staging environment that
+        # cannot start proves nothing, so demo mode is set EXPLICITLY here
+        # rather than left to an implicit fallback (there is no implicit
+        # fallback -- the code fails closed by design).
+        #
+        # Demo mode wires DemoLLMAdapter, which logs a WARNING on every call
+        # and returns canned output for the 7 of 21 agents that have a payload;
+        # the rest raise DemoResponseUnavailable naming themselves. It is
+        # independent of SKYLIZE_BACKEND -- the adapter takes no database and
+        # the LLM branch in bootstrap.py never reads settings.backend -- so
+        # demo mode and backend=postgres are compatible.
+        #
+        # TO SWITCH TO A REAL PROVIDER: create an ANTHROPIC_API_KEY shell in
+        # modules/secrets/main.tf, populate it (operations step, never in
+        # code), wire it into the `secrets` block below as
+        # SKYLIZE_ANTHROPIC_API_KEY, and flip this to "false". Real egress also
+        # needs the model_pricing rows from migration 0013 and an org spend
+        # ceiling row, or the adapter refuses the call rather than guessing a
+        # price.
+        { name = "SKYLIZE_LLM_DEMO_MODE", value = "true" },
+
+        # PYTHONPATH=/app/src REMOVED 2026-07-31. The image installs skylize
+        # into site-packages and no longer copies a loose src/ tree, so this
+        # pointed at a directory that does not exist. It was previously the
+        # only reason the container could import the package at all -- see the
+        # header of the root Dockerfile.
       ]
 
+      # POSITIONAL INDEXING WARNING: var.secret_arns[N] is ordered by
+      # modules/secrets/outputs.tf. Reordering that list rewires a secret into
+      # the wrong environment variable with no error anywhere. New secrets get
+      # a named variable instead (see SKYLIZE_JWT_SECRET below).
       secrets = [
         {
           name      = "SKYLIZE_DB_URL"
           valueFrom = var.secret_arns[0]  # DATABASE_URL
         },
+        # Must resolve to the non-superuser skylize_app role, NOT the RDS
+        # master user. Two independent checks reject the master user: the
+        # Settings string comparison (db_app_url == db_url) and, past that, a
+        # live pg_roles probe in bootstrap.py (verify_app_role_is_rls_subject)
+        # that refuses to start if the runtime role is SUPERUSER or BYPASSRLS.
         {
           name      = "SKYLIZE_DB_APP_URL"
           valueFrom = var.secret_arns[1]  # DATABASE_APP_URL
@@ -97,7 +148,30 @@ resource "aws_ecs_task_definition" "api" {
           name      = "SKYLIZE_GOVERNANCE_SIGNING_KEY_PEM"
           valueFrom = var.secret_arns[5]  # GOVERNANCE_SIGNING_KEY_PEM
         },
+        # ADDED 2026-07-31. Without this, Settings() raises
+        # "SKYLIZE_JWT_SECRET must be set when dev_auth is disabled" at module
+        # import and uvicorn never starts. The shell is created empty in
+        # modules/secrets/main.tf; populating it is an operations step.
+        {
+          name      = "SKYLIZE_JWT_SECRET"
+          valueFrom = var.jwt_secret_arn
+        },
       ]
+
+      # STILL MISSING, AND STILL A BOOT BLOCKER -- SKYLIZE_APP_DB_PASSWORD.
+      # This container's CMD is `alembic upgrade head && uvicorn ...`, and
+      # migration 0003 reads SKYLIZE_APP_DB_PASSWORD from the environment to
+      # decide whether skylize_app is created `LOGIN PASSWORD '<pw>'` or a bare
+      # `LOGIN` with no password at all. Nothing in this terraform creates the
+      # skylize_app role -- modules/rds/main.tf provisions only the `skylize`
+      # master user -- so the role comes into existence here, on first boot,
+      # with NO password. The DATABASE_APP_URL secret then carries a password
+      # that RDS will reject, and bootstrap.py fails at `await db.connect()`.
+      # The ordering (migration creates the role before uvicorn connects) is
+      # fine; the password is not. Closing this needs a DB_APP_PASSWORD secret
+      # shell wired both here as an environment secret AND into whatever
+      # populates DATABASE_APP_URL, so the two agree. Not created here because
+      # it is coupled to a secret value the owner must choose.
 
       healthCheck = {
         command     = ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
