@@ -319,17 +319,27 @@ async def test_demo_adapter_simulates_one_tool_call_then_finalizes() -> None:
 
 
 async def test_demo_mode_full_pipeline_produces_deliverable_via_tool_loop() -> None:
-    """End-to-end: DemoLLMAdapter + real ToolProxy + real minted GovernanceToken."""
-    authority, audit, bus, proxy = _harness()
+    """End-to-end: DemoLLMAdapter + real ToolProxy + real minted GovernanceToken.
+
+    Runs under the REAL `hook_generator_agent` id rather than the synthetic
+    `test_tool_loop_agent`: DemoLLMAdapter dispatches canned payloads on the
+    exact `agent_id` (demo_adapter.py:_pick_response), so an id no contract
+    owns has no demo payload and raises `DemoResponseUnavailable` by design.
+    Everything else about the contract -- invocable_tools, the I/O schemas, the
+    iteration cap -- is unchanged, so this still exercises the tool loop; it
+    just does so as an agent demo mode can actually serve.
+    """
+    contract = _TOOL_LOOP_CONTRACT.model_copy(update={"agent_id": "hook_generator_agent"})
+    authority, audit, bus, proxy = _harness(contract)
     llm = DemoLLMAdapter()
     deliverables, row = _deliverable_mock()
 
     service = AgentExecutionService(
-        registry=AgentRegistry([_TOOL_LOOP_CONTRACT]), llm=llm, deliverables=deliverables,
+        registry=AgentRegistry([contract]), llm=llm, deliverables=deliverables,
         tools=proxy, authority=authority, audit=audit,
     )
     result = await service.execute(
-        org_id=ORG, agent_id="test_tool_loop_agent", input_data=_INPUT, user_id="u1",
+        org_id=ORG, agent_id="hook_generator_agent", input_data=_INPUT, user_id="u1",
     )
     assert result is row
     tool_events = [
