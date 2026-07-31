@@ -55,8 +55,12 @@ services:
   # non-superuser `skylize_app` role the gateway then connects as.
   migrate:
     build:
+      # THE gateway image, and the only one. infra/Dockerfile was deleted on
+      # 2026-07-31: compose built it while CI and deploy.ps1 built the root
+      # Dockerfile, so CI validated an image nobody ran. All three now build
+      # this one. See the header of ../Dockerfile.
       context: ..
-      dockerfile: infra/Dockerfile
+      dockerfile: Dockerfile
     command: ["alembic", "upgrade", "head"]
     environment:
       SKYLIZE_DB_URL: postgresql://skylize:${POSTGRES_PASSWORD:-localdev}@postgres:5432/skylize
@@ -68,7 +72,7 @@ services:
   gateway:
     build:
       context: ..
-      dockerfile: infra/Dockerfile
+      dockerfile: Dockerfile
     environment:
       SKYLIZE_BACKEND: postgres
       # Admin DSN is present for completeness, but the RUNTIME uses the app DSN
@@ -127,7 +131,7 @@ services:
     profiles: ["opa-engine"]
     build:
       context: ..
-      dockerfile: infra/Dockerfile
+      dockerfile: Dockerfile
     command: ["python", "-m", "skylize.decision_engine.worker"]
     environment:
       # The interlock. The worker raises RuntimeError on anything but "opa".
