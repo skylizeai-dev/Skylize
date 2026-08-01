@@ -32,7 +32,7 @@ from cryptography.hazmat.primitives.asymmetric.ec import (
 )
 
 from ..security.ecc_service import Curve, ECCService
-from .base import AuthorityLevel, GovernanceToken
+from .base import AuthorityLevel, GovernanceToken, TokenVersion
 
 # All governance tokens use P-384 (long-lived signing key, higher margin).
 GOVERNANCE_CURVE: Curve = Curve.P384
@@ -55,11 +55,30 @@ def canonical_signing_bytes(
     issued_at: datetime,
     expires_at: datetime,
     nonce: str,
+    token_version: TokenVersion = "1.0",
 ) -> bytes:
     """Deterministic byte serialization of every token field except `signature`.
 
     Stable key order, no whitespace, UTC ISO-8601 datetimes — so the bytes a
     signer produces are exactly the bytes a verifier reconstructs.
+
+    VERSIONING — READ BEFORE EDITING THE PAYLOAD BELOW.
+    The eleven-key dict is the v1.0 payload and is FROZEN. Every token ever
+    signed by this platform is signed over exactly those keys, so adding a key
+    to it — even one whose value is null — changes the bytes of every token
+    already in flight and invalidates all of them at once. Newer versions
+    therefore ADD keys in the branch below, and `token_version` itself is
+    absent from a v1.0 payload rather than being written as "1.0".
+
+    That the version is unsigned for v1.0 is not a gap: the signature binds the
+    INTERPRETATION. A verifier reconstructs the bytes according to the version
+    it is told, so flipping the version flips the reconstruction and the
+    signature stops matching. Both downgrade ("1.1"->"1.0", dropping the
+    principal claim) and promotion ("1.0"->"1.1", inventing one) are caught
+    that way, and each is covered by a test.
+
+    tests/contract/test_token_v10_backcompat.py holds a real token signed
+    before this parameter existed and re-verifies it on every run.
     """
     payload = {
         "token_id": str(token_id),
@@ -74,6 +93,8 @@ def canonical_signing_bytes(
         "expires_at": _iso(expires_at),
         "nonce": nonce,
     }
+    if token_version != "1.0":
+        payload["token_version"] = token_version
     return json.dumps(
         payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
     ).encode("utf-8")
@@ -87,7 +108,12 @@ def _iso(dt: datetime) -> str:
 
 
 def token_signing_bytes(token: GovernanceToken) -> bytes:
-    """Canonical signable bytes for an already-constructed token."""
+    """Canonical signable bytes for an already-constructed token.
+
+    The token's OWN `token_version` selects the canonicalization, so a verifier
+    reconstructs whatever the token claims to be — and a mismatch between the
+    claimed version and the version actually signed breaks the signature.
+    """
     return canonical_signing_bytes(
         token_id=token.token_id,
         agent_id=token.agent_id,
@@ -100,6 +126,7 @@ def token_signing_bytes(token: GovernanceToken) -> bytes:
         issued_at=token.issued_at,
         expires_at=token.expires_at,
         nonce=token.nonce,
+        token_version=token.token_version,
     )
 
 
@@ -132,8 +159,13 @@ class TokenSigner:
         issued_at: datetime,
         expires_at: datetime,
         nonce: str,
+        token_version: TokenVersion = "1.0",
     ) -> GovernanceToken:
-        """Produce a fully-signed `GovernanceToken`."""
+        """Produce a fully-signed `GovernanceToken`.
+
+        `token_version` defaults to "1.0", so every pre-existing call site keeps
+        minting byte-identical v1.0 tokens without being touched.
+        """
         body = canonical_signing_bytes(
             token_id=token_id,
             agent_id=agent_id,
@@ -146,11 +178,13 @@ class TokenSigner:
             issued_at=issued_at,
             expires_at=expires_at,
             nonce=nonce,
+            token_version=token_version,
         )
         signature = ECCService.sign_governance_token(
             self._private_key, body, curve=GOVERNANCE_CURVE
         )
         return GovernanceToken(
+            token_version=token_version,
             token_id=token_id,
             agent_id=agent_id,
             authority_level=authority_level,

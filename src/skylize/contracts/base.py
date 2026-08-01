@@ -25,6 +25,16 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 # Canonical authority levels — IDENTICAL to agent_governance.md §2.
 AuthorityLevel = Literal["executive", "vp", "director", "manager", "worker"]
 
+# Schema version of the SIGNED token payload.
+#   "1.0" — the original eleven-field token. Its canonical bytes are frozen
+#           forever by tests/contract/test_token_v10_backcompat.py.
+#   "1.1" — additionally binds a human-principal claim (`on_behalf_of`).
+# The version selects the canonicalization branch in
+# `contracts.token.canonical_signing_bytes`; it is NOT itself part of a v1.0
+# payload, because adding any key to that payload would change the signed bytes
+# of every token already in flight.
+TokenVersion = Literal["1.0", "1.1"]
+
 
 class FailureMode(str, Enum):
     """What the agent does when it errors or is denied (agent_runtime.md §7)."""
@@ -130,6 +140,11 @@ class GovernanceToken(BaseModel):
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
+
+    # Which canonicalization the signature was computed over. Defaults to "1.0"
+    # so a token deserialized from storage written before this field existed is
+    # read exactly as it was signed.
+    token_version: TokenVersion = "1.0"
 
     token_id: UUID  # unique; used for revocation
     agent_id: str
