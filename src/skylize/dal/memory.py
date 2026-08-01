@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
+from ..app.principal.models import JournalCursor, JournalEntry
 from .ports import (
     AgentStateRow,
     ApiKeyRow,
@@ -482,3 +483,54 @@ def _descends_from(
             return True
         cursor = rows.get(cursor.parent_id)
     return False
+
+
+class InMemoryJournalRepository:
+    """In-memory work-journal store (memory backend + tests). Upholds the same
+    `JournalRepository` protocol (skylize.app.principal.journal) as
+    `PostgresJournalRepository`, including the ascending-seq, org+principal
+    scoping `since()` relies on."""
+
+    def __init__(self) -> None:
+        self._entries: list[JournalEntry] = []
+        self._cursors: dict[tuple[str, str], JournalCursor] = {}
+        self._next_seq = 1
+
+    async def append(self, entry: JournalEntry) -> int:
+        seq = self._next_seq
+        self._next_seq += 1
+        self._entries.append(entry.model_copy(update={"seq": seq}))
+        return seq
+
+    async def since(
+        self, *, org_id: str, principal_id: str, after_seq: int, limit: int = 200
+    ) -> list[JournalEntry]:
+        matched = [
+            e
+            for e in self._entries
+            if e.org_id == org_id and e.principal_id == principal_id and e.seq > after_seq
+        ]
+        matched.sort(key=lambda e: e.seq)
+        return matched[:limit]
+
+    async def get_cursor(
+        self, *, org_id: str, principal_id: str
+    ) -> JournalCursor | None:
+        return self._cursors.get((org_id, principal_id))
+
+    async def advance_cursor(
+        self, *, org_id: str, principal_id: str, to_seq: int, at: datetime
+    ) -> None:
+        key = (org_id, principal_id)
+        existing = self._cursors.get(key)
+        if existing is not None and existing.last_seen_seq >= to_seq:
+            return
+        self._cursors[key] = JournalCursor(
+            org_id=org_id, principal_id=principal_id, last_seen_seq=to_seq, last_seen_at=at
+        )
+
+    async def head_seq(self, *, org_id: str, principal_id: str) -> int:
+        matched = [
+            e.seq for e in self._entries if e.org_id == org_id and e.principal_id == principal_id
+        ]
+        return max(matched, default=0)
