@@ -32,10 +32,20 @@ from cryptography.hazmat.primitives.asymmetric.ec import (
 )
 
 from ..security.ecc_service import Curve, ECCService
-from .base import AuthorityLevel, GovernanceToken, TokenVersion
+from .base import AuthorityLevel, GovernanceToken, OnBehalfOf, TokenVersion
 
 # All governance tokens use P-384 (long-lived signing key, higher margin).
 GOVERNANCE_CURVE: Curve = Curve.P384
+
+
+class MalformedToken(ValueError):
+    """A token's declared version and its claims contradict each other.
+
+    Raised by `canonical_signing_bytes` rather than returned, because there is no
+    correct byte string for a self-contradictory token: signing one would mint a
+    lie and verifying one would be answering the wrong question.
+    `verify_token_signature` converts it to a plain `False`.
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -56,6 +66,7 @@ def canonical_signing_bytes(
     expires_at: datetime,
     nonce: str,
     token_version: TokenVersion = "1.0",
+    on_behalf_of: OnBehalfOf | None = None,
 ) -> bytes:
     """Deterministic byte serialization of every token field except `signature`.
 
@@ -94,7 +105,28 @@ def canonical_signing_bytes(
         "nonce": nonce,
     }
     if token_version != "1.0":
+        # Refuse to serialize a version/claim mismatch AT ALL, in either
+        # direction. `model_copy` bypasses pydantic validators, so a caller can
+        # hand us a token whose version and claim disagree; signing or verifying
+        # such a thing is never correct. Raising here means:
+        #   - the signer cannot burn a signature over bytes that claim "1.1"
+        #     while binding no principal (the dangerous direction), and
+        #   - the verifier turns the mismatch into a plain False, below.
+        if on_behalf_of is None:
+            raise MalformedToken(
+                f"token_version={token_version!r} requires an on_behalf_of claim"
+            )
         payload["token_version"] = token_version
+        payload["on_behalf_of"] = {
+            "principal_id": on_behalf_of.principal_id,
+            "authority_fingerprint": on_behalf_of.authority_fingerprint,
+            "session_kind": on_behalf_of.session_kind,
+        }
+    elif on_behalf_of is not None:
+        raise MalformedToken(
+            "an on_behalf_of claim cannot be carried by a v1.0 token; the v1.0 "
+            "payload is frozen and cannot bind it"
+        )
     return json.dumps(
         payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
     ).encode("utf-8")
@@ -127,6 +159,7 @@ def token_signing_bytes(token: GovernanceToken) -> bytes:
         expires_at=token.expires_at,
         nonce=token.nonce,
         token_version=token.token_version,
+        on_behalf_of=token.on_behalf_of,
     )
 
 
@@ -160,11 +193,18 @@ class TokenSigner:
         expires_at: datetime,
         nonce: str,
         token_version: TokenVersion = "1.0",
+        on_behalf_of: OnBehalfOf | None = None,
     ) -> GovernanceToken:
         """Produce a fully-signed `GovernanceToken`.
 
-        `token_version` defaults to "1.0", so every pre-existing call site keeps
-        minting byte-identical v1.0 tokens without being touched.
+        `token_version` defaults to "1.0" and `on_behalf_of` to None, so every
+        pre-existing call site keeps minting byte-identical v1.0 tokens without
+        being touched.
+
+        ORDERING IS LOAD-BEARING: the canonical bytes are built BEFORE the private
+        key is touched, so a version/claim mismatch raises `MalformedToken` without
+        ever producing a signature. Signing first and validating afterwards would
+        burn a real signature over a payload we then refuse to wrap in a token.
         """
         body = canonical_signing_bytes(
             token_id=token_id,
@@ -179,6 +219,7 @@ class TokenSigner:
             expires_at=expires_at,
             nonce=nonce,
             token_version=token_version,
+            on_behalf_of=on_behalf_of,
         )
         signature = ECCService.sign_governance_token(
             self._private_key, body, curve=GOVERNANCE_CURVE
@@ -197,16 +238,28 @@ class TokenSigner:
             expires_at=expires_at,
             nonce=nonce,
             signature=signature,
+            on_behalf_of=on_behalf_of,
         )
 
 
 def verify_token_signature(
     token: GovernanceToken, public_key: EllipticCurvePublicKey
 ) -> bool:
-    """True iff the token's signature verifies against the authority public key."""
+    """True iff the token's signature verifies against the authority public key.
+
+    A self-contradictory token (version and claim disagreeing, which `model_copy`
+    can produce because it skips validators) has no canonical form at all, so it
+    cannot verify: the refusal is reported as a plain `False`, exactly like any
+    other bad signature. Callers get one answer to one question and never have to
+    catch anything.
+    """
+    try:
+        body = token_signing_bytes(token)
+    except MalformedToken:
+        return False
     return ECCService.verify_governance_token(
         public_key,
-        token_signing_bytes(token),
+        body,
         token.signature,
         curve=GOVERNANCE_CURVE,
     )

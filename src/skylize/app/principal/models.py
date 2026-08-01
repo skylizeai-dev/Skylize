@@ -42,6 +42,16 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+# `OnBehalfOf` lives in `contracts.base`, because it is part of the SIGNED token
+# wire format and `contracts` is an inner layer that must not import from `app`.
+# It is re-exported here so the principal kernel keeps one vocabulary and every
+# existing `from ...models import OnBehalfOf` still resolves.
+#
+# The redundant `as OnBehalfOf` marks this an intentional re-export: this module
+# has no `__all__` and is not an `__init__.py`, so a bare import would read as an
+# unused import and `ruff check src tests` — a CI gate — would fail on F401.
+from ...contracts.base import OnBehalfOf as OnBehalfOf
+
 # The scope vocabulary is deliberately the SAME string space as
 # `ToolGrant.tool_id` (e.g. "llm.generate", "memory.search", "stripe.refund").
 # One vocabulary, or the intersection below is meaningless.
@@ -157,20 +167,7 @@ class AuthoritySnapshot(BaseModel):
         raise TypeError("scopes must be an iterable of strings")
 
 
-class OnBehalfOf(BaseModel):
-    """The new claim to add to `GovernanceToken`.
-
-    Presence of this claim means: this token's authority derives from a human,
-    and the tool proxy must additionally assert that the token scope is a subset
-    of `authority_fingerprint`'s snapshot. Absence means the classic autonomous
-    shape (authority rooted at `human_owner`).
-    """
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    principal_id: str
-    authority_fingerprint: str
-    session_kind: Literal["autonomous", "cowork"]
+# (`OnBehalfOf` is re-exported from `contracts.base` at the top of this module.)
 
 
 # --------------------------------------------------------------------------- #

@@ -22,7 +22,7 @@ from uuid import UUID
 
 from cryptography.hazmat.primitives import serialization
 
-from skylize.contracts.base import GovernanceToken
+from skylize.contracts.base import GovernanceToken, OnBehalfOf
 from skylize.contracts.token import (
     canonical_signing_bytes,
     token_signing_bytes,
@@ -162,7 +162,19 @@ def _fresh_signer():
     return TokenSigner(pair.private_key), pair.public_key
 
 
-def _sign(signer, *, token_version="1.0"):
+_CLAIM = OnBehalfOf(
+    principal_id="devon",
+    authority_fingerprint="a" * 64,
+    session_kind="cowork",
+)
+
+
+def _sign(signer, *, token_version="1.0", on_behalf_of=...):
+    """Sign at the given version. A v1.1 token REQUIRES a principal claim, so
+    unless one is passed explicitly the claim defaults to present for "1.1" and
+    absent for "1.0" -- the only two combinations that are constructible."""
+    if on_behalf_of is ...:
+        on_behalf_of = _CLAIM if token_version == "1.1" else None
     return signer.sign(
         token_id=_TOKEN_ID,
         agent_id=_AGENT_ID,
@@ -176,6 +188,7 @@ def _sign(signer, *, token_version="1.0"):
         expires_at=_EXPIRES_AT,
         nonce=_NONCE,
         token_version=token_version,
+        on_behalf_of=on_behalf_of,
     )
 
 
