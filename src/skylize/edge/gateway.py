@@ -26,6 +26,7 @@ from .routes import (
     api_keys,
     audit,
     auth,
+    brief,
     credentials,
     deliverables,
     hitl,
@@ -89,6 +90,7 @@ def create_app() -> FastAPI:
     app.include_router(knowledge.router)
     app.include_router(audit.router)
     app.include_router(spend.router)
+    app.include_router(brief.router)
     return app
 
 

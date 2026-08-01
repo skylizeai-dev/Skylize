@@ -38,6 +38,7 @@ from .app.governance.authority import GovernanceAuthority
 from .app.governance.broadcast import GovernanceBroadcast
 from .app.hitl.service import HitlQueueService
 from .app.orchestrator import LLMStepRunner, Orchestrator
+from .app.principal.journal import JournalRepository, WorkJournal
 from .app.tenants.service import TenantService
 from .config import Settings, get_settings
 from .contracts.registry import MVP_REGISTRY
@@ -141,6 +142,9 @@ class Container:
     # LLM calls (incl. the Temporal worker's LLMJudge) must take THIS, never a
     # bare provider adapter.
     llm: LLMGateway
+    # Append-only, principal-scoped log read by GET /me/brief. See
+    # dal/work_journal.py for why nothing writes to it yet.
+    work_journal: WorkJournal
     _closers: list[Callable[[], Awaitable[None]]]
     # The connection pool on the postgres backend (None on memory). Exposed for
     # sibling processes composed from this root — the Temporal worker builds
@@ -186,6 +190,11 @@ async def build_container(settings: Settings | None = None) -> Container:
     # Request-path HITL writer for the synchronous decision gate (owner decision
     # K3). In-memory on the memory backend; the durable Pg writer on postgres.
     hitl_repo: HitlQueueRepository
+    # Work journal (skylize.app.principal): append-only, principal-scoped log
+    # read by GET /me/brief. Not yet written to by any live path (the run-path
+    # write requires restructuring DeliverableService's transaction boundary
+    # to share a connection — deferred, see dal/work_journal.py).
+    journal_repo: JournalRepository
 
     if settings.backend == "memory":
         from .app.governance.broadcast import InMemoryGovernanceBroadcast
@@ -196,6 +205,7 @@ async def build_container(settings: Settings | None = None) -> Container:
             InMemoryDeliverableRepository,
             InMemoryGovernanceRepository,
             InMemoryHitlQueueRepository,
+            InMemoryJournalRepository,
             InMemoryTenantRepository,
             InMemoryUserRepository,
         )
@@ -211,6 +221,7 @@ async def build_container(settings: Settings | None = None) -> Container:
         credential_repo = InMemoryCredentialRepository()
         broadcast = InMemoryGovernanceBroadcast()
         hitl_repo = InMemoryHitlQueueRepository()
+        journal_repo = InMemoryJournalRepository()
     else:
         from .dal.connection import Database
         from .dal.credentials import PgCredentialRepository
@@ -225,6 +236,7 @@ async def build_container(settings: Settings | None = None) -> Container:
             PgTenantRepository,
         )
         from .dal.users import PgUserRepository
+        from .dal.work_journal import PostgresJournalRepository
         from .events.redis_adapter import RedisEventBus
         from .events.redis_governance_broadcast import RedisGovernanceBroadcast
 
@@ -247,6 +259,7 @@ async def build_container(settings: Settings | None = None) -> Container:
         capital_repo = PgCapitalRepository(db)
         processed_store = PgProcessedEventStore(db)
         hitl_repo = PgHitlQueueRepository(db)
+        journal_repo = PostgresJournalRepository(db)
         redis_broadcast = RedisGovernanceBroadcast(settings.redis_url)
         broadcast = redis_broadcast
 
@@ -262,6 +275,7 @@ async def build_container(settings: Settings | None = None) -> Container:
     audit = AuditService(bus, audit_repo)
     tenants = TenantService(tenant_repo, audit)
     api_keys = ApiKeyService(apikey_repo, audit)
+    work_journal = WorkJournal(journal_repo)
 
     # Human-user auth (register/login/refresh + /me).
     user_auth = UserAuthService(user_repo, settings)
@@ -466,6 +480,6 @@ async def build_container(settings: Settings | None = None) -> Container:
         credential_vault=credential_vault, agent_execution=agent_execution,
         hitl=hitl_service,
         knowledge_ingestion=knowledge_ingestion, decision_engine=decision_engine,
-        llm=llm, _closers=closers, db=db,
+        llm=llm, work_journal=work_journal, _closers=closers, db=db,
         cost_ledger=cost_ledger, spend_ceiling_dal=spend_ceiling_dal,
     )
