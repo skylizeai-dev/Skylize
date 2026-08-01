@@ -306,9 +306,25 @@ class LiveStateChecker(Protocol):
         """Reason the token/agent is revoked/suspended/killed, or None if live."""
         ...
 
+    # OPTIONAL, duck-typed on purpose: `authority_stale_reason(claim)`.
+    #
+    # It is deliberately NOT declared here as a required member. Declaring it
+    # would break every existing implementation of this protocol — including
+    # `AllowAllLiveState` below and the hand-rolled checkers in the test suite —
+    # for tokens that have no principal claim and never needed the check.
+    # `validate_tool_call` looks it up with getattr and, for a principal-bound
+    # token, DENIES when it is absent. So the lenient typing costs nothing:
+    # a checker that does not implement it simply cannot authorize a v1.1 token.
+
 
 class AllowAllLiveState:
-    """No-op live-state checker for tests and pre-Authority foundation use."""
+    """No-op live-state checker for tests and pre-Authority foundation use.
+
+    Note it deliberately does NOT implement `authority_stale_reason`: it is an
+    allow-all stub, and allowing a principal-bound token whose authority nobody
+    verified is exactly the thing that must not happen. A v1.1 token presented
+    against this checker is refused at the revocation stage.
+    """
 
     def revocation_reason(self, token_id: UUID, agent_id: str) -> str | None:
         return None
@@ -352,6 +368,34 @@ def validate_tool_call(
     reason = live_state.revocation_reason(token.token_id, token.agent_id)
     if reason is not None:
         return TokenValidationResult.fail(ValidationStage.REVOCATION, reason)
+
+    # 3b. Authority freshness, for principal-bound (v1.1) tokens only.
+    #
+    # This is a REVOCATION check, not a new stage. A human whose grant was
+    # withdrawn has had the token's authorization basis revoked; that is the same
+    # class of event as a revoked token or a suspended agent, and
+    # `principal.errors.StaleAuthority` already declares failed_stage="revocation".
+    # Putting it here rather than between scope and budget also fails fast for the
+    # right reason: a withdrawn authority voids the token for EVERY tool, so
+    # reporting "tool X not in scope" first would be a misleading audit record.
+    # Reusing the stage keeps `ValidationStage` unchanged, so nothing that
+    # switches on it has to grow a case.
+    #
+    # Autonomous tokens carry no claim and skip this entirely, which is why every
+    # existing caller and every duck-typed test checker is unaffected.
+    if token.on_behalf_of is not None:
+        stale_check = getattr(live_state, "authority_stale_reason", None)
+        if stale_check is None:
+            # FAIL CLOSED: a checker that cannot evaluate authority freshness must
+            # not be taken as asserting the authority is fresh.
+            return TokenValidationResult.fail(
+                ValidationStage.REVOCATION,
+                "token carries an on_behalf_of claim but this live-state checker "
+                "cannot verify authority freshness",
+            )
+        stale = stale_check(token.on_behalf_of)
+        if stale is not None:
+            return TokenValidationResult.fail(ValidationStage.REVOCATION, stale)
 
     # 4. Scope: requested tool in token.scope AND token.scope ⊆ contract tools
     if requested_tool_id not in token.scope:

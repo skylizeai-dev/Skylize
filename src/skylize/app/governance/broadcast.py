@@ -31,6 +31,7 @@ class InvalidationKind(str, Enum):
     AGENT_STATE = "agent_state"       # an (agent, org) state changed
     KILL_TENANT = "kill_tenant"       # a tenant kill engaged/disengaged
     KILL_PLATFORM = "kill_platform"   # platform kill engaged/disengaged
+    AUTHORITY = "authority"           # a human principal's grants changed
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +45,7 @@ class GovernanceInvalidation:
     org_id: str | None = None
     state: str | None = None          # for AGENT_STATE: active|suspended|killed
     engaged: bool | None = None       # for KILL_* : True=engage, False=disengage
+    principal_id: str | None = None   # for AUTHORITY: whose grants changed
 
     def to_json(self) -> str:
         import json
@@ -56,6 +58,7 @@ class GovernanceInvalidation:
                 "org_id": self.org_id,
                 "state": self.state,
                 "engaged": self.engaged,
+                "principal_id": self.principal_id,
             },
             separators=(",", ":"),
         )
@@ -72,6 +75,7 @@ class GovernanceInvalidation:
             org_id=d.get("org_id"),
             state=d.get("state"),
             engaged=d.get("engaged"),
+            principal_id=d.get("principal_id"),
         )
 
 

@@ -139,6 +139,16 @@ class _BoundLiveStateChecker:
     def revocation_reason(self, token_id: UUID, agent_id: str) -> str | None:
         return self._snapshot.reason_for(token_id, agent_id, self._org_id)
 
+    def authority_stale_reason(self, claim: OnBehalfOf) -> str | None:
+        """Freshness of the human principal's authority behind a v1.1 token.
+
+        The org comes from THIS checker's binding, never from the token, so a
+        token cannot point the lookup at another tenant's snapshot.
+        """
+        return self._snapshot.authority_stale_reason(
+            self._org_id, claim.principal_id, claim.authority_fingerprint
+        )
+
 
 class GovernanceAuthority:
     def __init__(
@@ -222,6 +232,12 @@ class GovernanceAuthority:
             (self._snapshot.kill_tenant if msg.engaged else self._snapshot.unkill_tenant)(
                 msg.org_id
             )
+        elif (
+            msg.kind is InvalidationKind.AUTHORITY
+            and msg.org_id is not None
+            and msg.principal_id is not None
+        ):
+            self._snapshot.forget_authority(msg.org_id, msg.principal_id)
         elif msg.kind is InvalidationKind.KILL_PLATFORM:
             (self._snapshot.kill_platform if msg.engaged else self._snapshot.unkill_platform)()
 
@@ -383,10 +399,41 @@ class GovernanceAuthority:
                 result_reason=f"{type(exc).__name__}[{exc.failed_stage}]: {exc}",
             )
             raise
+        # Warm the hot validation cache with the authority we just compiled. This
+        # is what makes the verification-time miss rare enough to be safely
+        # fail-closed: any token this instance issues has an entry from the moment
+        # it exists, so a miss means something genuinely changed (a grant write)
+        # or the process restarted — both of which SHOULD deny.
+        self._snapshot.set_authority_fingerprint(
+            org_id, principal_id, snapshot.fingerprint
+        )
         return OnBehalfOf(
             principal_id=principal_id,
             authority_fingerprint=snapshot.fingerprint,
             session_kind=session_kind,
+        )
+
+    async def invalidate_principal_authority(
+        self, *, org_id: str, principal_id: str
+    ) -> None:
+        """Call this from the grant-write path, AFTER the write commits.
+
+        Drops the cached fingerprint locally and fans the drop out to every other
+        instance over the same broadcast the kill switch and token revocation
+        already use. Every live token minted under the old authority is refused at
+        its next call — the revocation propagates at the next call rather than at
+        token expiry.
+
+        Ordering matters: invalidate AFTER the commit. Invalidating first would let
+        a concurrent read re-populate the entry from the pre-commit state.
+        """
+        self._snapshot.forget_authority(org_id, principal_id)
+        await self._broadcast.publish(
+            GovernanceInvalidation(
+                kind=InvalidationKind.AUTHORITY,
+                org_id=org_id,
+                principal_id=principal_id,
+            )
         )
 
     # -- revocation ---------------------------------------------------------
