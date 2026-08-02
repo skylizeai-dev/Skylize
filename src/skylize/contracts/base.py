@@ -39,6 +39,14 @@ TokenVersion = Literal["1.0", "1.1"]
 # be able to say "you did this" versus "your agent did this while you were away".
 SessionKind = Literal["autonomous", "cowork"]
 
+# How far along an agent contract is toward general availability.
+#   "sandbox"  — reachable only where a caller opts in explicitly; NOT part of
+#                the autonomous fleet and never scheduled by the orchestrator.
+#   "active"   — generally available (every pre-existing contract, by default).
+#   "retired"  — kept for audit-trail resolution of historical tokens only.
+# Defaulting to "active" keeps every existing contract byte-identical in meaning.
+LifecycleStatus = Literal["sandbox", "active", "retired"]
+
 
 class FailureMode(str, Enum):
     """What the agent does when it errors or is denied (agent_runtime.md §7)."""
@@ -84,6 +92,11 @@ class AgentContract(BaseModel):
     agent_role: str  # human-readable
     authority_level: AuthorityLevel
     department: str  # owning department channel
+
+    # Maturity gate. Defaults to "active" so every pre-existing contract keeps
+    # its current meaning; a "sandbox" contract is reachable only where a caller
+    # names it explicitly and must never be picked up by the autonomous fleet.
+    lifecycle_status: LifecycleStatus = "active"
 
     # I/O contracts — fully-qualified Pydantic model dotted paths
     input_schema: str

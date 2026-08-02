@@ -32,7 +32,7 @@ def test_list_agents_returns_200(client: TestClient) -> None:
     assert resp.status_code == 200
     body = resp.json()
     assert "agents" in body
-    assert len(body["agents"]) == 21
+    assert len(body["agents"]) == 22  # +1: cowork_agent (sandbox)
 
 
 def test_list_agents_includes_hook_generator(client: TestClient) -> None:

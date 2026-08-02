@@ -137,6 +137,10 @@ _AGENT_DELIVERABLE_TYPE: dict[str, str] = {
     # by the contract.
     "agency_requirements_analyst": "other",
     "agency_deliverable_drafter": "other",
+    # A conversational turn, not a document. The co-work agent's output is a
+    # reply in a live session; no term in the ten-value vocabulary describes it,
+    # and it does not normally produce a deliverable at all.
+    "cowork_agent": "other",
 }
 
 
