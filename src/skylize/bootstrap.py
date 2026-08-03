@@ -490,6 +490,9 @@ async def build_container(settings: Settings | None = None) -> Container:
     # gate enqueues into.
     hitl_service = HitlQueueService(
         repo=hitl_repo, execution=agent_execution, audit=audit, bus=bus,
+        # Only a per-employee replay journals (the envelope must carry a
+        # principal); an autonomous approval is unaffected.
+        journal=work_journal,
     )
 
     return Container(

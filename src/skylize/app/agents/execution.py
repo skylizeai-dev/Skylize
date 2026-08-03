@@ -290,6 +290,7 @@ class AgentExecutionService:
             await self._govern(
                 contract=contract, org_id=org_id, agent_id=agent_id,
                 correlation_id=run_id, validated_input=validated_input, user_id=user_id,
+                on_behalf_of_principal=on_behalf_of_principal,
             )
 
         # 3. Build prompts
@@ -513,6 +514,7 @@ class AgentExecutionService:
         correlation_id: UUID,
         validated_input: Any,
         user_id: str,
+        on_behalf_of_principal: str | None = None,
     ) -> None:
         """Run the synchronous decision gate and act on the verdict.
 
@@ -555,6 +557,7 @@ class AgentExecutionService:
             await self._enqueue_hitl(
                 contract, proposal, result, hitl_id,
                 validated_input=validated_input, user_id=user_id,
+                on_behalf_of_principal=on_behalf_of_principal,
             )
 
         # D3: emission failure AFTER a written row is LOGGED AT ERROR NAMING THE
@@ -603,12 +606,21 @@ class AgentExecutionService:
         *,
         validated_input: Any,
         user_id: str,
+        on_behalf_of_principal: str | None = None,
     ) -> None:
         """Persist the HITL escalation (and its parent decision) via the app-layer
         DAL (owner decision K3). hitl_id is minted once by hitl_id_for
         (events.py:54) and is the SAME id carried by the 202 response and the
         terminal event. request_json (owner decisions K4/K6) is the serialized
-        HitlReplayEnvelope a later human approval executes."""
+        HitlReplayEnvelope a later human approval executes.
+
+        The principal binding goes in the ENVELOPE (request_json), not in
+        proposal_json: HitlQueueService.approve rebuilds the execute() call purely
+        from the envelope, and reads proposal_json only for department /
+        action_kind / proposal_id. A binding stored only in proposal_json would be
+        durable and unreachable, which is worse than not storing it. As an ID
+        only -- see schemas/hitl.py for why storing the authority itself would
+        defeat the recompilation."""
         if self._hitl is None:
             raise RuntimeError(
                 f"org_id={proposal.org_id!r} deferred to human but "
@@ -620,6 +632,7 @@ class AgentExecutionService:
             input=validated_input.model_dump(mode="json"),
             user_id=user_id,
             correlation_id=proposal.correlation_id,
+            on_behalf_of_principal=on_behalf_of_principal,
         )
         await self._hitl.enqueue(
             HitlEscalation(

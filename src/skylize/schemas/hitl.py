@@ -17,9 +17,32 @@ approval time"):
   * ``correlation_id`` — the ORIGINAL request correlation, recorded as
                          ``causation_id`` on the replay's audit records so the
                          defer -> approve -> execute chain is traceable (K8).
+  * ``on_behalf_of_principal`` — the HUMAN whose authority the deferred action
+                         was requested under, for the per-employee shape. See
+                         below; it is an ID ONLY, deliberately.
 ``org_id`` is deliberately ABSENT: it is derived from the authenticated
 principal and the RLS-scoped row, never from a stored payload that could
 disagree with them.
+
+WHY THE PRINCIPAL BINDING IS AN ID AND NOTHING ELSE
+---------------------------------------------------
+An approved co-work action replays hours later. What must NOT be stored is the
+authority that human held at defer time — not their compiled scope set, not the
+``authority_fingerprint``, not a snapshot. Storing any of those would let an
+approval execute against authority that no longer exists, which is precisely the
+failure the whole principal kernel exists to prevent.
+
+Storing only the id forces the replay to RECOMPILE: ``execute()`` passes it to
+``GovernanceAuthority.mint``, which calls ``_gate_principal_scope`` ->
+``AuthorityProvider.snapshot_for`` -> ``compile_authority`` against the grants as
+they are AT APPROVAL TIME. So a principal offboarded, suspended, or descoped
+between defer and approve makes the approval REFUSE, and there is no
+representation in this envelope capable of expressing "but they used to be
+allowed".
+
+Optional with a default so every row written before this field existed still
+parses under ``extra="forbid"``: absent means the autonomous shape, which is what
+those rows were.
 """
 
 from __future__ import annotations
@@ -37,3 +60,4 @@ class HitlReplayEnvelope(BaseModel):
     input: dict[str, Any]
     user_id: str
     correlation_id: UUID
+    on_behalf_of_principal: str | None = None
