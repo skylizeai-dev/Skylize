@@ -19,15 +19,18 @@ Skipped unless SKYLIZE_TEST_DB_URL (+ APP_DB_URL) are set.
 from __future__ import annotations
 
 import uuid
+from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 
 import asyncpg
 import pytest
+import pytest_asyncio
 
 from skylize.app.principal.models import ActorKind, JournalEntry
+from skylize.dal.connection import Database
 from skylize.dal.work_journal import PostgresJournalRepository
 
-from .conftest import DB_URL, requires_app_role, requires_pg
+from .conftest import APP_DB_URL, DB_URL, requires_app_role, requires_pg
 
 pytestmark = pytest.mark.integration
 
@@ -63,6 +66,18 @@ def _entry(*, org_id: str, principal_id: str, headline: str) -> JournalEntry:
         headline=headline,
         occurred_at=datetime.now(timezone.utc),
     )
+
+
+@pytest_asyncio.fixture()
+async def app_db(migrated_public: None) -> AsyncIterator[Database]:
+    if not APP_DB_URL:
+        pytest.skip("SKYLIZE_TEST_APP_DB_URL not set")
+    db = Database(APP_DB_URL)
+    await db.connect()
+    try:
+        yield db
+    finally:
+        await db.close()
 
 
 # ---------------------------------------------------------------------------
