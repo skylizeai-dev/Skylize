@@ -139,11 +139,23 @@ def test_uncoded_http_exception_body_is_unchanged(client: TestClient) -> None:
 # ── the vocabulary is closed ─────────────────────────────────────────────────
 
 def test_error_code_vocabulary_is_a_closed_enum() -> None:
-    """A closed set, not free strings: a client may switch on it exhaustively."""
+    """A closed set, not free strings: a client may switch on it exhaustively.
+
+    This assertion is SUPPOSED to fail when a member is added -- that is the
+    point of enumerating it, and the enum's own docstring says members are added
+    deliberately, one per distinguishable cause. `principal_authority_denied`
+    (edge/errors.py) was added for the co-work chat surface: the caller's ROLE is
+    sufficient to reach the handler but the HUMAN PRINCIPAL behind the request
+    does not hold the authority the action needs (app/principal/errors.py
+    PrincipalError). It is a FOURTH 403 cause, distinct from all three above --
+    not a decision verdict, not a platform control, not a missing role -- and its
+    remedy is a grant rather than a redeploy or a role change.
+    """
     assert {c.value for c in ErrorCode} == {
         "decision_rejected",
         "governance_denied",
         "authorization_failed",
+        "principal_authority_denied",
         "org_not_available",
         "spend_ceiling_exceeded",
         "spend_ceiling_not_configured",
