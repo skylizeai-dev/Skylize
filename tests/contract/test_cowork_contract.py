@@ -66,6 +66,45 @@ def test_cowork_invocable_tools_are_tools_not_agents() -> None:
         assert "." in tool_id  # tool ids are namespaced: "llm.generate"
 
 
+# ---------------------------------------------------------------------------
+# The manifest pin -- this test IS the mitigation, not a description of one
+# ---------------------------------------------------------------------------
+
+#: Tools a co-work turn may hold while `defers_on_trigger_presence=False`.
+#: Both are non-irreversible: `llm.generate` produces text, `memory.search`
+#: only reads. That property is the entire reason dropping the request-time
+#: LOW_CONFIDENCE_IRREVERSIBLE backstop costs nothing today.
+REVERSIBLE_MANIFEST = frozenset({"llm.generate", "memory.search"})
+
+
+def test_cowork_manifest_is_exactly_the_reversible_pair() -> None:
+    """cowork_agent opts out of trigger-PRESENCE deferral at stage 2.5
+    (contracts/mvp/cowork.py, `defers_on_trigger_presence=False`), which gives up
+    the request-time backstop for LOW_CONFIDENCE_IRREVERSIBLE. The design note
+    (docs/architecture/principal_dal_and_hitl_per_turn.md, "what is genuinely
+    given up") accepts that cost ONLY because irreversibility is a property of
+    TOOLS and this agent holds none that are irreversible.
+
+    So the accepted risk is bounded by this exact set, and nothing else in the
+    codebase enforces that bound. Adding `stripe.refund` -- or any side-effecting
+    tool -- to the manifest silently converts an accounted-for cost into an
+    unaccounted one. This test is what makes that day fail loudly: it must be
+    re-argued, and the opt-out re-examined, before the manifest can grow.
+    """
+    assert {g.tool_id for g in cowork_agent.allowed_tools} == REVERSIBLE_MANIFEST
+    # invocable_tools is what is actually offered to the model; a tool could be
+    # granted but not offered, so pin both rather than infer one from the other.
+    assert set(cowork_agent.invocable_tools) == REVERSIBLE_MANIFEST
+
+
+def test_cowork_opt_out_is_tied_to_the_pinned_manifest() -> None:
+    """The two facts must move together. If someone flips the opt-out back on,
+    the manifest bound stops being load-bearing and this test should be revisited
+    deliberately rather than left asserting something that no longer matters."""
+    assert cowork_agent.defers_on_trigger_presence is False
+    assert {g.tool_id for g in cowork_agent.allowed_tools} <= REVERSIBLE_MANIFEST
+
+
 def test_cowork_agent_is_sandbox() -> None:
     assert cowork_agent.lifecycle_status == "sandbox"
 

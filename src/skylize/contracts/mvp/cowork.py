@@ -75,6 +75,24 @@ cowork_agent = AgentContract(
         HumanInLoopTrigger.AUTHORITY_EXCEEDED,
         HumanInLoopTrigger.LOW_CONFIDENCE_IRREVERSIBLE,
     ],
+    # A conversation is many turns; a contract-level trigger is a per-REQUEST
+    # verdict. Left at the default, stage 2.5 would open a HITL ticket for every
+    # message an employee sends, because it defers on the mere PRESENCE of a
+    # trigger and cannot see what a turn attempted -- it runs before the mint and
+    # before the model. Both triggers above are adjudicated where the facts
+    # actually are: AUTHORITY_EXCEEDED at mint by resolve_effective_scope
+    # (app/principal/authority.py:116-123) and per call at ValidationStage.SCOPE
+    # (contracts/token.py:400-410); budget at ValidationStage.BUDGET (:412-417),
+    # re-run every turn with the real running total.
+    #
+    # ACCEPTED COST: LOW_CONFIDENCE_IRREVERSIBLE loses its request-time backstop
+    # for this agent. That costs nothing while the manifest above is
+    # llm.generate + memory.search -- one generative, one read-only, neither
+    # irreversible -- and stops costing nothing the moment a side-effecting tool
+    # joins it. test_cowork_contract.py pins the manifest so that day fails
+    # loudly instead of silently. See
+    # docs/architecture/principal_dal_and_hitl_per_turn.md.
+    defers_on_trigger_presence=False,
 )
 
 ALL_COWORK_CONTRACTS: list[AgentContract] = [cowork_agent]

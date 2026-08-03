@@ -135,6 +135,27 @@ class AgentContract(BaseModel):
     governance_token_required: bool = True
     human_in_loop_triggers: list[HumanInLoopTrigger] = Field(default_factory=list)
 
+    # Whether the MERE PRESENCE of a human-in-loop trigger is itself a
+    # request-time verdict at the synchronous agent-execution gate
+    # (decision_engine/evaluator.py stage 2.5).
+    #
+    # Defaults True, which is exactly the behaviour every contract had before
+    # this field existed, so no existing contract's decision changes.
+    #
+    # Set False only when a contract's triggers name conditions that are
+    # adjudicated somewhere that actually has the facts. Stage 2.5 runs BEFORE
+    # the mint and before the model is called, against a proposal carrying no
+    # spend, no scope and no security verdict, so for this vertical it can only
+    # observe that a trigger is DECLARED -- never that one has occurred. The
+    # conditions themselves are enforced by the ordered token pipeline
+    # (contracts/token.py: SCOPE, BUDGET) and by the mint-time authority
+    # intersection (app/principal/authority.py). See
+    # docs/architecture/principal_dal_and_hitl_per_turn.md.
+    #
+    # This narrows WHEN a condition is adjudicated, never WHETHER it is.
+    # `FIRST_EXTERNAL_LAUNCH` is unaffected and still defers unconditionally.
+    defers_on_trigger_presence: bool = True
+
     @model_validator(mode="after")
     def _invocable_tools_subset_of_allowed(self) -> "AgentContract":
         allowed_ids = {grant.tool_id for grant in self.allowed_tools}
