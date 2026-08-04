@@ -192,9 +192,10 @@ async def build_container(settings: Settings | None = None) -> Container:
     # K3). In-memory on the memory backend; the durable Pg writer on postgres.
     hitl_repo: HitlQueueRepository
     # Work journal (skylize.app.principal): append-only, principal-scoped log
-    # read by GET /me/brief. Not yet written to by any live path (the run-path
-    # write requires restructuring DeliverableService's transaction boundary
-    # to share a connection — deferred, see dal/work_journal.py).
+    # read by GET /me/brief. Written non-transactionally (best-effort, logged
+    # not raised on failure) from edge/routes/cowork.py:204 (chat turns) and
+    # app/hitl/service.py:376 (HITL replay approval) — see those call sites
+    # for why the write can't share the deliverable's transaction.
     journal_repo: JournalRepository
     # Human principals + their grants (migration 0019). Read-only: this feeds
     # PrincipalAuthorityService, which GovernanceAuthority.mint consults ONLY when
