@@ -197,6 +197,16 @@ class DecisionEvaluator:
 
           * FIRST_EXTERNAL_LAUNCH present -> deferred_to_human (external publication)
           * no human-in-loop trigger      -> approved  (D6 "everything else approves")
+          * contract opted out of trigger-PRESENCE deferral
+            (`defers_on_trigger_presence=False`) -> approved. The opt-out is
+            checked AFTER FIRST_EXTERNAL_LAUNCH, so it can never suppress that
+            one. It exists because this stage runs before the mint and before
+            the model, against a proposal with no spend, no scope and no
+            security verdict, so trigger PRESENCE is all it can observe -- the
+            conditions themselves are adjudicated by the ordered token pipeline
+            (contracts/token.py: SCOPE, BUDGET) and the mint-time authority
+            intersection. See
+            docs/architecture/principal_dal_and_hitl_per_turn.md.
           * any OTHER trigger present     -> deferred_to_human (owner decision
                                              2026-07-28: still fail-closed — nothing
                                              executes without a human — but the
@@ -227,7 +237,7 @@ class DecisionEvaluator:
                     routed_to=_escalate_to(contract),
                 ),
             )
-        if not triggers:
+        if not triggers or not contract.defers_on_trigger_presence:
             return DecisionResult(
                 proposal_id=proposal.proposal_id,
                 decision_id=decision_id_for(proposal.proposal_id),

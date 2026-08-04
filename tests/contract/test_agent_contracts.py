@@ -44,12 +44,15 @@ EXPECTED_MVP_AGENTS = {
     "sdr_outreach_agent", "lead_qualifier_agent",
     # agency
     "agency_requirements_analyst", "agency_deliverable_drafter",
+    # cowork (lifecycle_status="sandbox" — registered so the tool proxy can
+    # resolve it, but nothing schedules it)
+    "cowork_agent",
 }
 
 
 def test_registry_loads_expected_mvp_agents() -> None:
     assert set(MVP_REGISTRY.agent_ids()) == EXPECTED_MVP_AGENTS
-    assert len(MVP_REGISTRY.all()) == 21
+    assert len(MVP_REGISTRY.all()) == 22
 
 
 def test_agent_ids_are_unique_and_snake_case() -> None:

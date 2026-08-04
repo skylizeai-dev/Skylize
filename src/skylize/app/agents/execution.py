@@ -60,6 +60,8 @@ from ...schemas.events.decision import (
 )
 from ...tools.base import ToolError
 from ...tools.proxy import ToolProxy
+from ..principal.errors import AuthorityExceeded, AuthorityUnavailable
+from ..principal.provider import AuthorityProvider
 from ..decision_engine.evaluator import DecisionEvaluator
 from ..decision_engine.events import (
     AGENT_EXECUTE_ACTION_KIND,
@@ -137,6 +139,10 @@ _AGENT_DELIVERABLE_TYPE: dict[str, str] = {
     # by the contract.
     "agency_requirements_analyst": "other",
     "agency_deliverable_drafter": "other",
+    # A conversational turn, not a document. The co-work agent's output is a
+    # reply in a live session; no term in the ten-value vocabulary describes it,
+    # and it does not normally produce a deliverable at all.
+    "cowork_agent": "other",
 }
 
 
@@ -211,6 +217,7 @@ class AgentExecutionService:
         hitl: HitlQueueRepository | None = None,
         bus: EventBus | None = None,
         governed_org_ids: frozenset[str] = frozenset(),
+        principal_authority: AuthorityProvider | None = None,
     ) -> None:
         self._registry = registry
         self._llm = llm
@@ -225,6 +232,10 @@ class AgentExecutionService:
         self._hitl = hitl
         self._bus = bus
         self._governed_org_ids = governed_org_ids
+        # Only the per-employee shape needs it. When absent, an execute() that
+        # names `on_behalf_of_principal` FAILS CLOSED (_principal_scope_for)
+        # rather than falling back to an ungated agent-rooted token.
+        self._principal_authority = principal_authority
 
     async def execute(
         self,
@@ -234,7 +245,21 @@ class AgentExecutionService:
         input_data: dict[str, Any],
         user_id: str,
         hitl_approval: HitlApprovalContext | None = None,
+        on_behalf_of_principal: str | None = None,
     ) -> DeliverableRow:
+        """Run one agent.
+
+        ``on_behalf_of_principal`` selects the PER-EMPLOYEE shape: the minted
+        token additionally binds that human, and the run can do no more than the
+        intersection of the contract's manifest with the human's own compiled
+        authority. Absent (the default, and every pre-existing caller), nothing
+        about this method changes -- the mint is agent-rooted, the token is v1.0,
+        and the signing input is byte-for-byte what it was before this parameter
+        existed. That is not merely intended: `canonical_signing_bytes`
+        (contracts/token.py:94-124) writes `token_version` / `on_behalf_of` ONLY
+        inside its `token_version != "1.0"` branch, so with no principal the keys
+        are ABSENT from the payload rather than present-and-null.
+        """
         # 1. Resolve contract (raises AgentNotRegistered on unknown id)
         contract = self._registry.resolve(agent_id)
 
@@ -265,6 +290,7 @@ class AgentExecutionService:
             await self._govern(
                 contract=contract, org_id=org_id, agent_id=agent_id,
                 correlation_id=run_id, validated_input=validated_input, user_id=user_id,
+                on_behalf_of_principal=on_behalf_of_principal,
             )
 
         # 3. Build prompts
@@ -277,6 +303,7 @@ class AgentExecutionService:
             token, response_text, provider, total_tokens = await self._execute_with_tools(
                 contract=contract, org_id=org_id, correlation_id=run_id,
                 system_prompt=system_prompt, user_prompt=user_prompt,
+                on_behalf_of_principal=on_behalf_of_principal,
             )
             governance_token_id = token.token_id
             log.info(
@@ -293,7 +320,11 @@ class AgentExecutionService:
             max_tokens = min(contract.max_token_budget // 2, 4096)
             if self._authority is not None:
                 token = await self._authority.mint(
-                    contract, org_id=org_id, correlation_id=run_id
+                    contract, org_id=org_id, correlation_id=run_id,
+                    scope=await self._principal_scope_for(
+                        contract, org_id=org_id, principal_id=on_behalf_of_principal
+                    ),
+                    on_behalf_of_principal=on_behalf_of_principal,
                 )
                 governance_token_id = token.token_id
                 # Pre-egress governance re-validation on the canonical single-shot
@@ -427,6 +458,51 @@ class AgentExecutionService:
             )
         return row
 
+    async def _principal_scope_for(
+        self, contract: AgentContract, *, org_id: str, principal_id: str | None
+    ) -> list[str] | None:
+        """The scope to REQUEST at mint, or None to keep mint's own default.
+
+        Returns None for the autonomous shape, which is what makes the no-principal
+        path byte-identical: mint then takes its `scope is None` branch
+        (governance/authority.py:296-298) and defaults to the contract manifest
+        exactly as it did before this method existed.
+
+        For the per-employee shape it returns the INTERSECTION of the manifest
+        with the human's compiled authority. Asking for the full manifest instead
+        would make the agent unusable by anyone who does not personally hold every
+        tool in it -- the same trap CoworkSessionService._mint documents
+        (app/cowork/session.py:101-114) and resolves the same way. Computing the
+        snapshot here and again inside mint is deliberate, for the reason given
+        there: mint's is the authoritative recompilation, so a grant withdrawn
+        between the two makes mint raise rather than honour what this computed a
+        moment earlier.
+
+        An EMPTY intersection raises rather than requesting a zero-tool token:
+        that is not a degraded run, it is an unauthorized one.
+        """
+        if principal_id is None:
+            return None
+        if self._principal_authority is None:
+            raise AuthorityUnavailable(
+                f"execute() was called on behalf of principal {principal_id!r} but "
+                "AgentExecutionService was built without a principal-authority "
+                "provider; refusing rather than running an ungated principal token"
+            )
+        snapshot = await self._principal_authority.snapshot_for(
+            org_id=org_id, principal_id=principal_id, at=datetime.now(timezone.utc)
+        )
+        manifest = [grant.tool_id for grant in contract.allowed_tools]
+        effective = sorted(set(manifest) & snapshot.scopes)
+        if not effective:
+            raise AuthorityExceeded(
+                requested=sorted(manifest),
+                ceiling=[],
+                excess=sorted(manifest),
+                principal_id=principal_id,
+            )
+        return effective
+
     # ── Synchronous decision gate (D1/D3/D4/D5) ──────────────────────────────
 
     async def _govern(
@@ -438,6 +514,7 @@ class AgentExecutionService:
         correlation_id: UUID,
         validated_input: Any,
         user_id: str,
+        on_behalf_of_principal: str | None = None,
     ) -> None:
         """Run the synchronous decision gate and act on the verdict.
 
@@ -480,6 +557,7 @@ class AgentExecutionService:
             await self._enqueue_hitl(
                 contract, proposal, result, hitl_id,
                 validated_input=validated_input, user_id=user_id,
+                on_behalf_of_principal=on_behalf_of_principal,
             )
 
         # D3: emission failure AFTER a written row is LOGGED AT ERROR NAMING THE
@@ -528,12 +606,21 @@ class AgentExecutionService:
         *,
         validated_input: Any,
         user_id: str,
+        on_behalf_of_principal: str | None = None,
     ) -> None:
         """Persist the HITL escalation (and its parent decision) via the app-layer
         DAL (owner decision K3). hitl_id is minted once by hitl_id_for
         (events.py:54) and is the SAME id carried by the 202 response and the
         terminal event. request_json (owner decisions K4/K6) is the serialized
-        HitlReplayEnvelope a later human approval executes."""
+        HitlReplayEnvelope a later human approval executes.
+
+        The principal binding goes in the ENVELOPE (request_json), not in
+        proposal_json: HitlQueueService.approve rebuilds the execute() call purely
+        from the envelope, and reads proposal_json only for department /
+        action_kind / proposal_id. A binding stored only in proposal_json would be
+        durable and unreachable, which is worse than not storing it. As an ID
+        only -- see schemas/hitl.py for why storing the authority itself would
+        defeat the recompilation."""
         if self._hitl is None:
             raise RuntimeError(
                 f"org_id={proposal.org_id!r} deferred to human but "
@@ -545,6 +632,7 @@ class AgentExecutionService:
             input=validated_input.model_dump(mode="json"),
             user_id=user_id,
             correlation_id=proposal.correlation_id,
+            on_behalf_of_principal=on_behalf_of_principal,
         )
         await self._hitl.enqueue(
             HitlEscalation(
@@ -704,6 +792,7 @@ class AgentExecutionService:
         correlation_id: UUID,
         system_prompt: str,
         user_prompt: str,
+        on_behalf_of_principal: str | None = None,
     ) -> tuple[Any, str, str, int]:
         if self._tools is None or self._authority is None or self._audit is None:
             raise RuntimeError(
@@ -711,7 +800,16 @@ class AgentExecutionService:
                 "AgentExecutionService was built without a ToolProxy/GovernanceAuthority/AuditService"
             )
 
-        token = await self._authority.mint(contract, org_id=org_id, correlation_id=correlation_id)
+        # With no principal both keyword arguments are None, which is exactly
+        # mint's own default for each -- the same branches, the same v1.0 signing
+        # input as before this parameter existed.
+        token = await self._authority.mint(
+            contract, org_id=org_id, correlation_id=correlation_id,
+            scope=await self._principal_scope_for(
+                contract, org_id=org_id, principal_id=on_behalf_of_principal
+            ),
+            on_behalf_of_principal=on_behalf_of_principal,
+        )
 
         available = []
         for tool_id in contract.invocable_tools:

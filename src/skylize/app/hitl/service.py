@@ -51,6 +51,11 @@ from uuid import UUID, uuid4
 from pydantic import ValidationError
 
 from ...contracts.registry import AgentNotRegistered
+from ..principal.errors import (
+    AuthorityExceeded,
+    PrincipalNotFound,
+    PrincipalSuspended,
+)
 from ...dal.ports import DeliverableRow, HitlQueueItem, HitlQueueRepository
 from ...events.bus import EventBus
 from ...schemas.events.decision import DecisionApproved, DecisionRejected
@@ -62,8 +67,22 @@ from ..agents.execution import (
 )
 from ..audit.service import AuditService
 from ..decision_engine.events import decision_id_for
+from ..principal.journal import WorkJournal
+from ..principal.models import ActorKind
 
 log = logging.getLogger(__name__)
+
+#: Principal failures a retry can NEVER clear, because request_json is frozen at
+#: enqueue and names one specific human. Offboarded (PrincipalNotFound),
+#: deactivated (PrincipalSuspended), or descoped so the stored action no longer
+#: fits their grants (AuthorityExceeded). `AuthorityUnavailable` is excluded on
+#: purpose: it means the authority could not be ESTABLISHED, which a repaired
+#: deployment fixes, so it stays transient and retryable.
+_PERMANENT_PRINCIPAL_ERRORS = (
+    PrincipalNotFound,
+    PrincipalSuspended,
+    AuthorityExceeded,
+)
 
 
 class HitlError(Exception):
@@ -114,11 +133,16 @@ class HitlQueueService:
         execution: AgentExecutionService,
         audit: AuditService,
         bus: EventBus,
+        journal: WorkJournal | None = None,
     ) -> None:
         self._repo = repo
         self._execution = execution
         self._audit = audit
         self._bus = bus
+        # Optional: only a per-employee replay produces a journal entry, because
+        # work_journal rows are principal-scoped and an autonomous replay has no
+        # principal to scope one to.
+        self._journal = journal
 
     # -- reads ---------------------------------------------------------------
 
@@ -171,7 +195,30 @@ class HitlQueueService:
                     original_correlation_id=envelope.correlation_id,
                     approved_by=reviewed_by,
                 ),
+                # The ID only. mint() recompiles this human's authority from their
+                # CURRENT grants, so a principal offboarded, suspended, or
+                # descoped since the defer makes the approval refuse. The human
+                # verdict resolves the POLICY question the evaluator deferred; it
+                # does not and must not vouch for authority that has since gone.
+                on_behalf_of_principal=envelope.on_behalf_of_principal,
             )
+        except _PERMANENT_PRINCIPAL_ERRORS as exc:
+            # K7-class, for the per-employee shape: the stored BINDING is as
+            # frozen as the stored input, so an absent, suspended, or descoped
+            # principal fails identically on every future approval. Releasing
+            # would rebuild the pending -> approve -> fail -> pending loop this
+            # module already eliminated for input drift.
+            #
+            # AuthorityUnavailable is deliberately NOT in this set: "we could not
+            # check" is an operational fault that a fixed deployment clears, so it
+            # falls through to the transient branch and stays retryable.
+            await self._terminate_failed(
+                row, org_id, fresh_correlation,
+                action_type="hitl.approve_failed",
+                reason=f"principal_authority_revoked [{exc.failed_stage}]: {exc}",
+                source_agent_id=envelope.agent_id,
+            )
+            raise HitlReplayInvalid(str(exc)) from exc
         except (AgentInputError, AgentNotRegistered) as exc:
             # PERMANENT (K7): input-schema drift against the frozen stored input,
             # or a contract that is no longer registered. Neither can clear by
@@ -236,6 +283,13 @@ class HitlQueueService:
             outputs={"deliverable_id": str(deliverable.id)},
             result_reason=f"approved by {reviewed_by}",
         )
+        await self._journal_replay(
+            org_id=org_id,
+            envelope=envelope,
+            correlation_id=fresh_correlation,
+            deliverable=deliverable,
+            reviewed_by=reviewed_by,
+        )
         return row, deliverable
 
     async def reject(
@@ -290,6 +344,60 @@ class HitlQueueService:
         return row
 
     # -- internals -----------------------------------------------------------
+
+    async def _journal_replay(
+        self,
+        *,
+        org_id: str,
+        envelope: HitlReplayEnvelope,
+        correlation_id: UUID,
+        deliverable: DeliverableRow,
+        reviewed_by: str,
+    ) -> None:
+        """Record an APPROVED per-employee action in that human's work journal.
+
+        Only when the envelope carries a principal: work_journal rows are
+        principal-scoped, and an autonomous replay has nobody to scope one to.
+        `actor_kind` is AGENT_COWORK because the action originated in an
+        interactive session -- the journal's whole job is to let the agent
+        distinguish "you asked for this" from "your agent did this while you were
+        away", and a deferred-then-approved turn is the former.
+
+        Same non-transactional caveat as the chat route (see
+        edge/routes/cowork.py `_journal`): it runs after the deliverable is
+        durable, so a failure loses a journal line rather than inventing one, and
+        is logged at ERROR rather than re-raised -- the approval genuinely
+        succeeded and the deliverable is the system of record.
+        """
+        principal_id = envelope.on_behalf_of_principal
+        if self._journal is None or principal_id is None:
+            return
+        try:
+            await self._journal.record(
+                org_id=org_id,
+                principal_id=principal_id,
+                actor_kind=ActorKind.AGENT_COWORK,
+                actor_id=envelope.agent_id,
+                correlation_id=correlation_id,
+                governance_token_id=deliverable.governance_token_id,
+                kind="cowork.turn_approved",
+                headline=f"Approved by {reviewed_by}: {deliverable.title}",
+                detail={
+                    "deliverable_id": str(deliverable.id),
+                    "approved_by": reviewed_by,
+                },
+                requires_attention=False,
+            )
+        except Exception:
+            log.error(
+                "cowork_replay_journal_write_failed",
+                extra={
+                    "deliverable_id": str(deliverable.id),
+                    "org_id": org_id,
+                    "principal_id": principal_id,
+                },
+                exc_info=True,
+            )
 
     async def _raise_refusal(
         self, hitl_id: UUID, org_id: str, *, now: datetime, for_approve: bool

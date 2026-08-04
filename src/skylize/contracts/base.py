@@ -39,6 +39,14 @@ TokenVersion = Literal["1.0", "1.1"]
 # be able to say "you did this" versus "your agent did this while you were away".
 SessionKind = Literal["autonomous", "cowork"]
 
+# How far along an agent contract is toward general availability.
+#   "sandbox"  — reachable only where a caller opts in explicitly; NOT part of
+#                the autonomous fleet and never scheduled by the orchestrator.
+#   "active"   — generally available (every pre-existing contract, by default).
+#   "retired"  — kept for audit-trail resolution of historical tokens only.
+# Defaulting to "active" keeps every existing contract byte-identical in meaning.
+LifecycleStatus = Literal["sandbox", "active", "retired"]
+
 
 class FailureMode(str, Enum):
     """What the agent does when it errors or is denied (agent_runtime.md §7)."""
@@ -85,6 +93,11 @@ class AgentContract(BaseModel):
     authority_level: AuthorityLevel
     department: str  # owning department channel
 
+    # Maturity gate. Defaults to "active" so every pre-existing contract keeps
+    # its current meaning; a "sandbox" contract is reachable only where a caller
+    # names it explicitly and must never be picked up by the autonomous fleet.
+    lifecycle_status: LifecycleStatus = "active"
+
     # I/O contracts — fully-qualified Pydantic model dotted paths
     input_schema: str
     output_schema: str
@@ -121,6 +134,27 @@ class AgentContract(BaseModel):
     # Governance
     governance_token_required: bool = True
     human_in_loop_triggers: list[HumanInLoopTrigger] = Field(default_factory=list)
+
+    # Whether the MERE PRESENCE of a human-in-loop trigger is itself a
+    # request-time verdict at the synchronous agent-execution gate
+    # (decision_engine/evaluator.py stage 2.5).
+    #
+    # Defaults True, which is exactly the behaviour every contract had before
+    # this field existed, so no existing contract's decision changes.
+    #
+    # Set False only when a contract's triggers name conditions that are
+    # adjudicated somewhere that actually has the facts. Stage 2.5 runs BEFORE
+    # the mint and before the model is called, against a proposal carrying no
+    # spend, no scope and no security verdict, so for this vertical it can only
+    # observe that a trigger is DECLARED -- never that one has occurred. The
+    # conditions themselves are enforced by the ordered token pipeline
+    # (contracts/token.py: SCOPE, BUDGET) and by the mint-time authority
+    # intersection (app/principal/authority.py). See
+    # docs/architecture/principal_dal_and_hitl_per_turn.md.
+    #
+    # This narrows WHEN a condition is adjudicated, never WHETHER it is.
+    # `FIRST_EXTERNAL_LAUNCH` is unaffected and still defers unconditionally.
+    defers_on_trigger_presence: bool = True
 
     @model_validator(mode="after")
     def _invocable_tools_subset_of_allowed(self) -> "AgentContract":

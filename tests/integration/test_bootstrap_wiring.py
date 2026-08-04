@@ -64,6 +64,57 @@ async def test_demo_mode_requires_explicit_flag_and_wires_demo_adapter() -> None
         await container.aclose()
 
 
+async def test_principal_authority_is_wired_into_both_consumers_as_one_instance() -> None:
+    """`GovernanceAuthority.mint` and `AgentExecutionService` ask different
+    questions of the principal's authority -- mint gates the requested scope
+    against it, the execution service derives which scope to request -- so both
+    must hold it, and it must be the SAME instance. Two providers would be two
+    answers to "what may this human do", which is the one thing that must have a
+    single source."""
+    settings = Settings(backend="memory", anthropic_api_key="sk-test-not-a-real-key")
+    container = await build_container(settings)
+    try:
+        provider = container.agent_execution._principal_authority
+        assert provider is not None, "AgentExecutionService has no principal provider"
+        assert container.authority._principal_authority is provider
+    finally:
+        await container.aclose()
+
+
+async def test_wiring_the_provider_changes_nothing_without_a_principal() -> None:
+    """The registration must be INERT for every existing request path.
+
+    No current caller passes `on_behalf_of_principal`, so the provider must never
+    be consulted on those paths -- proven by installing one that detonates if
+    touched and then walking the same code the autonomous shape walks. A provider
+    that were consulted here would mean every ordinary execute() had started
+    depending on principal rows that mostly do not exist.
+    """
+    from skylize.contracts.registry import MVP_REGISTRY
+
+    class _Detonating:
+        async def snapshot_for(self, *, org_id: str, principal_id: str, at: object) -> object:
+            raise AssertionError(
+                "the principal provider was consulted on a path that passes no "
+                "on_behalf_of_principal"
+            )
+
+    settings = Settings(backend="memory", anthropic_api_key="sk-test-not-a-real-key")
+    container = await build_container(settings)
+    try:
+        container.agent_execution._principal_authority = _Detonating()  # type: ignore[assignment]
+        contract = MVP_REGISTRY.resolve("hook_generator_agent")
+
+        # None means "request no scope override", which is exactly mint's own
+        # default branch -- so the mint behaves as it did before the parameter.
+        scope = await container.agent_execution._principal_scope_for(
+            contract, org_id="org_a", principal_id=None
+        )
+        assert scope is None
+    finally:
+        await container.aclose()
+
+
 async def test_container_aclose_disposes_the_anthropic_egress_clients() -> None:
     """P3: the adapter's SDK clients are released by Container.aclose(), not GC.
 

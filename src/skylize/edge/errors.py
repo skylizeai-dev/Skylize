@@ -70,6 +70,19 @@ class ErrorCode(str, Enum):
     #: consulted — the request never reached the handler.
     AUTHORIZATION_FAILED = "authorization_failed"
 
+    #: The caller's ROLE was sufficient to reach the handler, but the HUMAN
+    #: PRINCIPAL behind the request does not hold the authority the action needs
+    #: (app/principal/errors.py ``PrincipalError`` — no principal record, a
+    #: suspended one, a scope outside their compiled grants, or an authority that
+    #: could not be established at all).
+    #:
+    #: A distinct code because none of the three existing 403s describes it and
+    #: the remedy is different from all of them: this is not a decision verdict
+    #: about the request, not a platform control, and not a missing role. It says
+    #: "this person may not do this", and the fix is a grant, not a redeploy or a
+    #: role change. Added deliberately, per this enum's one-member-per-cause rule.
+    PRINCIPAL_AUTHORITY_DENIED = "principal_authority_denied"
+
     #: The org's spend ceiling for the current billing period would be breached
     #: by this call, so it was refused BEFORE any provider egress
     #: (adapters/llm/spend_ceiling.py ``OrgSpendCeilingExceeded``). Nothing was

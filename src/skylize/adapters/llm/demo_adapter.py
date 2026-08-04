@@ -10,7 +10,7 @@ agent; there is no fallback and no substitution. An agent with no entry in
 `_DEMO_RESPONSES` raises `DemoResponseUnavailable` naming itself, because the
 alternatives are both dishonest — another agent's payload is a wrong answer
 wearing the right agent's name, and a generic stub satisfies no output schema.
-Only 7 of the 21 registered agents have a payload; the other 14 cannot be
+Only 8 of the 22 registered agents have a payload; the other 14 cannot be
 demoed, and demo mode now says which and why instead of failing downstream.
 """
 
@@ -104,6 +104,9 @@ _DEMO_RESPONSES: dict[str, dict[str, object]] = {
     # also needs a demo-mode payload.
     "brief_summarizer": {
         "summary": "[DEMO] A few things happened since you last checked — nothing urgent.",
+    },
+    "cowork_agent": {
+        "reply": "[DEMO] Understood — here is what I can do within your authority.",
     },
 }
 

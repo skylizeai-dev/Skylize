@@ -39,6 +39,7 @@ from .app.governance.broadcast import GovernanceBroadcast
 from .app.hitl.service import HitlQueueService
 from .app.orchestrator import LLMStepRunner, Orchestrator
 from .app.principal.journal import JournalRepository, WorkJournal
+from .app.principal.provider import PrincipalAuthorityService, PrincipalRepository
 from .app.tenants.service import TenantService
 from .config import Settings, get_settings
 from .contracts.registry import MVP_REGISTRY
@@ -195,10 +196,17 @@ async def build_container(settings: Settings | None = None) -> Container:
     # write requires restructuring DeliverableService's transaction boundary
     # to share a connection — deferred, see dal/work_journal.py).
     journal_repo: JournalRepository
+    # Human principals + their grants (migration 0019). Read-only: this feeds
+    # PrincipalAuthorityService, which GovernanceAuthority.mint consults ONLY when
+    # a caller passes `on_behalf_of_principal`. No existing request path does, so
+    # wiring it changes no current behaviour -- it removes a fail-closed refusal
+    # that the per-employee shape would otherwise hit.
+    principal_repo: PrincipalRepository
 
     if settings.backend == "memory":
         from .app.governance.broadcast import InMemoryGovernanceBroadcast
         from .dal.credentials import InMemoryCredentialRepository
+        from .app.principal.provider import InMemoryPrincipalRepository
         from .dal.memory import (
             InMemoryApiKeyRepository,
             InMemoryAuditRepository,
@@ -222,6 +230,7 @@ async def build_container(settings: Settings | None = None) -> Container:
         broadcast = InMemoryGovernanceBroadcast()
         hitl_repo = InMemoryHitlQueueRepository()
         journal_repo = InMemoryJournalRepository()
+        principal_repo = InMemoryPrincipalRepository()
     else:
         from .dal.connection import Database
         from .dal.credentials import PgCredentialRepository
@@ -235,6 +244,7 @@ async def build_container(settings: Settings | None = None) -> Container:
             PgGovernanceRepository,
             PgTenantRepository,
         )
+        from .dal.principal import PgPrincipalRepository
         from .dal.users import PgUserRepository
         from .dal.work_journal import PostgresJournalRepository
         from .events.redis_adapter import RedisEventBus
@@ -260,6 +270,7 @@ async def build_container(settings: Settings | None = None) -> Container:
         processed_store = PgProcessedEventStore(db)
         hitl_repo = PgHitlQueueRepository(db)
         journal_repo = PostgresJournalRepository(db)
+        principal_repo = PgPrincipalRepository(db)
         redis_broadcast = RedisGovernanceBroadcast(settings.redis_url)
         broadcast = redis_broadcast
 
@@ -312,9 +323,16 @@ async def build_container(settings: Settings | None = None) -> Container:
     )
     credential_vault = CredentialVault(encryptor, credential_repo, audit)
 
+    # Compiles a human's effective authority from their grants. Passed to BOTH
+    # consumers below because they ask different questions of it: mint gates the
+    # requested scope against it, and AgentExecutionService derives which scope to
+    # request in the first place. Neither is reached unless a caller supplies
+    # `on_behalf_of_principal`, which no current request path does.
+    principal_authority = PrincipalAuthorityService(principal_repo)
+
     authority = GovernanceAuthority.build(
         repo=gov_repo, audit=audit, bus=bus, registry=registry, settings=settings,
-        broadcast=broadcast,
+        broadcast=broadcast, principal_authority=principal_authority,
     )
     # Warm the snapshot from the DB system of record BEFORE serving requests, so
     # a restart never forgets an active kill switch / revocation / suspension.
@@ -464,6 +482,7 @@ async def build_container(settings: Settings | None = None) -> Container:
         registry, llm, deliverables, tools=tool_proxy, authority=authority, audit=audit,
         evaluator=decision_engine.evaluator, hitl=hitl_repo, bus=bus,
         governed_org_ids=frozenset(settings.decision_engine_org_ids),
+        principal_authority=principal_authority,
     )
     # The human side of the gate: list pending escalations, approve (which
     # replays the stored request through the SAME agent_execution path with the
@@ -471,6 +490,9 @@ async def build_container(settings: Settings | None = None) -> Container:
     # gate enqueues into.
     hitl_service = HitlQueueService(
         repo=hitl_repo, execution=agent_execution, audit=audit, bus=bus,
+        # Only a per-employee replay journals (the envelope must carry a
+        # principal); an autonomous approval is unaffected.
+        journal=work_journal,
     )
 
     return Container(

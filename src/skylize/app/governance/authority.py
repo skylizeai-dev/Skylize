@@ -267,6 +267,7 @@ class GovernanceAuthority:
         delegation_chain: list[str] | None = None,
         on_behalf_of_principal: str | None = None,
         session_kind: SessionKind = "cowork",
+        ttl_minutes: int | None = None,
     ) -> GovernanceToken:
         """Issue a governance token.
 
@@ -320,7 +321,8 @@ class GovernanceAuthority:
             max_token_budget=contract.max_token_budget,
             max_execution_time_seconds=contract.max_execution_time_seconds,
             issued_at=now,
-            expires_at=now + timedelta(minutes=self._settings.token_ttl_minutes),
+            expires_at=now
+            + timedelta(minutes=ttl_minutes or self._settings.token_ttl_minutes),
             nonce=uuid4().hex,
             token_version=token_version,
             on_behalf_of=on_behalf_of,

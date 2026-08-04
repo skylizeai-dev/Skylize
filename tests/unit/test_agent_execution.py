@@ -250,7 +250,7 @@ def test_list_agents_returns_all_registered() -> None:
     agents = service.list_agents()
     agent_ids = {a["agent_id"] for a in agents}
     assert "hook_generator_agent" in agent_ids
-    assert len(agents) == 21
+    assert len(agents) == 22  # +1: cowork_agent (sandbox)
 
 
 def test_list_agents_hook_generator_has_input_schema() -> None:
