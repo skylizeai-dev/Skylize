@@ -99,6 +99,12 @@ _DEMO_RESPONSES: dict[str, dict[str, object]] = {
         "flags": [],
         "recommendation": "[DEMO] Review the highest-concentration category before next cycle's allocation.",
     },
+    # Not a registered agent — the internal work-journal brief summarizer
+    # (edge/routes/brief.py), which also calls LLMGateway.generate() and so
+    # also needs a demo-mode payload.
+    "brief_summarizer": {
+        "summary": "[DEMO] A few things happened since you last checked — nothing urgent.",
+    },
 }
 
 class DemoResponseUnavailable(Exception):

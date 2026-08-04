@@ -8,6 +8,7 @@ The invariant under test:
 from __future__ import annotations
 
 import itertools
+import json
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
@@ -399,3 +400,18 @@ def test_empty_brief_is_stable() -> None:
     assert brief["entry_count"] == 0
     assert brief["head_seq"] == 0
     assert brief["window_start"] is None
+
+
+def test_assemble_brief_is_byte_identical_across_runs() -> None:
+    """The brief is fed to an LLM as grounding (edge/routes/brief.py) — if two
+    runs over the SAME entries produced different JSON, the model would see a
+    different prompt for an identical journal state. Ordering and structure
+    must be pure functions of the input, not of dict/set iteration order."""
+    entries = [
+        _entry(1, "invoice.reconciled", ActorKind.AGENT_AUTONOMOUS, cost=1200),
+        _entry(2, "decision.deferred_to_human", ActorKind.AGENT_AUTONOMOUS, attention=True),
+        _entry(3, "brief.reviewed", ActorKind.HUMAN),
+    ]
+    first = json.dumps(assemble_brief(entries), sort_keys=True, default=str)
+    second = json.dumps(assemble_brief(entries), sort_keys=True, default=str)
+    assert first == second
