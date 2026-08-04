@@ -116,3 +116,26 @@ def test_brief_is_scoped_to_org_and_principal(client: TestClient) -> None:
 def test_get_brief_requires_authentication(client: TestClient) -> None:
     resp = client.get("/api/v1/me/brief")
     assert resp.status_code == 401
+
+
+def test_brief_is_scoped_to_principal_within_same_org(client: TestClient) -> None:
+    """principal_id is always ctx.user_id (brief.py:81) -- never a path, query,
+    or body field -- so principal A authenticated in org_a can never read
+    principal B's entries, even when both share the same org. Complements
+    test_brief_is_scoped_to_org_and_principal, which varies org but holds
+    principal_id constant; this varies principal_id and holds org constant."""
+    _seed_entry(client, org_id="org_a", principal_id="alice", headline="Alice's own thing")
+    _seed_entry(client, org_id="org_a", principal_id="bob", headline="Bob's own thing")
+
+    alice_brief = client.get("/api/v1/me/brief", headers=_headers("org_a", "alice")).json()
+    bob_brief = client.get("/api/v1/me/brief", headers=_headers("org_a", "bob")).json()
+
+    assert alice_brief["entry_count"] == 1
+    assert bob_brief["entry_count"] == 1
+    # _seed_entry uses ActorKind.AGENT_AUTONOMOUS, which assemble_brief buckets
+    # into done_while_away (journal.py:174-177) -- headline is exposed there
+    # directly, so this is a positive check on content, not just a count.
+    alice_headlines = [e["headline"] for e in alice_brief["done_while_away"]]
+    bob_headlines = [e["headline"] for e in bob_brief["done_while_away"]]
+    assert alice_headlines == ["Alice's own thing"]
+    assert bob_headlines == ["Bob's own thing"]
