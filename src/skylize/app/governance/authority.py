@@ -23,9 +23,18 @@ from uuid import UUID, uuid4
 from cryptography.hazmat.primitives.asymmetric.ec import EllipticCurvePublicKey
 
 from ...config import Settings
-from ...contracts.base import AgentContract, GovernanceToken
+from ...contracts.base import (
+    AgentContract,
+    GovernanceToken,
+    OnBehalfOf,
+    SessionKind,
+    TokenVersion,
+)
 from ...contracts.registry import AgentRegistry
 from ...contracts.token import LiveStateChecker, TokenSigner
+from ..principal.authority import resolve_effective_scope
+from ..principal.errors import AuthorityUnavailable, PrincipalError
+from ..principal.provider import AuthorityProvider
 from ...dal.ports import GovernanceRepository, KillScope, TokenRow
 from ...events.bus import EventBus
 from ...schemas.base import BaseEvent
@@ -130,6 +139,16 @@ class _BoundLiveStateChecker:
     def revocation_reason(self, token_id: UUID, agent_id: str) -> str | None:
         return self._snapshot.reason_for(token_id, agent_id, self._org_id)
 
+    def authority_stale_reason(self, claim: OnBehalfOf) -> str | None:
+        """Freshness of the human principal's authority behind a v1.1 token.
+
+        The org comes from THIS checker's binding, never from the token, so a
+        token cannot point the lookup at another tenant's snapshot.
+        """
+        return self._snapshot.authority_stale_reason(
+            self._org_id, claim.principal_id, claim.authority_fingerprint
+        )
+
 
 class GovernanceAuthority:
     def __init__(
@@ -143,7 +162,12 @@ class GovernanceAuthority:
         registry: AgentRegistry,
         settings: Settings,
         broadcast: GovernanceBroadcast | None = None,
+        principal_authority: AuthorityProvider | None = None,
     ) -> None:
+        # Optional: only the per-employee shape needs it. When absent, a mint
+        # requesting `on_behalf_of_principal` FAILS CLOSED rather than issuing an
+        # ungated principal token (see `_gate_principal_scope`).
+        self._principal_authority = principal_authority
         self._signer = signer
         self._public_key = public_key
         self._repo = repo
@@ -168,6 +192,7 @@ class GovernanceAuthority:
         registry: AgentRegistry,
         settings: Settings,
         broadcast: GovernanceBroadcast | None = None,
+        principal_authority: AuthorityProvider | None = None,
     ) -> "GovernanceAuthority":
         """Build with the configured signing key (Task 3 validates it is present)."""
         pair = load_signing_key(settings)
@@ -175,7 +200,7 @@ class GovernanceAuthority:
             signer=TokenSigner(pair.private_key),
             public_key=pair.public_key,
             repo=repo, audit=audit, bus=bus, registry=registry, settings=settings,
-            broadcast=broadcast,
+            broadcast=broadcast, principal_authority=principal_authority,
         )
 
     # -- lifecycle: rehydrate + subscribe ----------------------------------
@@ -207,6 +232,12 @@ class GovernanceAuthority:
             (self._snapshot.kill_tenant if msg.engaged else self._snapshot.unkill_tenant)(
                 msg.org_id
             )
+        elif (
+            msg.kind is InvalidationKind.AUTHORITY
+            and msg.org_id is not None
+            and msg.principal_id is not None
+        ):
+            self._snapshot.forget_authority(msg.org_id, msg.principal_id)
         elif msg.kind is InvalidationKind.KILL_PLATFORM:
             (self._snapshot.kill_platform if msg.engaged else self._snapshot.unkill_platform)()
 
@@ -234,21 +265,65 @@ class GovernanceAuthority:
         correlation_id: UUID,
         scope: list[str] | None = None,
         delegation_chain: list[str] | None = None,
+        on_behalf_of_principal: str | None = None,
+        session_kind: SessionKind = "cowork",
     ) -> GovernanceToken:
+        """Issue a governance token.
+
+        Autonomous shape (the default, and every pre-existing call site): authority
+        is rooted at the agent's own contract and a v1.0 token is minted, byte for
+        byte as before.
+
+        Per-employee shape (`on_behalf_of_principal` set): the token additionally
+        binds a human, and the security property that must hold is
+
+            an employee's agent can never do anything the employee could not do.
+
+        So the requested scope is intersected against the principal's COMPILED
+        authority before anything is signed, and an excess raises
+        `AuthorityExceeded` — it is never silently trimmed, because an agent that
+        quietly does less than it was asked is the failure nobody notices.
+
+        The `authority_fingerprint` in the claim is derived HERE from the snapshot
+        this method just compiled. It is deliberately not a parameter: a
+        caller-supplied fingerprint would let the caller assert an authority state
+        that never existed, or pin a stale one that has since been revoked.
+        """
         await self.assert_active(contract.agent_id, org_id)
         now = datetime.now(timezone.utc)
+
+        requested_scope = (
+            scope if scope is not None else [t.tool_id for t in contract.allowed_tools]
+        )
+        on_behalf_of: OnBehalfOf | None = None
+        token_version: TokenVersion = "1.0"
+
+        if on_behalf_of_principal is not None:
+            on_behalf_of = await self._gate_principal_scope(
+                org_id=org_id,
+                correlation_id=correlation_id,
+                contract=contract,
+                principal_id=on_behalf_of_principal,
+                session_kind=session_kind,
+                requested_scope=requested_scope,
+                at=now,
+            )
+            token_version = "1.1"
+
         token = self._signer.sign(
             token_id=uuid4(),
             agent_id=contract.agent_id,
             authority_level=contract.authority_level,
             department=contract.department,
             delegation_chain=delegation_chain or [contract.agent_id],
-            scope=scope if scope is not None else [t.tool_id for t in contract.allowed_tools],
+            scope=requested_scope,
             max_token_budget=contract.max_token_budget,
             max_execution_time_seconds=contract.max_execution_time_seconds,
             issued_at=now,
             expires_at=now + timedelta(minutes=self._settings.token_ttl_minutes),
             nonce=uuid4().hex,
+            token_version=token_version,
+            on_behalf_of=on_behalf_of,
         )
         await self._repo.insert_token(
             TokenRow(
@@ -280,6 +355,86 @@ class GovernanceAuthority:
             governance_token_id=token.token_id,
         )
         return token
+
+    async def _gate_principal_scope(
+        self,
+        *,
+        org_id: str,
+        correlation_id: UUID,
+        contract: AgentContract,
+        principal_id: str,
+        session_kind: SessionKind,
+        requested_scope: list[str],
+        at: datetime,
+    ) -> OnBehalfOf:
+        """Intersect the requested scope against the human's authority, or deny.
+
+        Every denial is audited before it propagates, so a refused delegation is
+        as visible in the trail as a granted one — that record is the thing a
+        buyer actually wants to see.
+        """
+        if self._principal_authority is None:
+            raise AuthorityUnavailable(
+                f"a token was requested on behalf of principal {principal_id!r} but "
+                "this Authority was built without a principal-authority provider; "
+                "refusing rather than issuing an ungated principal token"
+            )
+        try:
+            snapshot = await self._principal_authority.snapshot_for(
+                org_id=org_id, principal_id=principal_id, at=at
+            )
+            resolve_effective_scope(
+                requested=requested_scope,
+                contract_tools=[t.tool_id for t in contract.allowed_tools],
+                snapshot=snapshot,
+            )
+        except PrincipalError as exc:
+            await self._audit.record(
+                org_id=org_id,
+                correlation_id=correlation_id,
+                action_type="governance.principal_scope_denied",
+                result="denied",
+                source_agent_id=contract.agent_id,
+                authority_level=contract.authority_level,
+                result_reason=f"{type(exc).__name__}[{exc.failed_stage}]: {exc}",
+            )
+            raise
+        # Warm the hot validation cache with the authority we just compiled. This
+        # is what makes the verification-time miss rare enough to be safely
+        # fail-closed: any token this instance issues has an entry from the moment
+        # it exists, so a miss means something genuinely changed (a grant write)
+        # or the process restarted — both of which SHOULD deny.
+        self._snapshot.set_authority_fingerprint(
+            org_id, principal_id, snapshot.fingerprint
+        )
+        return OnBehalfOf(
+            principal_id=principal_id,
+            authority_fingerprint=snapshot.fingerprint,
+            session_kind=session_kind,
+        )
+
+    async def invalidate_principal_authority(
+        self, *, org_id: str, principal_id: str
+    ) -> None:
+        """Call this from the grant-write path, AFTER the write commits.
+
+        Drops the cached fingerprint locally and fans the drop out to every other
+        instance over the same broadcast the kill switch and token revocation
+        already use. Every live token minted under the old authority is refused at
+        its next call — the revocation propagates at the next call rather than at
+        token expiry.
+
+        Ordering matters: invalidate AFTER the commit. Invalidating first would let
+        a concurrent read re-populate the entry from the pre-commit state.
+        """
+        self._snapshot.forget_authority(org_id, principal_id)
+        await self._broadcast.publish(
+            GovernanceInvalidation(
+                kind=InvalidationKind.AUTHORITY,
+                org_id=org_id,
+                principal_id=principal_id,
+            )
+        )
 
     # -- revocation ---------------------------------------------------------
     async def revoke(

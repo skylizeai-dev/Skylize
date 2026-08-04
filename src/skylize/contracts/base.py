@@ -25,6 +25,20 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 # Canonical authority levels — IDENTICAL to agent_governance.md §2.
 AuthorityLevel = Literal["executive", "vp", "director", "manager", "worker"]
 
+# Schema version of the SIGNED token payload.
+#   "1.0" — the original eleven-field token. Its canonical bytes are frozen
+#           forever by tests/contract/test_token_v10_backcompat.py.
+#   "1.1" — additionally binds a human-principal claim (`on_behalf_of`).
+# The version selects the canonicalization branch in
+# `contracts.token.canonical_signing_bytes`; it is NOT itself part of a v1.0
+# payload, because adding any key to that payload would change the signed bytes
+# of every token already in flight.
+TokenVersion = Literal["1.0", "1.1"]
+
+# Whether the human was present when their agent acted. The co-work agent has to
+# be able to say "you did this" versus "your agent did this while you were away".
+SessionKind = Literal["autonomous", "cowork"]
+
 
 class FailureMode(str, Enum):
     """What the agent does when it errors or is denied (agent_runtime.md §7)."""
@@ -120,6 +134,33 @@ class AgentContract(BaseModel):
         return self
 
 
+class OnBehalfOf(BaseModel):
+    """The human-principal claim carried by a v1.1 governance token.
+
+    Presence of this claim means: this token's authority derives from a HUMAN,
+    and the tool proxy must additionally assert that the token's scope is still
+    within that human's authority — see `app.principal.authority`.
+    Absence means the classic autonomous shape (authority rooted at
+    `human_owner`).
+
+    It lives HERE, in `contracts`, rather than in `app.principal`, because it is
+    part of the signed token wire format: `contracts` is an inner layer and must
+    not import from `app`. `app.principal.models` re-exports it so the principal
+    kernel keeps its own vocabulary.
+
+    `authority_fingerprint` is the sha256 over the principal's compiled scope set
+    at mint time (`app.principal.authority.fingerprint_scopes`). It is what lets a
+    verifier detect that the human's authority changed after the token was minted,
+    without a per-call permission join.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    principal_id: str
+    authority_fingerprint: str
+    session_kind: SessionKind
+
+
 class GovernanceToken(BaseModel):
     """Signed proof of an agent's authority to act (agent_governance.md §4).
 
@@ -130,6 +171,11 @@ class GovernanceToken(BaseModel):
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
+
+    # Which canonicalization the signature was computed over. Defaults to "1.0"
+    # so a token deserialized from storage written before this field existed is
+    # read exactly as it was signed.
+    token_version: TokenVersion = "1.0"
 
     token_id: UUID  # unique; used for revocation
     agent_id: str
@@ -152,3 +198,32 @@ class GovernanceToken(BaseModel):
 
     nonce: str  # anti-replay
     signature: str  # ECDSA P-384 over canonical serialization, base64url
+
+    # The human-principal claim. Present IFF token_version == "1.1" (enforced
+    # below), so the version and the claim can never disagree on a token that
+    # was constructed through validation.
+    on_behalf_of: OnBehalfOf | None = None
+
+    @model_validator(mode="after")
+    def _version_and_claim_agree(self) -> "GovernanceToken":
+        """A version is a promise about what the signature covers; keep it honest.
+
+        The dangerous direction is a token whose bytes say "1.1" while carrying no
+        principal claim: it would verify, yet bind nothing about the human. The
+        bijection makes that unconstructible.
+
+        NOTE: pydantic's `model_copy` does NOT re-run validators, so this cannot be
+        the only line of defence — `contracts.token.canonical_signing_bytes`
+        independently refuses to serialize a mismatched pair.
+        """
+        if self.token_version == "1.1" and self.on_behalf_of is None:
+            raise ValueError(
+                "token_version='1.1' requires an on_behalf_of claim; a v1.1 token "
+                "without one would bind nothing about the human principal"
+            )
+        if self.token_version != "1.1" and self.on_behalf_of is not None:
+            raise ValueError(
+                f"on_behalf_of is only carried by v1.1 tokens, not "
+                f"token_version={self.token_version!r}"
+            )
+        return self

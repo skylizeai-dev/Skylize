@@ -38,6 +38,25 @@ class PrincipalSuspended(PrincipalError):
     failed_stage = "revocation"
 
 
+class PrincipalNotFound(PrincipalError):
+    """No such principal in this org. FAIL CLOSED -- an unknown human has no
+    authority, which is not the same as having unrestricted authority."""
+
+    failed_stage = "revocation"
+
+
+class AuthorityUnavailable(PrincipalError):
+    """The principal's authority could not be established at all -- no provider
+    is wired, or the store could not be reached.
+
+    Deliberately its own type: "we could not check" must never be collapsed into
+    "there was nothing to find". Both deny, but only this one is an operational
+    fault worth alerting on.
+    """
+
+    failed_stage = "revocation"
+
+
 class StaleAuthority(PrincipalError):
     """Token was minted under an authority set that has since changed."""
 
