@@ -25,18 +25,18 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   metadataBase: new URL(SITE_URL),
   title: {
-    default: "Skylize — Operational Altitude for Modern Companies",
+    default: "Skylize — Governance Layer for AI Agents",
     template: "%s · Skylize",
   },
   description:
-    "AI systems and operational infrastructure that eliminate repetitive work and unlock growth. Less manual work. More revenue. More scale.",
+    "A cryptographic permission layer for AI agents. Every action carries a signed token naming its scope, budget ceiling, and expiry — verified at the call site before it reaches your systems.",
   keywords: [
-    "AI infrastructure",
-    "operational systems",
-    "AI agents",
-    "workflow automation",
-    "revenue operations",
-    "enterprise AI",
+    "AI agent governance",
+    "agent permissions",
+    "AI audit trail",
+    "agent kill switch",
+    "AI budget enforcement",
+    "human in the loop approval",
   ],
   authors: [{ name: "Skylize" }],
   creator: "Skylize",
@@ -45,15 +45,15 @@ export const metadata: Metadata = {
     locale: "en_US",
     url: SITE_URL,
     siteName: "Skylize",
-    title: "Skylize — Operational Altitude for Modern Companies",
+    title: "Skylize — Governance Layer for AI Agents",
     description:
-      "AI systems and operational infrastructure that eliminate repetitive work and unlock growth.",
+      "A cryptographic permission layer for AI agents: signed authority, enforced budgets, approval gates, and a replayable audit trail.",
   },
   twitter: {
     card: "summary_large_image",
-    title: "Skylize — Operational Altitude",
+    title: "Skylize — Governance Layer for AI Agents",
     description:
-      "AI systems and operational infrastructure that eliminate repetitive work and unlock growth.",
+      "A cryptographic permission layer for AI agents: signed authority, enforced budgets, approval gates, and a replayable audit trail.",
   },
   robots: {
     index: true,

@@ -40,7 +40,7 @@ describe("FinalCta", () => {
     expect(init.method).toBe("POST");
     const payload = JSON.parse(init.body as string) as Record<string, string>;
     expect(payload.email).toBe("ops@acme.com");
-    expect(payload.message).toMatch(/strategy call/i);
+    expect(payload.message).toMatch(/design partner/i);
   });
 
   it("shows the API's error message and keeps the form on a non-2xx response", async () => {

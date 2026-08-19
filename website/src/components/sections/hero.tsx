@@ -6,7 +6,7 @@ import { CtaButton } from "@/components/skylize";
 import { HeroWorkflowDemo } from "./hero-workflow-demo";
 import { EASE_ALTITUDE } from "@/lib/motion";
 
-const headlineLines = ["Less manual work.", "More revenue.", "More scale."];
+const headlineLines = ["Agents can act.", "Now prove", "they were allowed to."];
 
 const fadeUp = {
   hidden: { opacity: 0, y: 22 },
@@ -42,13 +42,13 @@ export function Hero() {
         >
           {/* Announcement chip */}
           <motion.a
-            href="#agents"
+            href="#status"
             variants={fadeUp}
             transition={{ duration: 0.7, ease: EASE_ALTITUDE }}
             className="group inline-flex items-center gap-2 rounded-full border border-border px-3 py-1.5 font-mono text-[11px] tracking-[0.12em] text-muted-foreground uppercase transition-colors duration-200 hover:border-border-strong hover:text-foreground"
           >
             <span className="size-1.5 rounded-full" style={{ background: "var(--color-blue)" }} />
-            Operational infrastructure, not another tool
+            Pre-launch · taking design partners
           </motion.a>
 
           {/* Headline */}
@@ -72,8 +72,9 @@ export function Hero() {
             transition={{ duration: 0.8, ease: EASE_ALTITUDE }}
             className="mt-7 max-w-xl text-balance text-lg leading-relaxed text-muted-foreground"
           >
-            AI systems and operational infrastructure that eliminate repetitive
-            work and unlock growth.
+            Skylize is a permission layer for AI agents. Every action carries a
+            signed token naming its scope, its budget ceiling, and its expiry —
+            checked at the call site, before anything reaches your systems.
           </motion.p>
 
           {/* CTAs */}
@@ -83,24 +84,25 @@ export function Hero() {
             className="mt-9 flex flex-col items-center gap-3 sm:flex-row"
           >
             <CtaButton href="#contact" size="lg" arrow>
-              Book Strategy Call
+              Apply as a Design Partner
             </CtaButton>
             <CtaButton href="#how-it-works" size="lg" variant="secondary">
               See How It Works
             </CtaButton>
           </motion.div>
 
-          {/* Micro trust row */}
+          {/* Micro trust row — mechanism, not badges. Every item is a
+              property of the architecture, not a claim about adoption. */}
           <motion.div
             variants={fadeUp}
             transition={{ duration: 0.8, ease: EASE_ALTITUDE }}
             className="mt-10 flex flex-wrap items-center justify-center gap-x-6 gap-y-2 font-mono text-[11px] tracking-[0.1em] text-muted-foreground/80 uppercase"
           >
-            <span>SOC 2 Type II</span>
+            <span>ECDSA P-384 signed</span>
             <span aria-hidden className="h-3 w-px bg-border-strong" />
-            <span>No rip-and-replace</span>
+            <span>Replayable audit log</span>
             <span aria-hidden className="h-3 w-px bg-border-strong" />
-            <span>Live in weeks</span>
+            <span>Kill switch</span>
           </motion.div>
         </motion.div>
 

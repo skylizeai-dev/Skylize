@@ -2,95 +2,118 @@
 
 import { useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { LineChart, LifeBuoy, Cog, Wallet } from "lucide-react";
+import { KeyRound, Gauge, UserCheck, OctagonX, Building2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Container, Eyebrow, AltitudeLine, Reveal } from "@/components/skylize";
 import { EASE_ALTITUDE } from "@/lib/motion";
 
-const agents = [
+/**
+ * Every `specs` entry below states a property of the architecture — what is
+ * signed, where it is checked, what it is stored in. None of them are
+ * performance results, adoption figures, or outcome claims, and none should
+ * become one: this section is the site's answer to "prove it", so it can only
+ * carry facts that hold before a single customer exists.
+ */
+const controls = [
   {
-    id: "revenue",
-    icon: LineChart,
-    name: "Revenue Agent",
-    role: "Owns pipeline hygiene, routing, and follow-up — so no opportunity ever goes cold.",
+    id: "tokens",
+    icon: KeyRound,
+    name: "Scoped tokens",
+    role: "An agent's authority is an explicit, signed grant — never an inherited API key.",
     capabilities: [
-      "Lead scoring & routing",
-      "Follow-up sequencing",
-      "CRM enrichment",
-      "Forecast updates",
+      "Per-action tool scope",
+      "Short expiry window",
+      "Anti-replay nonce",
+      "Signed delegation chain",
     ],
-    metrics: [
-      { value: "−71%", label: "lead response time" },
-      { value: "+24%", label: "pipeline coverage" },
+    specs: [
+      { label: "Signature", value: "ECDSA P-384" },
+      { label: "Checked", value: "At the call site" },
     ],
   },
   {
-    id: "support",
-    icon: LifeBuoy,
-    name: "Support Agent",
-    role: "Triages, resolves, and escalates with full context — deflecting volume without dropping quality.",
+    id: "budgets",
+    icon: Gauge,
+    name: "Budget ceilings",
+    role: "The spend limit travels inside the token, so it binds at execution instead of at reconciliation.",
     capabilities: [
-      "Ticket triage",
-      "Drafted resolutions",
-      "Escalation routing",
-      "SLA monitoring",
+      "Ceiling carried in the token",
+      "Per-run token accounting",
+      "Cost recorded per action",
+      "Run halts at exhaustion",
     ],
-    metrics: [
-      { value: "−64%", label: "avg handle time" },
-      { value: "98%", label: "CSAT maintained" },
+    specs: [
+      { label: "Enforced", value: "Before the call" },
+      { label: "Cost ledger", value: "Append-only" },
     ],
   },
   {
-    id: "operations",
-    icon: Cog,
-    name: "Operations Agent",
-    role: "Runs the recurring back-office work — reconciliation, syncs, reporting — on schedule, every time.",
+    id: "approval",
+    icon: UserCheck,
+    name: "Approval gates",
+    role: "Any class of action can require a named human before it is allowed to execute.",
     capabilities: [
-      "Data reconciliation",
-      "Cross-system sync",
-      "Scheduled reporting",
-      "Exception handling",
+      "Route action classes to a human",
+      "Agent halts pending decision",
+      "Approve or reject with reason",
+      "Decision joins the audit record",
     ],
-    metrics: [
-      { value: "1,200+", label: "tasks / week" },
-      { value: "0", label: "missed runs" },
+    specs: [
+      { label: "Gate", value: "Blocking" },
+      { label: "Acts for", value: "A named principal" },
     ],
   },
   {
-    id: "finance",
-    icon: Wallet,
-    name: "Finance Agent",
-    role: "Keeps the numbers current — invoicing, collections, and anomaly detection, without the spreadsheet sprawl.",
+    id: "kill-switch",
+    icon: OctagonX,
+    name: "Kill switch",
+    role: "One control that stops an agent, a department, or an entire tenant from acting.",
     capabilities: [
-      "Invoice generation",
-      "Collections follow-up",
-      "Spend anomaly alerts",
-      "Month-end close prep",
+      "Halt one agent or a whole tenant",
+      "Revoke authority by token id",
+      "Consulted on every governed action",
+      "State persists across restart",
     ],
-    metrics: [
-      { value: "−9 days", label: "time to close" },
-      { value: "+18%", label: "on-time collections" },
+    specs: [
+      { label: "Failure mode", value: "Closed" },
+      { label: "Scope", value: "Agent to tenant" },
+    ],
+  },
+  {
+    id: "isolation",
+    icon: Building2,
+    name: "Tenant isolation",
+    role: "One tenant's agents, credentials, and audit history are not reachable from another's.",
+    capabilities: [
+      "Row-level isolation per tenant",
+      "Tenant-scoped credential access",
+      "No cross-tenant token validity",
+      "Enforced in the data layer",
+    ],
+    specs: [
+      { label: "Boundary", value: "Database-enforced" },
+      { label: "Model", value: "Multi-tenant" },
     ],
   },
 ];
 
-export function Agents() {
-  const [active, setActive] = useState(agents[0].id);
-  const agent = agents.find((a) => a.id === active)!;
-  const ActiveIcon = agent.icon;
+export function Controls() {
+  const [active, setActive] = useState(controls[0].id);
+  const control = controls.find((c) => c.id === active)!;
+  const ActiveIcon = control.icon;
 
   return (
-    <section id="agents" className="scroll-mt-24 py-[clamp(5rem,12vh,9rem)]">
+    <section id="controls" className="scroll-mt-24 py-[clamp(5rem,12vh,9rem)]">
       <Container>
         <Reveal className="max-w-3xl">
-          <Eyebrow index="04">AI agents</Eyebrow>
+          <Eyebrow index="04">The controls</Eyebrow>
           <h2 className="mt-6 text-balance text-[clamp(2rem,4.5vw,3.25rem)] font-semibold leading-[1.02] tracking-[-0.03em] text-foreground">
-            A workforce of agents, each accountable for an outcome.
+            Five enforcement points, not five dashboards.
           </h2>
           <p className="mt-6 max-w-xl text-lg leading-relaxed text-muted-foreground">
-            Not a single chatbot. A coordinated system of specialists — scoped,
-            measured, and supervised — that runs the operation alongside your
-            team.
+            Each control is a place where an action can be refused. They
+            compose: a call must be in scope, under budget, past its gate, not
+            killed, and inside its tenant — or it does not happen.
           </p>
         </Reveal>
 
@@ -98,14 +121,14 @@ export function Agents() {
           <div className="grid grid-cols-1 overflow-hidden rounded-xl border border-border lg:grid-cols-[320px_1fr]">
             {/* Selector */}
             <ul className="flex flex-col">
-              {agents.map((a, i) => {
-                const Icon = a.icon;
-                const isActive = a.id === active;
+              {controls.map((c, i) => {
+                const Icon = c.icon;
+                const isActive = c.id === active;
                 return (
-                  <li key={a.id} className={i > 0 ? "border-t border-border" : ""}>
+                  <li key={c.id} className={i > 0 ? "border-t border-border" : ""}>
                     <button
                       type="button"
-                      onClick={() => setActive(a.id)}
+                      onClick={() => setActive(c.id)}
                       aria-pressed={isActive}
                       className={cn(
                         "group flex w-full items-center gap-4 px-6 py-5 text-left transition-colors duration-200",
@@ -126,15 +149,17 @@ export function Agents() {
                         <span
                           className={cn(
                             "block text-[0.95rem] font-medium tracking-tight transition-colors",
-                            isActive ? "text-foreground" : "text-muted-foreground group-hover:text-foreground",
+                            isActive
+                              ? "text-foreground"
+                              : "text-muted-foreground group-hover:text-foreground",
                           )}
                         >
-                          {a.name}
+                          {c.name}
                         </span>
                       </span>
                       {isActive && (
                         <motion.span
-                          layoutId="agent-active"
+                          layoutId="control-active"
                           className="h-5 w-0.5 rounded-full"
                           style={{ background: "var(--color-blue)" }}
                         />
@@ -149,7 +174,7 @@ export function Agents() {
             <div className="relative border-t border-border bg-card p-7 sm:p-10 lg:border-t-0 lg:border-l lg:border-border">
               <AnimatePresence mode="wait">
                 <motion.div
-                  key={agent.id}
+                  key={control.id}
                   initial={{ opacity: 0, y: 16 }}
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, y: -10 }}
@@ -160,21 +185,21 @@ export function Agents() {
                       <ActiveIcon className="size-5" strokeWidth={1.75} />
                     </span>
                     <span className="font-mono text-[11px] tracking-[0.16em] text-muted-foreground uppercase">
-                      autonomous · supervised
+                      enforcement point
                     </span>
                   </div>
 
                   <h3 className="mt-6 text-3xl font-semibold tracking-tight text-foreground">
-                    {agent.name}
+                    {control.name}
                   </h3>
                   <p className="mt-3 max-w-md text-lg leading-relaxed text-muted-foreground">
-                    {agent.role}
+                    {control.role}
                   </p>
 
                   <AltitudeLine className="my-8" />
 
                   <div className="grid grid-cols-1 gap-x-8 gap-y-3 sm:grid-cols-2">
-                    {agent.capabilities.map((cap) => (
+                    {control.capabilities.map((cap) => (
                       <div key={cap} className="flex items-center gap-3">
                         <span
                           aria-hidden
@@ -186,18 +211,17 @@ export function Agents() {
                     ))}
                   </div>
 
-                  <div className="mt-9 flex flex-wrap gap-8">
-                    {agent.metrics.map((m) => (
-                      <div key={m.label}>
-                        <div className="font-display text-2xl font-semibold text-foreground tabular-nums">
-                          {m.value}
-                        </div>
-                        <div className="mt-1 font-mono text-[10px] tracking-[0.12em] text-muted-foreground uppercase">
-                          {m.label}
-                        </div>
+                  {/* Spec strip — architecture facts, deliberately not numbers */}
+                  <dl className="mt-9 flex flex-wrap gap-x-12 gap-y-5 border-t border-border pt-7">
+                    {control.specs.map((s) => (
+                      <div key={s.label}>
+                        <dt className="font-mono text-[10px] tracking-[0.12em] text-muted-foreground uppercase">
+                          {s.label}
+                        </dt>
+                        <dd className="mt-1.5 font-mono text-base text-foreground">{s.value}</dd>
                       </div>
                     ))}
-                  </div>
+                  </dl>
                 </motion.div>
               </AnimatePresence>
             </div>

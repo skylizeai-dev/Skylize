@@ -1,14 +1,11 @@
 import {
   Navigation,
   Hero,
-  ClientLogos,
   Problem,
   Solution,
   HowItWorks,
-  Agents,
-  Roi,
-  CaseStudies,
-  Testimonials,
+  Controls,
+  Status,
   Faq,
   FinalCta,
   Footer,
@@ -20,14 +17,11 @@ export default function Home() {
       <Navigation />
       <main>
         <Hero />
-        <ClientLogos />
         <Problem />
         <Solution />
         <HowItWorks />
-        <Agents />
-        <Roi />
-        <CaseStudies />
-        <Testimonials />
+        <Controls />
+        <Status />
         <Faq />
         <FinalCta />
       </main>

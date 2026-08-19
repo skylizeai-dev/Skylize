@@ -1,4 +1,4 @@
-import { Workflow, Network, Activity, TrendingUp } from "lucide-react";
+import { KeyRound, Gauge, UserCheck, ScrollText } from "lucide-react";
 import {
   Container,
   Eyebrow,
@@ -10,28 +10,28 @@ import {
 
 const features = [
   {
-    icon: Workflow,
-    title: "Autonomous agents",
-    body: "Agents own a workflow end-to-end — research, decide, execute, report. Supervised when you want it, autonomous when you trust it.",
-    tag: "agents",
+    icon: KeyRound,
+    title: "Signed, scoped authority",
+    body: "Every action carries a token naming the exact tools it may call and when it expires. Unsigned, out-of-scope, or expired means the call never leaves the process.",
+    tag: "token",
   },
   {
-    icon: Network,
-    title: "Sits on your stack",
-    body: "Connects to the tools you already run — CRM, billing, support, data — with no rip-and-replace and no migration project.",
-    tag: "integration",
+    icon: Gauge,
+    title: "Budgets that actually bind",
+    body: "A spend ceiling travels inside the token itself and is enforced where the call is made — not reconciled on a dashboard after the money is gone.",
+    tag: "budget",
   },
   {
-    icon: Activity,
-    title: "Operational visibility",
-    body: "Every action, cost, and outcome is observable in real time. Decisions stop waiting on a report that nobody has time to build.",
+    icon: UserCheck,
+    title: "Approval where it matters",
+    body: "Route any action class to a human before it executes. The agent halts at the gate and resumes on approval, carrying the decision into its audit trail.",
     tag: "control",
   },
   {
-    icon: TrendingUp,
-    title: "Compounding leverage",
-    body: "Each workflow you hand off frees the team to build the next. Capacity grows without growing headcount.",
-    tag: "scale",
+    icon: ScrollText,
+    title: "Evidence, not log lines",
+    body: "Each decision records the token, the scope, the delegation chain, and the outcome — a sequence you can replay to reconstruct exactly why an action was allowed.",
+    tag: "audit",
   },
 ];
 
@@ -42,12 +42,13 @@ export function Solution() {
         <Reveal className="max-w-3xl">
           <Eyebrow index="02">The solution</Eyebrow>
           <h2 className="mt-6 text-balance text-[clamp(2rem,4.5vw,3.25rem)] font-semibold leading-[1.02] tracking-[-0.03em] text-foreground">
-            One operating layer for your entire operation.
+            A governance layer between intent and action.
           </h2>
           <p className="mt-6 max-w-xl text-lg leading-relaxed text-muted-foreground">
-            Skylize is the infrastructure beneath the work — a system of agents
-            and operational logic that runs the repetitive, so your team runs
-            the company.
+            Skylize sits at the call site. An agent decides what it wants to do;
+            the layer decides whether it may, enforces the ceiling it was given,
+            and writes down what happened. Nothing reaches a target system
+            without passing through it.
           </p>
         </Reveal>
 

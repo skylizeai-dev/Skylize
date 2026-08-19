@@ -6,30 +6,39 @@ import {
 } from "@/components/ui/accordion";
 import { Container, Eyebrow, Reveal } from "@/components/skylize";
 
+/**
+ * These answer the objections an evaluator actually raises about a pre-revenue
+ * governance vendor. Nothing here may claim a certification, a customer, or a
+ * measured result — if an answer needs a trust signal, it names a mechanism.
+ */
 const faqs = [
   {
-    q: "How is this different from buying another AI tool?",
-    a: "Tools wait for someone to use them. Skylize agents own outcomes — they run workflows end to end and report results. You're adding operational capacity, not another tab in the stack.",
+    q: "What is your security model, concretely?",
+    a: "Authority is a signed artifact, not a config flag. Before an agent acts it holds an ECDSA P-384 token naming its permitted tools, its budget ceiling, its delegation chain, and an expiry measured in minutes. Every outbound action verifies that token at the call site; unsigned, expired, out-of-scope, or replayed means the call does not leave the process. Tenants are isolated at the database layer, and the kill switch is consulted on every governed action.",
   },
   {
-    q: "Do we have to replace our existing systems?",
-    a: "No. Skylize sits on top of the stack you already run — CRM, billing, support, data — through APIs and native integrations. There is no migration project and no rip-and-replace.",
+    q: "You are not SOC 2 certified. Why should we take security seriously here?",
+    a: "We are not certified, and we will not imply otherwise — a compliance audit certifies process, and we are too early to have one worth attesting. What we can offer is the architecture itself: read the enforcement path, run it against your own threat model, and hold us to what it does rather than to a badge. Certification follows revenue and incorporation; it is on the roadmap, not on this page.",
   },
   {
-    q: "How do you keep agents safe and in control?",
-    a: "Every agent is scoped to specific workflows with guardrails, approval gates, and a complete audit trail. You decide what runs autonomously and what waits for a human in the loop.",
+    q: "What does becoming a design partner involve?",
+    a: "A scoped engagement on one real workflow, not a company-wide rollout. You bring a governance requirement that matters to you; we implement against it and you get direct access to the people writing the code. In exchange we ask for honest feedback and permission to learn from the deployment. Terms are written per partner, and you can walk away.",
   },
   {
-    q: "How long until we see results?",
-    a: "Most teams have a first workflow live within a few weeks and measurable ROI inside the first quarter. Coverage expands from there as trust compounds.",
-  },
-  {
-    q: "What about security and compliance?",
-    a: "SOC 2 Type II, least-privilege access, encryption in transit and at rest, and strict data isolation per customer. Your data is never used to train shared models.",
+    q: "How far is this from production-ready?",
+    a: "The enforcement path — token issuance, authority verification, kill switch, audit record — is implemented and under test. What is not proven is our system under someone else's load, integrations, and edge cases, which is exactly what the design-partner phase is for. We will tell you where the gaps are before you commit, and any partner deployment starts in a bounded scope with a human gate in front of consequential actions.",
   },
   {
     q: "How is pricing structured?",
-    a: "Pricing scales with the operational load we take on — throughput and outcomes, not seats. Talk to us and we'll model pricing against your actual operation.",
+    a: "Custom, based on deployment scope. There is no public price sheet because we have not yet tested one against a real deployment, and inventing a number now would only mean renegotiating later. Design-partner terms are set case by case and written down before any work starts.",
+  },
+  {
+    q: "What happens to our data?",
+    a: "Your data stays scoped to your tenant, isolated at the database layer, and is never used to train shared models. Agents reach your systems through credentials you grant and can revoke, and every access they make is recorded against the token that authorized it.",
+  },
+  {
+    q: "What if an agent does something wrong anyway?",
+    a: "Two answers. First, containment: the kill switch halts an agent, a department, or the whole tenant, and budget ceilings bound the damage a runaway loop can do before anyone notices. Second, accounting: the audit record ties the action to the token, the scope, and the delegation chain that permitted it, so the post-mortem is a replay rather than a reconstruction.",
   },
 ];
 
@@ -39,19 +48,19 @@ export function Faq() {
       <Container>
         <div className="grid gap-12 lg:grid-cols-[0.8fr_1.2fr] lg:gap-16">
           <Reveal>
-            <Eyebrow index="08">FAQ</Eyebrow>
+            <Eyebrow index="06">FAQ</Eyebrow>
             <h2 className="mt-6 text-balance text-[clamp(2rem,4.5vw,3.25rem)] font-semibold leading-[1.02] tracking-[-0.03em] text-foreground">
-              Questions, answered.
+              The hard questions first.
             </h2>
             <p className="mt-6 max-w-xs leading-relaxed text-muted-foreground">
-              Still deciding?{" "}
+              Something not answered here?{" "}
               <a
                 href="#contact"
                 className="text-foreground underline decoration-border-strong underline-offset-4 transition-colors hover:decoration-blue"
               >
-                Book a strategy call
+                Ask us directly
               </a>{" "}
-              and we&apos;ll walk through your operation.
+              — we would rather lose the deal than oversell it.
             </p>
           </Reveal>
 
