@@ -287,23 +287,84 @@ it is not recorded anywhere and must not be assumed.
 
 ## 2.3 - Slack
 
-> **Section status: `[OWNER-DECISION-REQUIRED]`**
+> **Section status: `[OWNER-DECISION-REQUIRED]` - Q2.3a answered by owner
+> (platform-level); ready for final owner sign-off on this section as a whole.**
 
 `[CODE-VERIFIED]` Slack exists in the tree only as an example in a migration comment
 (`migrations/versions/0007_org_credentials.py:8`) and as the example scope string
 `slack.post` in a unit test (`tests/unit/test_principal_authority.py:44`). No Slack
 code.
 
-- **Q2.3a `[OWNER-DECISION-REQUIRED]` Workspace scope.** Skylize's own workspace
-  (platform-level notifications) or the customer's workspace (org-level)? This
-  single answer determines whether the OAuth broker is needed for Slack at all.
+- **Q2.3a `[OWNER-DECISION-REQUIRED]` Workspace scope - ANSWERED.** Owner decision:
+  Skylize's own workspace (platform-level), not the customer's. Consequences of this
+  answer, all following directly from it:
+  - **No OAuth broker for Slack.** The broker (Faz A-D, still unbuilt per 1.0.2)
+    exists to let a *customer* grant Skylize access to *their* workspace. A
+    platform-level credential is Skylize authenticating to its own workspace, which
+    is a one-time app install by Skylize, not a per-customer authorization flow.
+  - **No `org_id`, no RLS, no `org_credentials` row.** `org_credentials`
+    (`migrations/versions/0007_org_credentials.py:37-46`) is keyed on `(org_id,
+    provider, label)` and RLS-scoped to `current_setting('skylize.org_id')`
+    (`:59-68`) - built for a credential that varies per tenant. A platform-level
+    Slack token is the same value for every tenant, so it does not belong in that
+    table at all (consistent with the `org-level` vs `platform-level` split already
+    drawn in 2.0, and matches the Stripe platform-billing row in the 2.0 table,
+    `:195`).
+  - **Credential storage: follow the existing platform-secret pattern, not a new
+    mechanism.** The repo's only precedent for a platform-wide (non-tenant) secret
+    is `SKYLIZE_CREDENTIAL_ENCRYPTION_KEY`: a `SKYLIZE_*` environment variable read
+    into `Settings` (`src/skylize/config.py:85`) and resolved fail-closed at boot -
+    `resolve_credential_encryption_key` refuses to start on a real backend if the
+    variable is unset, precisely to avoid an undecryptable-on-restart failure mode
+    (`src/skylize/bootstrap.py:82-129`). Every other platform secret in the repo
+    (`n8n_api_key`, `search_api_key`, `knowledge_webhook_secret`, `anthropic_api_key`,
+    `openai_api_key`, `mem0_api_key`, `qdrant_api_key` - all `src/skylize/config.py:128-160`)
+    follows the identical shape: plain `SKYLIZE_*` env var on `Settings`, no
+    dedicated secrets-manager service exists anywhere in the tree. `[RESEARCH-SUGGESTED]`
+    a Slack bot token should follow suit - e.g. `SKYLIZE_SLACK_BOT_TOKEN` - read into
+    `Settings` and validated at boot the same way, rather than inventing a new
+    storage path. Owner to confirm the variable name and whether boot-time
+    validation should fail closed (refuse to start) or fail soft (Slack notifications
+    silently disabled) if unset; `resolve_credential_encryption_key`'s fail-closed
+    precedent (`bootstrap.py:121-129`) is the stricter option and matches this repo's
+    general posture, but Slack notifications are plausibly non-critical-path in a way
+    the credential-encryption key is not.
+  - **Scope derivation.** The only planned action for this integration is posting a
+    HITL-approval message to a human-designated channel (this section's Q2.3c,
+    unchanged below). `[RESEARCH-SUGGESTED]` **`chat:write`** is the bot-token OAuth
+    scope required for Slack's `chat.postMessage` method - this is standard,
+    widely-documented Slack Web API behavior, but it is **UNVERIFIED against Slack's
+    own current API reference in this pass** (no live doc fetch was performed) and
+    must be confirmed against `https://api.slack.com/methods/chat.postMessage` (or
+    the current scopes reference) before the App manifest is written. No other scope
+    is derivable from the stated action; do not request a broader scope set (e.g.
+    `channels:read`, `groups:read`) without a corresponding planned action to justify
+    it, per the attenuation-only principle in this file's Global combining principle.
+  - **Button-interaction responses, if ever added, are a separate mechanism, not a
+    scope.** If a later phase needs the HITL message to carry interactive
+    approve/deny buttons, `[RESEARCH-SUGGESTED, UNVERIFIED]` Slack's own
+    documentation describes this as handled via an app-level **Interactivity Request
+    URL** plus **signing-secret verification** of the inbound payload, not an
+    additional OAuth scope. This is asserted with lower confidence than the
+    `chat:write` scope claim above and must likewise be checked against Slack's
+    current docs before any interactive-button work is scoped or built. Out of
+    scope for the current post-only plan; recorded here only so a future session
+    does not go looking for a nonexistent "interactivity" OAuth scope.
 - **Q2.3b `[OWNER-DECISION-REQUIRED]` Bot token vs user token.** `[RESEARCH-SUGGESTED]`
   bot token only: a user token makes agent actions indistinguishable from a human's
-  in Slack's own audit trail, which contradicts the platform's audit posture.
+  in Slack's own audit trail, which contradicts the platform's audit posture. The
+  platform-level answer to Q2.3a strengthens rather than changes this recommendation:
+  a bot token installed once into Skylize's own workspace is the standard shape for
+  a service-account Slack integration, with no per-tenant token-selection logic
+  needed. Recommend ratifying as-is.
 - **Q2.3c `[OWNER-DECISION-REQUIRED]` Per-org channel provisioning.** Does the agent
   create channels, or only post to channels a human pre-designated?
   `[RESEARCH-SUGGESTED]` post-only to a designated channel first; channel creation
-  is an external-action class needing its own entry in `policy_inputs.md` 0.3.
+  is an external-action class needing its own entry in `policy_inputs.md` 0.3. Note
+  "per-org" is now a slight misnomer under the platform-level answer to Q2.3a - there
+  is one Skylize workspace, not one per customer org - but the substance is
+  unchanged: recommend ratifying post-only to a single human-pre-designated channel,
+  channel creation stays out of scope.
 
 ---
 
@@ -359,6 +420,17 @@ grant is not one opaque string. Absent and needed for a broker:
 keys and OAuth grants have different lifecycles, and the existing table's
 single-opaque-string contract is relied on by the HubSpot connector and by
 `tests/integration/test_jsonb_readback_pg.py:230`.
+
+**Scope narrowed by 2.3.** With Slack now answered as platform-level (2.3, Q2.3a),
+a Slack token is a `Settings`-sourced env var, never a per-tenant OAuth grant - it
+does not touch `org_credentials` or a hypothetical `org_oauth_grants` table at all.
+Q3.0a's answer only needs to cover providers that end up **org-level**: on the 2.0
+classification table as it stands (`:192-199`), that is Stripe (customer account),
+GitHub, and whichever of AWS/GCP is decided in 2.2 if the answer is customer
+cross-account (option A). Any provider that resolves to platform-level by the same
+reasoning applied to Slack here is out of scope for this table by construction, not
+by exception - re-derive `org_credentials` vs `org_oauth_grants` need per-provider as
+each remaining classification lands, rather than assuming all five providers need it.
 
 ---
 
