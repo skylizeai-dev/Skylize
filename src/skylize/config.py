@@ -75,8 +75,13 @@ class Settings(BaseSettings):
     jwt_refresh_token_ttl_days: int = 14
 
     # Credential vault at-rest encryption (Fernet key: urlsafe base64, 32 bytes).
-    # Empty → the composition root mints an ephemeral dev key (memory backend);
-    # in production set this so stored credentials survive a restart.
+    # REQUIRED in production, exactly like governance_signing_key_pem above:
+    # when backend != "memory" and this is empty, startup fails closed
+    # (bootstrap.py `resolve_credential_encryption_key`). It used to fall back
+    # to a per-boot ephemeral key, which silently made every credential written
+    # to org_credentials undecryptable at the next restart. Only the in-memory
+    # backend, whose credential rows die with the process, may run without it.
+    # Hold it as a real secret: losing it is losing every stored credential.
     credential_encryption_key: str = ""
 
     # Rate limiting (per org, per window).

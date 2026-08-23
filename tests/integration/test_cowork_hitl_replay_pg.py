@@ -65,6 +65,7 @@ from .conftest import (
     APP_DB_URL,
     DB_URL,
     REDIS_URL,
+    TEST_CREDENTIAL_KEY,
     TEST_JWT_SECRET,
     install_dev_header_auth,
     requires_app_role,
@@ -218,6 +219,7 @@ async def _cleanup(admin_conn, org: str) -> None:
 async def _build(base_url: str, org: str):
     settings = Settings(
         backend="postgres", dev_auth=False, jwt_secret=TEST_JWT_SECRET,
+        credential_encryption_key=TEST_CREDENTIAL_KEY,
         db_url=DB_URL, db_app_url=APP_DB_URL, redis_url=REDIS_URL,
         decision_engine_org_ids=[org],
         anthropic_api_key="sk-test", anthropic_base_url=base_url,

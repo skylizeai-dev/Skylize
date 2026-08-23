@@ -67,6 +67,7 @@ from .conftest import (
     APP_DB_URL,
     DB_URL,
     REDIS_URL,
+    TEST_CREDENTIAL_KEY,
     TEST_JWT_SECRET,
     install_dev_header_auth,
     requires_app_role,
@@ -182,6 +183,7 @@ async def _running(gov_org: str, base_url: str) -> AsyncIterator[AsyncClient]:
         # are honoured by install_dev_header_auth instead.
         dev_auth=False,
         jwt_secret=TEST_JWT_SECRET,
+        credential_encryption_key=TEST_CREDENTIAL_KEY,
         db_url=DB_URL,
         db_app_url=APP_DB_URL,
         redis_url=REDIS_URL,

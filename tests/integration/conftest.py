@@ -44,6 +44,15 @@ requires_redis = pytest.mark.skipif(not REDIS_URL, reason="SKYLIZE_TEST_REDIS_UR
 #: never mint or verify a user JWT, so the value only has to exist.
 TEST_JWT_SECRET = "integration-test-jwt-secret-not-a-credential"
 
+#: A throwaway Fernet key for the credential vault. A non-memory backend must now
+#: be given one explicitly (bootstrap.py ``resolve_credential_encryption_key``);
+#: the composition root no longer mints an ephemeral key behind the caller's back,
+#: because on a durable backend that silently orphaned every stored credential at
+#: the next restart. Fixed rather than generated so a suite that stores and reads
+#: back a credential across two containers in one run stays coherent.
+# Decodes to the 32 ASCII bytes b"skylize-integration-test-key!x32".
+TEST_CREDENTIAL_KEY = "c2t5bGl6ZS1pbnRlZ3JhdGlvbi10ZXN0LWtleSF4MzI="
+
 
 def install_dev_header_auth(app: object) -> None:
     """Authenticate a test app from X-Dev-* headers WITHOUT `settings.dev_auth`.

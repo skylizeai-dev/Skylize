@@ -13,6 +13,7 @@ the Governance Authority, Audit service, and Orchestrator.
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass
@@ -73,6 +74,70 @@ class LLMConfigurationError(ConfigurationError):
 
     Raised at composition time so a misconfigured deployment fails to build
     rather than serving fake demo output under a real workload."""
+
+
+log = logging.getLogger("skylize.bootstrap")
+
+
+def resolve_credential_encryption_key(settings: Settings) -> str:
+    """Return the credential-vault Fernet key, failing closed on a real backend.
+
+    Resolution order mirrors `app/governance/keys.py::load_signing_key`, which
+    answers the identical question for the Authority signing key:
+      1. `credential_encryption_key` (SKYLIZE_CREDENTIAL_ENCRYPTION_KEY).
+      2. (real backend) error — no key, no start.
+      3. (memory backend only) mint an ephemeral key.
+
+    Step 2 is the point. `org_credentials.encrypted_value` is NOT NULL
+    (migration 0007) and the row outlives the process that wrote it, but a
+    per-boot random key does not: every credential stored under one became
+    permanently undecryptable the moment that pod restarted, and the vault
+    surfaced it as `DecryptionError("wrong key or corrupted ciphertext")`
+    (app/credentials/encryption.py:20-21) — a corruption message for what was
+    really a configuration mistake made one restart earlier. The old fallback
+    made that outcome the DEFAULT for a production deployment that simply
+    forgot the variable, with no signal at boot. The ephemeral path survives
+    only for `backend == "memory"`, where `InMemoryCredentialRepository`
+    (bootstrap.py:230) discards the rows at process exit anyway, so there is
+    nothing left to be undecryptable.
+
+    The key is parsed here rather than at first use so a malformed or
+    placeholder value fails the boot too, with a message naming the variable,
+    instead of raising a bare `cryptography` ValueError deeper in the wiring.
+    """
+    key = settings.credential_encryption_key.strip()
+    if key:
+        try:
+            FernetEncryptor(key)
+        except Exception as exc:  # noqa: BLE001 — any parse failure is fatal
+            raise ConfigurationError(
+                "SKYLIZE_CREDENTIAL_ENCRYPTION_KEY is set but is not a valid "
+                f"Fernet key ({exc}). It must be urlsafe base64, 32 bytes. "
+                'Generate one with: python -c "from cryptography.fernet import '
+                'Fernet; print(Fernet.generate_key().decode())"'
+            ) from exc
+        return key
+
+    if settings.backend != "memory":
+        raise ConfigurationError(
+            "No credential encryption key configured. Set "
+            "SKYLIZE_CREDENTIAL_ENCRYPTION_KEY when SKYLIZE_BACKEND is not "
+            f"'memory' (got backend={settings.backend!r}). Credentials are "
+            "stored in org_credentials and outlive the process; an ephemeral "
+            "per-boot key would make every one of them undecryptable at the "
+            "next restart. Refusing to start. Generate a key with: python -c "
+            '"from cryptography.fernet import Fernet; '
+            'print(Fernet.generate_key().decode())" and hold it as a real '
+            "secret — losing it is losing every stored credential."
+        )
+
+    log.warning(
+        "No credential encryption key configured; generating an EPHEMERAL "
+        "Fernet key. This is allowed only for the in-memory/dev backend "
+        "(credentials are discarded at process exit) and must never be used "
+        "in production."
+    )
+    return FernetEncryptor.generate_key()
 
 
 async def verify_app_role_is_rls_subject(db: "Database") -> None:
@@ -171,6 +236,10 @@ class Container:
 
 async def build_container(settings: Settings | None = None) -> Container:
     settings = settings or get_settings()
+    # Resolved BEFORE the backend branch below opens any pool: a deployment
+    # missing this key must fail while it is still doing nothing, not after
+    # Postgres and Redis connections are live. Consumed at the vault below.
+    credential_encryption_key = resolve_credential_encryption_key(settings)
     registry = MVP_REGISTRY
     closers: list[Callable[[], Awaitable[None]]] = []
 
@@ -316,12 +385,10 @@ async def build_container(settings: Settings | None = None) -> Container:
     # deliverables embed back into the tenant's knowledge memory (closed loop).
     deliverables = DeliverableService(deliverable_repo, knowledge_ingestion)
 
-    # Credential vault (at-rest Fernet encryption). With no configured key the
-    # memory backend mints an ephemeral one — fine for dev/tests; production sets
-    # `credential_encryption_key` so stored credentials survive a restart.
-    encryptor = FernetEncryptor(
-        settings.credential_encryption_key or FernetEncryptor.generate_key()
-    )
+    # Credential vault (at-rest Fernet encryption). The key was resolved at the
+    # top of this function; on a real backend an unset one already failed the
+    # boot, so there is no `or generate_key()` fallback to reach here.
+    encryptor = FernetEncryptor(credential_encryption_key)
     credential_vault = CredentialVault(encryptor, credential_repo, audit)
 
     # Compiles a human's effective authority from their grants. Passed to BOTH
