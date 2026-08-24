@@ -41,6 +41,7 @@ from .app.hitl.service import HitlQueueService
 from .app.orchestrator import LLMStepRunner, Orchestrator
 from .app.principal.journal import JournalRepository, WorkJournal
 from .app.principal.provider import PrincipalAuthorityService, PrincipalRepository
+from .app.principal.spend import PostgresSpendRepository, SpendLedger
 from .app.tenants.service import TenantService
 from .config import Settings, get_settings
 from .contracts.registry import MVP_REGISTRY
@@ -535,11 +536,26 @@ async def build_container(settings: Settings | None = None) -> Container:
     # through the proxy: token signature/expiry/revocation/scope/budget checks
     # against the live governance snapshot, then audit. Null ports back
     # memory.search / search.web until real providers are wired.
+    #
+    # Spend ceiling for spend-capable tool calls (migration 0019). Constructed
+    # only where a durable pool exists — an in-RAM money ceiling is not a ceiling.
+    # On the memory backend this stays None and ToolProxy fails spend-capable
+    # calls closed rather than letting them run unmetered.
+    #
+    # Takes `db.pool` rather than `db`: `PostgresSpendRepository` lives under
+    # `skylize.app`, which the import-linter contract "Application logic contains
+    # no SQL" forbids from importing `skylize.dal.connection` (pyproject.toml).
+    # It therefore accepts an untyped pool. bootstrap is the composition root and
+    # is explicitly allowed to bridge the two.
+    spend_ledger = (
+        SpendLedger(PostgresSpendRepository(db.pool)) if db is not None else None
+    )
     tool_proxy = ToolProxy(
         registry=default_tool_registry(credential_vault=credential_vault),
         audit=audit,
         public_key=authority.public_key,
         live_state_for=authority.live_state_checker,
+        spend_ledger=spend_ledger,
     )
     # AgentExecutionService also carries the synchronous decision gate (owner
     # decisions D1/D3/D4/D5): the SAME pure evaluator the async engine uses

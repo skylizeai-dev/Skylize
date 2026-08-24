@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 ToolCategory = Literal["memory", "search", "integration", "compute"]
 
@@ -35,6 +35,30 @@ class ToolContext:
 ToolHandler = Callable[[BaseModel, ToolContext], Awaitable[BaseModel]]
 
 
+class ToolSpendProfile(BaseModel):
+    """Declares a tool SPEND-CAPABLE: invoking it moves real money.
+
+    Most tools are not. A tool without this profile keeps exactly the behaviour it
+    had before the spend ledger existed — no reservation, no ledger round-trip —
+    so declaring spend-capability is opt-in and explicit rather than inferred from
+    a category or a naming convention.
+
+    `amount_field` names the field on the tool's VALIDATED input carrying the
+    amount in integer MINOR units (cents), the same unit `SpendEnvelope` and
+    `budget_ledger` use. It is read off the parsed `input_schema` instance, not
+    the raw dict, so it has already passed the tool's own type validation.
+
+    Deliberately NOT a callable estimator: the amount a tool is about to spend has
+    to be inspectable and auditable before dispatch, and a lambda in a registry
+    entry is neither.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    currency: str = Field(min_length=3, max_length=3)
+    amount_field: str = Field(min_length=1)
+
+
 class ToolDefinition(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", arbitrary_types_allowed=True)
 
@@ -45,6 +69,9 @@ class ToolDefinition(BaseModel):
     output_schema: type[BaseModel]
     category: ToolCategory
     handler: ToolHandler
+    #: Non-None marks this tool spend-capable; see `ToolSpendProfile`. Defaults to
+    #: None so every tool registered before this field existed is unaffected.
+    spend: ToolSpendProfile | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,6 +125,66 @@ class ToolCallLimitExceeded(ToolPermissionDenied):
 
     def __init__(self, reason: str) -> None:
         super().__init__(reason, failed_stage="call_limit")
+
+
+class ToolSpendDenied(ToolPermissionDenied):
+    """A spend-capable tool call was refused by the spend ledger.
+
+    Subclasses `ToolPermissionDenied` with `failed_stage="budget"` so it routes
+    through the SAME denied-call audit path the scope/revocation denials use, and
+    so `failed_stage` reuses the existing `ValidationStage.BUDGET` vocabulary
+    (contracts/token.py) rather than inventing a second denial taxonomy.
+
+    Never raised directly — always one of the three subclasses below, so a caller
+    can branch on the TYPE. The `over_ceiling_behavior` distinction is a policy
+    decision the customer configured on the envelope; collapsing it into one error
+    with a boolean flag invites the flag being ignored at the call site.
+    """
+
+    def __init__(self, reason: str, *, defer_to_human: bool) -> None:
+        super().__init__(reason, failed_stage="budget")
+        self.defer_to_human = defer_to_human
+
+
+class ToolSpendHardDenied(ToolSpendDenied):
+    """Ceiling exceeded on an envelope whose `over_ceiling_behavior='hard_deny'`.
+
+    Terminal. The action does not happen and there is no human to ask — the
+    customer configured this envelope to stop, not to escalate.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason, defer_to_human=False)
+
+
+class ToolSpendDeferredToHuman(ToolSpendDenied):
+    """Ceiling exceeded on an envelope whose `over_ceiling_behavior='defer_to_human'`.
+
+    Also a denial — the tool did NOT run — but a recoverable one: the caller may
+    route it to the HITL queue. Distinct from `ToolSpendHardDenied` precisely so
+    that routing decision cannot be made by accident.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason, defer_to_human=True)
+
+
+class ToolSpendUnavailable(ToolSpendDenied):
+    """The spend ceiling could not be evaluated, so the call FAILS CLOSED.
+
+    Raised when a spend-capable tool is invoked but: no ledger is wired, the token
+    carries no `on_behalf_of` principal to charge (a v1.0 autonomous token —
+    contracts/base.py:239), no active envelope exists, or the declared amount is
+    unreadable/non-positive.
+
+    Its own type on purpose: "we could not check" must never be collapsed into
+    "there was nothing to find" — mirroring `AuthorityUnavailable`
+    (app/principal/errors.py:48-57). Both deny; only this one is an operational
+    fault worth alerting on. Absence of a budget is never unlimited budget.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason, defer_to_human=False)
 
 
 class ToolInputError(ToolError):

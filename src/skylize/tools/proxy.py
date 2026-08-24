@@ -17,27 +17,37 @@ which:
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from cryptography.hazmat.primitives.asymmetric.ec import EllipticCurvePublicKey
 from pydantic import ValidationError
 
 from ..app.audit.service import AuditService
+from ..app.principal.errors import CeilingExceeded, EnvelopeNotFound
+from ..app.principal.models import Reservation
+from ..app.principal.spend import SpendLedger
 from ..contracts.base import AgentContract, GovernanceToken
 from ..contracts.token import LiveStateChecker, validate_tool_call
 from .base import (
     ToolCallLimitExceeded,
     ToolContext,
     ToolConvergenceDenied,
+    ToolDefinition,
     ToolExecutionError,
     ToolInputError,
     ToolNotRegistered,
     ToolPermissionDenied,
     ToolResult,
+    ToolSpendDeferredToHuman,
+    ToolSpendHardDenied,
+    ToolSpendUnavailable,
 )
 from .registry import ToolRegistry
+
+logger = logging.getLogger(__name__)
 
 LiveStateFor = Callable[[str], LiveStateChecker]
 
@@ -78,6 +88,7 @@ class ToolProxy:
         public_key: EllipticCurvePublicKey,
         live_state_for: LiveStateFor,
         record_action: RecordAction | None = None,
+        spend_ledger: SpendLedger | None = None,
     ) -> None:
         self._registry = registry
         self._audit = audit
@@ -85,6 +96,11 @@ class ToolProxy:
         self._live_state_for = live_state_for
         self._record_action = record_action
         self._call_counts = ToolCallCounter()
+        # None on the memory backend (no durable ledger). A spend-capable tool
+        # invoked without a ledger FAILS CLOSED in `_reserve_spend` rather than
+        # running ungoverned — an unenforced ceiling is worse than no ceiling,
+        # because it reads as enforced.
+        self._spend_ledger = spend_ledger
 
     @property
     def registry(self) -> ToolRegistry:
@@ -184,10 +200,28 @@ class ToolProxy:
             )
             raise ToolInputError(str(exc)) from exc
 
+        # Spend ceiling (spend.SpendLedger). LAST gate before dispatch, and only
+        # for spend-capable tools: the ceiling is a shared mutable resource, so a
+        # hold must be placed as late as possible — after every cheaper denial has
+        # had its chance — to minimise the window in which budget is held for a
+        # call that was never going to run.
+        reservation: Reservation | None = None
+        if tool.spend is not None:
+            reservation = await self._reserve_spend(
+                tool=tool, validated_input=validated_input, contract=contract,
+                org_id=org_id, correlation_id=correlation_id,
+                governance_token=governance_token,
+            )
+
         context = ToolContext(org_id=org_id, agent_id=contract.agent_id, correlation_id=correlation_id)
         try:
             output = await tool.handler(validated_input, context)
         except Exception as exc:  # noqa: BLE001 — normalized into one tool error type
+            # The hold MUST NOT outlive the call it was placed for. Without this
+            # a failing tool leaks budget until `sweep_expired` reclaims it at
+            # expires_at, and the customer sees spend capacity vanish for 15
+            # minutes with nothing to show for it.
+            await self._release_spend(reservation, org_id=org_id)
             await self._audit_call(
                 tool_id=tool_id, contract=contract, org_id=org_id,
                 correlation_id=correlation_id, governance_token=governance_token,
@@ -195,12 +229,131 @@ class ToolProxy:
             )
             raise ToolExecutionError(str(exc)) from exc
 
+        # The side effect has happened. Audit it BEFORE settling the ledger: the
+        # audit record is the evidence that the action ran, and a ledger failure
+        # must not be able to erase it. Ordered the other way, a raising commit
+        # would leave an executed, real-world action with no audit row at all.
         await self._audit_call(
             tool_id=tool_id, contract=contract, org_id=org_id,
             correlation_id=correlation_id, governance_token=governance_token,
             result="success", reason=None, outputs=output.model_dump(mode="json"),
         )
+
+        # Settle the hold with the reserved amount. Deliberately NOT released on
+        # failure here — the action ran, so the budget it consumed is real; a
+        # release would under-count spend for an action that actually happened.
+        # A commit failure propagates: the caller has to know the ledger and the
+        # world disagree, and the audit row above lets a human reconcile. The
+        # hold meanwhile stays 'held', so the ceiling keeps binding until
+        # `sweep_expired` reclaims it rather than freeing budget prematurely.
+        if reservation is not None:
+            await self._spend_ledger.commit(  # type: ignore[union-attr]
+                org_id=org_id,
+                reservation_id=reservation.reservation_id,
+                actual_minor=reservation.amount_minor,
+            )
+
         return ToolResult(tool_id=tool_id, output=output)
+
+    async def _reserve_spend(
+        self,
+        *,
+        tool: ToolDefinition,
+        validated_input: Any,
+        contract: AgentContract,
+        org_id: str,
+        correlation_id: UUID,
+        governance_token: GovernanceToken,
+    ) -> Reservation:
+        """Place the hold, or deny. Every exit that is not a `Reservation` denies.
+
+        Each denial is audited before it is raised, so a refused spend leaves the
+        same trail a refused scope check does.
+        """
+        profile = tool.spend
+        assert profile is not None  # caller checks; narrows for the type checker
+
+        async def deny(exc: ToolPermissionDenied) -> ToolPermissionDenied:
+            await self._audit_call(
+                tool_id=tool.tool_id, contract=contract, org_id=org_id,
+                correlation_id=correlation_id, governance_token=governance_token,
+                result="denied", reason=f"budget: {exc}",
+            )
+            return exc
+
+        if self._spend_ledger is None:
+            raise await deny(ToolSpendUnavailable(
+                f"tool {tool.tool_id!r} is spend-capable but no spend ledger is "
+                f"wired in this process; failing closed"
+            ))
+
+        # WHOSE budget. A v1.0 token carries no `on_behalf_of`
+        # (contracts/base.py:239) and therefore names no human to charge. There is
+        # no org-level fallback envelope by design — charging an unnamed principal
+        # is how a spend ceiling silently stops binding anyone.
+        on_behalf_of = governance_token.on_behalf_of
+        if on_behalf_of is None:
+            raise await deny(ToolSpendUnavailable(
+                f"tool {tool.tool_id!r} is spend-capable but token "
+                f"{governance_token.token_id} carries no on_behalf_of principal "
+                f"(token_version={governance_token.token_version!r}); failing closed"
+            ))
+
+        amount = getattr(validated_input, profile.amount_field, None)
+        # bool is an int subclass; `True` must not be read as 1 cent.
+        if not isinstance(amount, int) or isinstance(amount, bool) or amount <= 0:
+            raise await deny(ToolSpendUnavailable(
+                f"tool {tool.tool_id!r} declares spend field "
+                f"{profile.amount_field!r} but the validated input carries "
+                f"{amount!r}, which is not a positive integer minor-unit amount"
+            ))
+
+        try:
+            return await self._spend_ledger.reserve(
+                org_id=org_id,
+                principal_id=on_behalf_of.principal_id,
+                amount_minor=amount,
+                # Unique per invocation, NOT derived from (correlation, agent,
+                # tool). `try_reserve` treats a repeated idempotency_key as a
+                # retry and returns the ORIGINAL hold, so a key shared by two
+                # distinct calls would let the second spend against the first's
+                # reservation. `invoke` has no retry/replay path — every call is a
+                # distinct logical spend. Idempotent replay needs a
+                # caller-supplied key, which this signature does not accept.
+                idempotency_key=f"tool:{tool.tool_id}:{uuid4()}",
+                correlation_id=correlation_id,
+                governance_token_id=governance_token.token_id,
+            )
+        except CeilingExceeded as exc:
+            raise await deny(
+                ToolSpendDeferredToHuman(str(exc)) if exc.defer_to_human
+                else ToolSpendHardDenied(str(exc))
+            ) from exc
+        except EnvelopeNotFound as exc:
+            raise await deny(ToolSpendUnavailable(str(exc))) from exc
+
+    async def _release_spend(
+        self, reservation: Reservation | None, *, org_id: str
+    ) -> None:
+        """Best-effort release on the failure path.
+
+        Swallows its own errors deliberately: this runs while an exception is
+        already in flight, and a ledger hiccup here must not replace the real
+        failure the caller needs to see. An unreleased hold is not lost budget —
+        `sweep_expired` reclaims it at `expires_at`; masking the tool's actual
+        error would be the worse outcome.
+        """
+        if reservation is None or self._spend_ledger is None:
+            return
+        try:
+            await self._spend_ledger.release(
+                org_id=org_id, reservation_id=reservation.reservation_id
+            )
+        except Exception:  # noqa: BLE001 — see docstring
+            logger.exception(
+                "failed to release spend reservation %s; it will be swept at %s",
+                reservation.reservation_id, reservation.expires_at,
+            )
 
     async def _audit_call(
         self,
