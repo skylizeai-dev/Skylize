@@ -384,19 +384,39 @@ class PostgresSpendRepository:
     async def get_envelope(
         self, *, org_id: str, principal_id: str, now: datetime
     ) -> SpendEnvelope | None:
+        # The `set_config(..., true)` MUST sit inside an explicit transaction, as
+        # `Database.tenant_session` does (dal/connection.py:70-81). `is_local=true`
+        # scopes the GUC to the surrounding transaction; with no transaction open,
+        # asyncpg runs each statement in its own implicit one, so the setting is
+        # discarded the instant it is set and the SELECT below runs with
+        # `skylize.org_id` empty. Under RLS as the non-superuser `skylize_app`
+        # role that matched no rows and this returned None for an envelope that
+        # exists -- which made every ceiling denial surface as `EnvelopeNotFound`
+        # and left `CeilingExceeded.defer_to_human` unreachable in production.
+        #
+        # The column list is explicit rather than `SELECT *`: `SpendEnvelope` is
+        # `extra="forbid"` and the table carries a `created_at` the model does not
+        # declare (migration 0019), so `SELECT *` raises ValidationError here.
         async with self._pool.acquire() as conn:  # type: ignore[attr-defined]
-            await conn.execute("SELECT set_config($1, $2, true)", self._rls_guc, org_id)
-            row = await conn.fetchrow(
-                """
-                SELECT * FROM spend_envelope
-                 WHERE org_id = $1 AND principal_id = $2 AND revoked_at IS NULL
-                   AND $3 >= period_start AND $3 < period_end
-                """,
-                org_id,
-                principal_id,
-                now,
-            )
-            return SpendEnvelope(**dict(row)) if row is not None else None
+            async with conn.transaction():
+                await conn.execute(
+                    "SELECT set_config($1, $2, true)", self._rls_guc, org_id
+                )
+                row = await conn.fetchrow(
+                    """
+                    SELECT envelope_id, org_id, principal_id, currency,
+                           ceiling_minor, reserved_minor, spent_minor,
+                           period_start, period_end, over_ceiling_behavior,
+                           revoked_at
+                      FROM spend_envelope
+                     WHERE org_id = $1 AND principal_id = $2 AND revoked_at IS NULL
+                       AND $3 >= period_start AND $3 < period_end
+                    """,
+                    org_id,
+                    principal_id,
+                    now,
+                )
+                return SpendEnvelope(**dict(row)) if row is not None else None
 
     async def sweep_expired(self, *, now: datetime, limit: int = 500) -> int:
         """Release abandoned holds. Run from Temporal on a schedule, not from a
