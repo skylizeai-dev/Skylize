@@ -78,7 +78,7 @@ export function SiteHeader({ current = "home" }: { current?: SitePage }) {
             priority
             className="h-[22px] w-auto"
           />
-          <span className="font-mono text-[13px] font-medium tracking-[0.18em] text-foreground uppercase">
+          <span className="font-mono text-[13px] font-medium tracking-[0.18em] text-foreground">
             Skylize
           </span>
         </Link>
