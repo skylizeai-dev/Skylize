@@ -38,7 +38,7 @@ afterEach(() => {
 });
 
 describe("Apply", () => {
-  it("posts the full application to /api/contact and reports success", async () => {
+  it("posts the full application to Web3Forms and reports success", async () => {
     const fetchMock = mockFetch({ ok: true, body: { success: true } });
     render(<Apply />);
     fill(complete);
@@ -49,10 +49,9 @@ describe("Apply", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe("/api/contact");
+    expect(url).toBe("https://api.web3forms.com/submit");
     expect(init.method).toBe("POST");
 
-    // The payload must keep matching the shape the existing route validates.
     const payload = JSON.parse(init.body as string) as Record<string, string>;
     expect(payload.name).toBe("Dana Okonkwo");
     expect(payload.email).toBe("ops@acme.com");
@@ -61,7 +60,7 @@ describe("Apply", () => {
   });
 
   it("shows the API's error message and keeps the form on a non-2xx response", async () => {
-    mockFetch({ ok: false, status: 400, body: { error: "Invalid email address" } });
+    mockFetch({ ok: false, status: 400, body: { success: false, message: "Invalid email address" } });
     render(<Apply />);
     fill(complete);
     submit();
@@ -83,7 +82,7 @@ describe("Apply", () => {
   });
 
   it("does not call the API when a required field is blank", () => {
-    const fetchMock = mockFetch({ ok: true });
+    const fetchMock = mockFetch({ ok: true, body: { success: true } });
     render(<Apply />);
     fill({ ...complete, Name: "   " });
     submit();

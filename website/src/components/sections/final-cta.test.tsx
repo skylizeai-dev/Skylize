@@ -26,7 +26,7 @@ afterEach(() => {
 });
 
 describe("FinalCta", () => {
-  it("posts the email to /api/contact and shows the success state on 2xx", async () => {
+  it("posts the email to Web3Forms and shows the success state on 2xx", async () => {
     const fetchMock = mockFetch({ ok: true, body: { success: true } });
     render(<FinalCta />);
     fillAndSubmit("ops@acme.com");
@@ -36,7 +36,7 @@ describe("FinalCta", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe("/api/contact");
+    expect(url).toBe("https://api.web3forms.com/submit");
     expect(init.method).toBe("POST");
     const payload = JSON.parse(init.body as string) as Record<string, string>;
     expect(payload.email).toBe("ops@acme.com");
@@ -44,7 +44,7 @@ describe("FinalCta", () => {
   });
 
   it("shows the API's error message and keeps the form on a non-2xx response", async () => {
-    mockFetch({ ok: false, status: 400, body: { error: "Invalid email address" } });
+    mockFetch({ ok: false, status: 400, body: { success: false, message: "Invalid email address" } });
     render(<FinalCta />);
     fillAndSubmit("ops@acme.com");
 
@@ -65,7 +65,7 @@ describe("FinalCta", () => {
   });
 
   it("does not call the API for a blank email", () => {
-    const fetchMock = mockFetch({ ok: true });
+    const fetchMock = mockFetch({ ok: true, body: { success: true } });
     render(<FinalCta />);
     fillAndSubmit("   ");
     expect(fetchMock).not.toHaveBeenCalled();

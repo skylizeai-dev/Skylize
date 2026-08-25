@@ -5,6 +5,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { Check } from "lucide-react";
 import { Container, AltitudeLine, CtaButton } from "@/components/skylize";
 import { EASE_ALTITUDE } from "@/lib/motion";
+import { submitToWeb3Forms } from "@/lib/web3forms";
 
 type SubmitStatus = "idle" | "pending" | "sent" | "error";
 
@@ -20,20 +21,14 @@ export function FinalCta() {
     setStatus("pending");
     setErrorMessage(null);
     try {
-      const res = await fetch("/api/contact", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      await submitToWeb3Forms(
+        {
           name: trimmed,
           email: trimmed,
           message: "Design partner application from the landing-page contact form.",
-        }),
-        signal: AbortSignal.timeout(10_000),
-      });
-      const data = (await res.json().catch(() => null)) as { error?: string } | null;
-      if (!res.ok) {
-        throw new Error(data?.error ?? "Something went wrong. Please try again.");
-      }
+        },
+        AbortSignal.timeout(10_000),
+      );
       setStatus("sent");
     } catch (err) {
       setStatus("error");

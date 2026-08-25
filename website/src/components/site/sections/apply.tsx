@@ -3,6 +3,7 @@
 import { useState, type FormEvent } from "react";
 import { SiteButton } from "../button";
 import { Display, Eyebrow, Section, SectionBody } from "../primitives";
+import { submitToWeb3Forms } from "@/lib/web3forms";
 
 type SubmitStatus = "idle" | "pending" | "sent" | "error";
 
@@ -21,12 +22,8 @@ const inputClass =
   "border border-border bg-background px-3.5 py-3 text-base text-foreground outline-none transition-colors duration-200 focus:border-blue";
 
 /**
- * The design-partner application.
- *
- * Posts the shape /api/contact already accepts — name, email, company,
- * message — so the mail transport behind it is untouched by this form. The
- * route owns validation and configuration failure; this component only
- * reports what the route says back.
+ * The design-partner application. Submits directly to Web3Forms from the
+ * browser — their free plan rejects server-side requests.
  */
 export function Apply() {
   const [status, setStatus] = useState<SubmitStatus>("idle");
@@ -51,18 +48,10 @@ export function Apply() {
     setStatus("pending");
     setNote(null);
     try {
-      const res = await fetch("/api/contact", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(data),
-        signal: AbortSignal.timeout(10_000),
-      });
-      const payload = (await res.json().catch(() => null)) as {
-        error?: string;
-      } | null;
-      if (!res.ok) {
-        throw new Error(payload?.error ?? "Something went wrong. Please try again.");
-      }
+      await submitToWeb3Forms(
+        { name: data.name, email: data.email, company: data.company, message: data.message },
+        AbortSignal.timeout(10_000),
+      );
       form.reset();
       setStatus("sent");
       setNote("Received. You will hear back from the engineer building this.");
