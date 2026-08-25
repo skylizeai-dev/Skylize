@@ -41,11 +41,16 @@
   --color-paper: #f7f8f8;
   --color-blue: #0047ff;
 
+  /* Editorial surface — the alternating band on marketing pages. */
+  --color-band: var(--band);
+
   /* Type */
   --font-sans: var(--font-inter);
   --font-display: var(--font-inter-tight);
   --font-heading: var(--font-inter-tight);
   --font-mono: var(--font-geist-mono);
+  /* The editorial display face, used by the marketing surface only. */
+  --font-serif: var(--font-instrument-serif);
 
   /* Motion — Precision Ascent */
   --ease-altitude: cubic-bezier(0.16, 1, 0.3, 1);
@@ -84,9 +89,54 @@
   --input: color-mix(in srgb, #f7f8f8 14%, transparent);
   --ring: #0047ff;
 
+  --band: color-mix(in srgb, #f7f8f8 4%, #08090a);
+
   --radius: 0.5rem;
 
   color-scheme: dark;
+}
+
+/* ─────────────────────────────────────────────
+   THE PAPER SURFACE — the public marketing skin.
+   Scoped, not global: the operator console at
+   /console keeps the dark instrument identity
+   above, and the console screenshots shown on
+   these pages stay true to the product.
+   Applied by the (site) route group layout.
+───────────────────────────────────────────── */
+.theme-paper {
+  --background: #faf9f6;
+  --foreground: #08090a;
+
+  --card: #ffffff;
+  --card-foreground: #08090a;
+  --popover: #ffffff;
+  --popover-foreground: #08090a;
+
+  --primary: #0047ff;
+  --primary-foreground: #faf9f6;
+  --secondary: #f0eee9;
+  --secondary-foreground: #08090a;
+
+  --muted: #f0eee9;
+  --muted-foreground: #5c5c58;
+  --accent: #f0eee9;
+  --accent-foreground: #08090a;
+  --destructive: #b3261e;
+
+  /* Hairlines are ink-on-paper here, and a full 1px — the editorial
+     rule, not the 0.5px instrument hairline of the dark surface. */
+  --border: rgb(8 9 10 / 0.12);
+  --border-strong: rgb(8 9 10 / 0.24);
+  --input: rgb(8 9 10 / 0.12);
+  --ring: #0047ff;
+
+  --band: #f0eee9;
+
+  /* The editorial surface is square. Nothing is rounded. */
+  --radius: 0rem;
+
+  color-scheme: light;
 }
 
 @layer base {
@@ -107,9 +157,26 @@
     font-variation-settings: "opsz" 32;
   }
 
+  /* The token override lives on a wrapper inside <body>, so the element
+     that paints the overscroll area never sees it. Reach back up and
+     match, or the paper pages rubber-band onto the dark console ground. */
+  body:has(.theme-paper) {
+    background: #faf9f6;
+  }
+
   ::selection {
     background-color: color-mix(in srgb, var(--color-blue) 32%, transparent);
     color: var(--color-paper);
+  }
+
+  /* On paper the selection is the solid brand blue, per the design. */
+  .theme-paper ::selection {
+    background-color: var(--color-blue);
+    color: #faf9f6;
+  }
+
+  .theme-paper {
+    text-wrap: pretty;
   }
 
   /* Display headings carry the design — tight, optical, precise. */

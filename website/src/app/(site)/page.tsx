@@ -1,31 +1,31 @@
 import {
-  Navigation,
+  SiteHeader,
+  SiteFooter,
   Hero,
-  Problem,
+  WhatWeSolve,
   Solution,
   HowItWorks,
   Controls,
   Status,
   Faq,
-  FinalCta,
-  Footer,
-} from "@/components/sections";
+  Apply,
+} from "@/components/site";
 
 export default function Home() {
   return (
     <>
-      <Navigation />
+      <SiteHeader current="home" />
       <main>
         <Hero />
-        <Problem />
+        <WhatWeSolve />
         <Solution />
         <HowItWorks />
         <Controls />
         <Status />
         <Faq />
-        <FinalCta />
+        <Apply />
       </main>
-      <Footer />
+      <SiteFooter />
     </>
   );
 }

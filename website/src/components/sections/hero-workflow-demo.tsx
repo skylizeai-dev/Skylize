@@ -113,7 +113,7 @@ export function HeroWorkflowDemo() {
       <div className="flex items-center justify-between border-b border-border px-4 py-2">
         <span className="flex items-center gap-2 font-mono text-[10px] tracking-[0.14em] text-muted-foreground uppercase">
           <span className="size-1.5 rounded-full" style={{ background: "var(--color-blue)" }} />
-          Skylize Console — Live Demo
+          Skylize Console — Interactive Preview
         </span>
         {goal != null && (
           <button
@@ -223,7 +223,7 @@ export function HeroWorkflowDemo() {
             <div className="flex h-full min-h-24 items-center justify-center rounded-[4px] border border-dashed border-border px-3 py-4">
               <span className="text-center font-mono text-[11px] leading-relaxed text-muted-foreground/70">
                 {phase === "running"
-                  ? "your org is working…"
+                  ? "a sample org is working…"
                   : "the approval gate appears here"}
               </span>
             </div>

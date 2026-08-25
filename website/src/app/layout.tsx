@@ -1,5 +1,5 @@
 import type { Metadata, Viewport } from "next";
-import { Inter, Inter_Tight, Geist_Mono } from "next/font/google";
+import { Inter, Inter_Tight, Geist_Mono, Instrument_Serif } from "next/font/google";
 import { MotionProvider } from "@/components/skylize/motion-provider";
 import { SITE_URL } from "@/lib/site";
 import "./globals.css";
@@ -19,6 +19,17 @@ const interTight = Inter_Tight({
 const geistMono = Geist_Mono({
   variable: "--font-geist-mono",
   subsets: ["latin"],
+  display: "swap",
+});
+
+// The editorial display face for the public marketing surface. Ships in a
+// single weight by design — Instrument Serif has no bold cut, which is why
+// every headline on the paper surface is set at font-weight 400.
+const instrumentSerif = Instrument_Serif({
+  variable: "--font-instrument-serif",
+  subsets: ["latin"],
+  weight: "400",
+  style: ["normal", "italic"],
   display: "swap",
 });
 
@@ -76,7 +87,7 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`${inter.variable} ${interTight.variable} ${geistMono.variable} h-full`}
+      className={`${inter.variable} ${interTight.variable} ${geistMono.variable} ${instrumentSerif.variable} h-full`}
     >
       <body className="min-h-full bg-background text-foreground antialiased">
         <MotionProvider>{children}</MotionProvider>
