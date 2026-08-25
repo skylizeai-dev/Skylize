@@ -6,30 +6,66 @@ import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import type { ZodType } from "zod";
 
+import type { BackendErrorCode } from "./client";
 import { SkylizeApiError } from "./client";
 import { getConsoleAuthConfig } from "./config";
 import { SESSION_COOKIE_NAME, verifySessionToken } from "./session";
 
 type HttpMethod = "GET" | "POST" | "DELETE";
 
-export interface ConsoleRequestContext<TBody> {
+/**
+ * The second argument Next.js passes to a dynamic route handler.
+ *
+ * Shape per this version's own docs (node_modules/next/dist/docs/01-app/
+ * 03-api-reference/03-file-conventions/route.md, "context (optional)"):
+ * `params` is a PROMISE resolving to the dynamic segments. It is optional here
+ * because static routes are declared with the same helper.
+ */
+export interface ConsoleRouteContext<TParams> {
+  params: Promise<TParams>;
+}
+
+export interface ConsoleRequestContext<TBody, TParams = Record<string, never>> {
   request: NextRequest;
   /** Zod-validated body when a schema was given; undefined otherwise. */
   body: TBody;
+  /**
+   * The framework-supplied dynamic segments, already awaited. `consoleRoute`
+   * used to drop the route-context argument entirely, which forced each dynamic
+   * route to re-derive its own `[id]` from `request.nextUrl.pathname` with a
+   * bespoke regex — three separate regexes that had to stay in step with three
+   * folder paths. Empty object for a static route.
+   */
+  params: TParams;
 }
 
-export interface ConsoleRouteOptions<TBody> {
+export interface ConsoleRouteOptions<TBody, TParams = Record<string, never>> {
   method: HttpMethod;
   /** When present, the JSON body is parsed and validated before the handler runs. */
   schema?: ZodType<TBody>;
   /** Default true. Only the login/logout endpoint opts out. */
   requireAuth?: boolean;
-  handler: (context: ConsoleRequestContext<TBody>) => Promise<NextResponse>;
+  handler: (
+    context: ConsoleRequestContext<TBody, TParams>,
+  ) => Promise<NextResponse>;
 }
 
-/** Uniform error envelope: NextResponse.json({ error }, { status }). */
-export function errorResponse(status: number, message: string): NextResponse {
-  return NextResponse.json({ error: message }, { status });
+/**
+ * Uniform error envelope: NextResponse.json({ error }, { status }).
+ *
+ * `code` is OPTIONAL and purely additive — the key is omitted entirely when
+ * there is no backend code to forward, so every existing browser-side reader of
+ * `{ error }` sees exactly the body it saw before.
+ */
+export function errorResponse(
+  status: number,
+  message: string,
+  code: BackendErrorCode | null = null,
+): NextResponse {
+  return NextResponse.json(
+    code === null ? { error: message } : { error: message, code },
+    { status },
+  );
 }
 
 async function hasValidSession(request: NextRequest): Promise<boolean> {
@@ -63,12 +99,18 @@ function mapSkylizeError(error: SkylizeApiError): NextResponse {
   return errorResponse(error.status, error.message);
 }
 
-export function consoleRoute<TBody = undefined>(
-  options: ConsoleRouteOptions<TBody>,
-): (request: NextRequest) => Promise<NextResponse> {
+export function consoleRoute<TBody = undefined, TParams = Record<string, never>>(
+  options: ConsoleRouteOptions<TBody, TParams>,
+): (
+  request: NextRequest,
+  context?: ConsoleRouteContext<TParams>,
+) => Promise<NextResponse> {
   const { method, schema, requireAuth = true, handler } = options;
 
-  return async function route(request: NextRequest): Promise<NextResponse> {
+  return async function route(
+    request: NextRequest,
+    context?: ConsoleRouteContext<TParams>,
+  ): Promise<NextResponse> {
     try {
       if (request.method !== method) {
         return errorResponse(405, "Method not allowed.");
@@ -77,6 +119,10 @@ export function consoleRoute<TBody = undefined>(
       if (requireAuth && !(await hasValidSession(request))) {
         return errorResponse(401, "Authentication required.");
       }
+
+      // Awaited once, here, so handlers see plain values. Static routes get an
+      // empty object rather than a rejected access.
+      const params = ((await context?.params) ?? {}) as TParams;
 
       let body = undefined as TBody;
       if (schema) {
@@ -99,7 +145,7 @@ export function consoleRoute<TBody = undefined>(
         body = parsed.data;
       }
 
-      return await handler({ request, body });
+      return await handler({ request, body, params });
     } catch (error) {
       if (error instanceof SkylizeApiError) {
         return mapSkylizeError(error);

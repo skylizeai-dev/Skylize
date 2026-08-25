@@ -289,6 +289,7 @@ async def test_demo_adapter_simulates_one_tool_call_then_finalizes() -> None:
         system="You are a Hook Generator — produces ad/scroll-stopping hooks.",
         messages=[LLMMessage(role="user", content=[LLMContentBlock(kind="text", text="Generate hooks")])],
         requested_max_tokens=512, governance_token_id=uuid4(), org_id=ORG,
+        correlation_id=uuid4(), agent_id="hook_generator_agent",
     )
     resp1 = await adapter.generate_with_tools(req1, [tool])
     assert resp1.stop_reason == "tool_use"
@@ -308,6 +309,7 @@ async def test_demo_adapter_simulates_one_tool_call_then_finalizes() -> None:
     req2 = LLMGenerateWithToolsRequest(
         system=req1.system, messages=messages2, requested_max_tokens=512,
         governance_token_id=req1.governance_token_id, org_id=ORG,
+        correlation_id=req1.correlation_id, agent_id=req1.agent_id,
     )
     resp2 = await adapter.generate_with_tools(req2, [tool])
     assert resp2.stop_reason == "end_turn"
@@ -317,17 +319,27 @@ async def test_demo_adapter_simulates_one_tool_call_then_finalizes() -> None:
 
 
 async def test_demo_mode_full_pipeline_produces_deliverable_via_tool_loop() -> None:
-    """End-to-end: DemoLLMAdapter + real ToolProxy + real minted GovernanceToken."""
-    authority, audit, bus, proxy = _harness()
+    """End-to-end: DemoLLMAdapter + real ToolProxy + real minted GovernanceToken.
+
+    Runs under the REAL `hook_generator_agent` id rather than the synthetic
+    `test_tool_loop_agent`: DemoLLMAdapter dispatches canned payloads on the
+    exact `agent_id` (demo_adapter.py:_pick_response), so an id no contract
+    owns has no demo payload and raises `DemoResponseUnavailable` by design.
+    Everything else about the contract -- invocable_tools, the I/O schemas, the
+    iteration cap -- is unchanged, so this still exercises the tool loop; it
+    just does so as an agent demo mode can actually serve.
+    """
+    contract = _TOOL_LOOP_CONTRACT.model_copy(update={"agent_id": "hook_generator_agent"})
+    authority, audit, bus, proxy = _harness(contract)
     llm = DemoLLMAdapter()
     deliverables, row = _deliverable_mock()
 
     service = AgentExecutionService(
-        registry=AgentRegistry([_TOOL_LOOP_CONTRACT]), llm=llm, deliverables=deliverables,
+        registry=AgentRegistry([contract]), llm=llm, deliverables=deliverables,
         tools=proxy, authority=authority, audit=audit,
     )
     result = await service.execute(
-        org_id=ORG, agent_id="test_tool_loop_agent", input_data=_INPUT, user_id="u1",
+        org_id=ORG, agent_id="hook_generator_agent", input_data=_INPUT, user_id="u1",
     )
     assert result is row
     tool_events = [

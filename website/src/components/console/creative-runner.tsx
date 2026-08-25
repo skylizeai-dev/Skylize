@@ -100,7 +100,7 @@ export function CreativeRunner() {
       className="border border-border bg-card"
     >
       <div className="px-7 pt-7 pb-6 sm:px-8">
-        <Eyebrow index="02">Workflow · creative crew</Eyebrow>
+        <Eyebrow index="04">Workflow · creative crew</Eyebrow>
         <h2
           id={`${baseId}-title`}
           className="mt-4 font-display text-xl font-semibold tracking-tight"

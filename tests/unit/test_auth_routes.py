@@ -47,6 +47,72 @@ def test_register_duplicate_email_409(client: TestClient) -> None:
     assert resp.status_code == 409
 
 
+# ── registration creates NEW orgs only ───────────────────────────────────────
+
+def test_register_into_an_occupied_org_is_409_with_a_code(client: TestClient) -> None:
+    """An unauthenticated stranger who knows an org_id must not be admitted to
+    that tenant. Before the fix this returned 201 with roles == ["viewer"]."""
+    client.post(
+        "/api/v1/auth/register",
+        json={"org_id": "org_taken", "email": "first@example.com", "password": "hunter2pw"},
+    )
+    resp = client.post(
+        "/api/v1/auth/register",
+        json={"org_id": "org_taken", "email": "stranger@example.com", "password": "hunter2pw"},
+    )
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["code"] == "org_not_available"
+
+
+def test_refusal_message_does_not_confirm_the_org_exists(client: TestClient) -> None:
+    """The status code is a weak existence signal on its own; the message must
+    not strengthen it into a confirmation."""
+    client.post(
+        "/api/v1/auth/register",
+        json={"org_id": "org_probe", "email": "first@example.com", "password": "hunter2pw"},
+    )
+    detail = client.post(
+        "/api/v1/auth/register",
+        json={"org_id": "org_probe", "email": "stranger@example.com", "password": "hunter2pw"},
+    ).json()["detail"]
+
+    assert "not available" in detail
+    for confirming in ("already exists", "already registered", "is taken", "has users"):
+        assert confirming not in detail, detail
+    # Nor may it echo anything about the occupying tenant.
+    assert "first@example.com" not in detail
+
+
+def test_no_account_is_created_by_a_refused_registration(client: TestClient) -> None:
+    client.post(
+        "/api/v1/auth/register",
+        json={"org_id": "org_solo", "email": "first@example.com", "password": "hunter2pw"},
+    )
+    client.post(
+        "/api/v1/auth/register",
+        json={"org_id": "org_solo", "email": "stranger@example.com", "password": "hunter2pw"},
+    )
+    # If a row had been written, the stranger could log in.
+    resp = client.post(
+        "/api/v1/auth/login",
+        json={"email": "stranger@example.com", "password": "hunter2pw"},
+    )
+    assert resp.status_code == 401
+
+
+def test_a_fresh_org_id_still_registers(client: TestClient) -> None:
+    client.post(
+        "/api/v1/auth/register",
+        json={"org_id": "org_one", "email": "a@example.com", "password": "hunter2pw"},
+    )
+    resp = client.post(
+        "/api/v1/auth/register",
+        json={"org_id": "org_two", "email": "b@example.com", "password": "hunter2pw"},
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["roles"] == ["owner"]
+
+
 def test_login_returns_200_with_tokens(client: TestClient) -> None:
     client.post(
         "/api/v1/auth/register",

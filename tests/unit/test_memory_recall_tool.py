@@ -69,7 +69,7 @@ async def test_qdrant_port_embeds_query_then_searches_with_org_filter() -> None:
     hits = await port.recall(query="spring campaign hooks", top_k=2, org_id="org_a", namespace=None)
 
     embedding_service.embed.assert_awaited_once_with("spring campaign hooks")
-    qdrant.search.assert_awaited_once_with([0.1, 0.2, 0.3], 2, {"org_id": "org_a"})
+    qdrant.search.assert_awaited_once_with([0.1, 0.2, 0.3], 2, {}, org_id="org_a")
     assert hits[0] == MemoryHit(content="Prior campaign hook", score=0.87, source="campaigns/spring.md")
     assert hits[1].source == "raw-doc-2"
 
@@ -83,7 +83,9 @@ async def test_qdrant_port_adds_namespace_to_filters() -> None:
     port = QdrantMemoryRecallPort(embedding_service, qdrant)
     await port.recall(query="q", top_k=5, org_id="org_b", namespace="brand:voice")
 
-    qdrant.search.assert_awaited_once_with([0.0], 5, {"org_id": "org_b", "namespace": "brand:voice"})
+    qdrant.search.assert_awaited_once_with(
+        [0.0], 5, {"namespace": "brand:voice"}, org_id="org_b"
+    )
 
 
 async def test_tool_id_and_category_are_stable() -> None:

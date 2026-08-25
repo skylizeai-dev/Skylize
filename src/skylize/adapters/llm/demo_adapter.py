@@ -4,14 +4,22 @@ DemoLLMAdapter — deterministic, template-based LLM for demo mode.
 Used when SKYLIZE_ANTHROPIC_API_KEY is absent. Returns realistic-looking
 output clearly marked [DEMO] so nobody mistakes it for real AI output.
 Simulates latency (0.5–1.5 s) so the demo feels like a real generation.
+
+DISPATCH IS EXACT, ON `agent_id`. A canned payload belongs to exactly one
+agent; there is no fallback and no substitution. An agent with no entry in
+`_DEMO_RESPONSES` raises `DemoResponseUnavailable` naming itself, because the
+alternatives are both dishonest — another agent's payload is a wrong answer
+wearing the right agent's name, and a generic stub satisfies no output schema.
+Only 8 of the 22 registered agents have a payload; the other 14 cannot be
+demoed, and demo mode now says which and why instead of failing downstream.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import random
-import re
 from typing import TYPE_CHECKING, Any, TypeVar
 from uuid import UUID
 
@@ -30,7 +38,13 @@ if TYPE_CHECKING:
     from ...tools.base import ToolDefinition
     from .structured import StructuredRequest
 
+log = logging.getLogger(__name__)
+
 _TModel = TypeVar("_TModel", bound=BaseModel)
+
+# Logged at WARNING on every demo generation so non-production output is never
+# mistaken for real AI (the message carries no prompt content).
+_DEMO_ACTIVE_WARNING = "demo_llm_adapter_active_returning_non_production_output"
 
 _DEMO_HOOKS: list[str] = [
     "[DEMO] Stop everything — this is the last product you'll ever need.",
@@ -40,6 +54,8 @@ _DEMO_HOOKS: list[str] = [
     "[DEMO] What nobody tells you about this category (but should).",
 ]
 
+#: Canned payloads, keyed by the EXACT `agent_id` the request carries. This is a
+#: dispatch table, not a hint set: an agent gets this entry or it gets an error.
 _DEMO_RESPONSES: dict[str, dict[str, object]] = {
     "hook_generator_agent": {"hooks": _DEMO_HOOKS},
     "ad_copy_agent": {"variants": [
@@ -83,34 +99,58 @@ _DEMO_RESPONSES: dict[str, dict[str, object]] = {
         "flags": [],
         "recommendation": "[DEMO] Review the highest-concentration category before next cycle's allocation.",
     },
+    # Not a registered agent — the internal work-journal brief summarizer
+    # (edge/routes/brief.py), which also calls LLMGateway.generate() and so
+    # also needs a demo-mode payload.
+    "brief_summarizer": {
+        "summary": "[DEMO] A few things happened since you last checked — nothing urgent.",
+    },
+    "cowork_agent": {
+        "reply": "[DEMO] Understood — here is what I can do within your authority.",
+    },
 }
 
-_FALLBACK_RESPONSE: dict[str, object] = {"result": "[DEMO] Generated output — replace with live model."}
+class DemoResponseUnavailable(Exception):
+    """No canned demo payload exists for this `agent_id`.
+
+    Demo mode can only produce output for the agents it has a hand-written,
+    schema-valid payload for. Every other agent fails HERE, loudly, naming
+    itself — rather than being handed some other agent's payload (a wrong
+    answer presented as a right one) or a generic `{"result": ...}` stub (which
+    satisfies no agent's output schema and resurfaces later as an opaque
+    provider error). Neither substitute is honest: an agent with no demo
+    payload cannot be demoed, and this says so at the point of failure.
+    """
+
+    def __init__(self, agent_id: str) -> None:
+        self.agent_id = agent_id
+        super().__init__(
+            f"demo mode has no canned response for agent_id={agent_id!r}; the "
+            f"{len(_DEMO_RESPONSES)} agents with a demo payload are "
+            f"{', '.join(sorted(_DEMO_RESPONSES))}. Run this agent against a "
+            "live provider key instead."
+        )
 
 
-def _pick_response(request: LLMGenerateRequest) -> dict[str, object]:
-    system = request.system or ""
-    prompt = request.prompt
-    combined = (system + " " + prompt).lower()
-    for agent_id, payload in _DEMO_RESPONSES.items():
-        if agent_id in combined:
-            return payload
-    # Try to detect from prompt keywords
-    if "hook" in combined:
-        return _DEMO_RESPONSES["hook_generator_agent"]
-    if "caption" in combined:
-        return _DEMO_RESPONSES["caption_writer_agent"]
-    if re.search(r"\bscript\b", combined):  # word-boundary: "product_description" is not a match
-        return _DEMO_RESPONSES["script_writer_agent"]
-    if "cta" in combined or "call to action" in combined:
-        return _DEMO_RESPONSES["cta_optimizer_agent"]
-    if "ad copy" in combined or "variant" in combined:
-        return _DEMO_RESPONSES["ad_copy_agent"]
-    if "keyword" in combined or "serp" in combined:
-        return _DEMO_RESPONSES["seo_keyword_agent"]
-    if "budget" in combined or "line_items" in combined:
-        return _DEMO_RESPONSES["cfo_agent"]
-    return _FALLBACK_RESPONSE
+def _pick_response(agent_id: str) -> dict[str, object]:
+    """Exact lookup on the acting agent's id — never a guess.
+
+    This used to sniff keywords out of the system + user prompt, which is how
+    `director_growth` was served `cfo_agent`'s payload unconditionally: its
+    `agent_role` string ("...campaigns & budget reallocations") matched
+    `if "budget" in combined`. The sniff also read CUSTOMER content, so an
+    agent's routing depended on the words in the caller's own input.
+
+    `agent_id` is a REQUIRED field on every request model that reaches this
+    adapter (gateway.py:165, gateway.py:202, structured.py:122), and every live
+    construction site sources it from the contract or the validated
+    GovernanceToken — so dispatching on it is exact and cannot be steered by
+    input text.
+    """
+    try:
+        return _DEMO_RESPONSES[agent_id]
+    except KeyError:
+        raise DemoResponseUnavailable(agent_id) from None
 
 
 def _demo_input_for(schema: type[BaseModel]) -> dict[str, Any]:
@@ -145,8 +185,9 @@ class DemoLLMAdapter:
     _MODEL = "demo-v1"
 
     async def generate(self, request: LLMGenerateRequest) -> LLMGenerateResponse:
+        log.warning(_DEMO_ACTIVE_WARNING)
         await asyncio.sleep(random.uniform(0.5, 1.5))
-        payload = _pick_response(request)
+        payload = _pick_response(request.agent_id)
         text = json.dumps(payload)
         fake_prompt_tokens = len(request.prompt) // 4
         fake_completion_tokens = len(text) // 4
@@ -180,6 +221,7 @@ class DemoLLMAdapter:
         (a tool_result is present): returns the same templated output as
         `generate()`.
         """
+        log.warning(_DEMO_ACTIVE_WARNING)
         await asyncio.sleep(random.uniform(0.5, 1.5))
 
         if tools and not _has_tool_result(request.messages):
@@ -213,16 +255,10 @@ class DemoLLMAdapter:
             for block in message.content
             if block.kind == "text"
         )
-        fake_request = LLMGenerateRequest(
-            model=request.model,
-            prompt=prompt,
-            system=request.system,
-            requested_max_tokens=request.requested_max_tokens,
-            temperature=request.temperature,
-            governance_token_id=request.governance_token_id,
-            org_id=request.org_id,
-        )
-        payload = _pick_response(fake_request)
+        # The tool-loop request carries the same required `agent_id`
+        # (gateway.py:202), so the final turn dispatches identically to the
+        # single-shot path — no transcript is reconstructed to be sniffed.
+        payload = _pick_response(request.agent_id)
         text = json.dumps(payload)
         fake_prompt_tokens = len(prompt) // 4
         fake_completion_tokens = len(text) // 4

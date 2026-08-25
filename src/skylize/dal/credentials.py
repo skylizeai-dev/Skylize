@@ -47,16 +47,15 @@ class CredentialRepository(Protocol):
 # ---------------------------------------------------------------------------
 
 def _cred_row(rec: Any) -> CredentialRow:
-    meta = rec["metadata_json"]
-    if isinstance(meta, (dict, list)):
-        meta = json.dumps(meta)
+    # JSONB decodes to dict via the pool codec; the row contract keeps the
+    # JSON-encoded str, so re-encode here.
     return CredentialRow(
         cred_id=rec["id"],
         org_id=rec["org_id"],
         provider=rec["provider"],
         label=rec["label"],
         encrypted_value=rec["encrypted_value"],
-        metadata_json=meta or "{}",
+        metadata_json=json.dumps(rec["metadata_json"] or {}),
         created_at=rec["created_at"],
         rotated_at=rec["rotated_at"],
     )

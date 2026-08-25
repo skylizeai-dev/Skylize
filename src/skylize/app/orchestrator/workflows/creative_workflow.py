@@ -91,6 +91,7 @@ def build_creative_graph(deps: GraphDeps) -> Any:
                 input_payload=state["input_payload"],
                 token=state["token"],
                 org_id=state["org_id"],
+                correlation_id=state["correlation_id"],
             )
             return {"output": output, "run_meta": meta}
         except Exception as exc:  # noqa: BLE001 — surfaced as a governed failure

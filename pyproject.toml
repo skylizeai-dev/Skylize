@@ -95,7 +95,7 @@ dev = [
     "pytest-benchmark",
     "hypothesis>=6.100",   # property test pinning the injective identity map (test_identity.py)
     "import-linter>=2.0",
-    "ruff>=0.4",
+    "ruff==0.15.20",
     "mypy>=1.10",
     "respx>=0.21",   # httpx mocking for the edge/CORS + adapter tests
 ]
@@ -238,14 +238,26 @@ module = [
 ]
 ignore_missing_imports = true
 
-# Subsystems that are NOT wired into bootstrap (dead/paused code with no tracked
-# removal or revival plan as of 2026-07-15). Typing errors here
-# must not gate CI for the live product; remove each line when the subsystem
-# is excised or brought back to life.
+# Subsystems that are NOT on any live request path, so their typing is not
+# gated for the live product. Each entry is either PAUSED (real code, no live
+# entrypoint) or DEAD (no importer at all); none is reachable from the API
+# process. Remove a line when the subtree is excised or brought onto a live
+# path — and CHECK it then, as app.decision_engine.* now is.
+#   skylize.decision_engine.*            PAUSED — the OPA engine package; runs
+#       only as its own worker (`python -m skylize.decision_engine.worker`). The
+#       API process fails closed on SKYLIZE_DECISION_ENGINE != "inline"
+#       (bootstrap.py:276), so it never reaches a live request.
+#   skylize.app.orchestrator.temporal.*  PAUSED — Temporal worker + LLMJudge;
+#       not referenced in bootstrap.py or edge/gateway.py; nothing schedules it.
+#   skylize.services.obsidian_writer.*   DEAD — no live import anywhere in src.
+#   skylize.memory.adapters.*            DEAD — mem0 adapter; not imported in
+#       bootstrap.
+# REMOVED 2026-07-29: skylize.app.decision_engine.* — it IS wired (bootstrap.py
+# :35,294) and live on the /agents/execute gate (app/agents/execution.py:415).
+# It type-checks clean, so it is now checked by CI like the rest of the product.
 [[tool.mypy.overrides]]
 module = [
     "skylize.decision_engine.*",
-    "skylize.app.decision_engine.*",
     "skylize.app.orchestrator.temporal.*",
     "skylize.services.obsidian_writer.*",
     "skylize.memory.adapters.*",

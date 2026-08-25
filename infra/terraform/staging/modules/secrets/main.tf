@@ -37,6 +37,20 @@ resource "aws_secretsmanager_secret" "governance_signing_key" {
   recovery_window_in_days = 0
 }
 
+# HS256 signing key for the human-user access/refresh JWT pair.
+# BOOT-CRITICAL: src/skylize/config.py `_require_jwt_secret_when_prod` raises
+# inside Settings() when dev_auth is false and this is empty, and Settings() is
+# constructed at module import of skylize.edge.gateway, so uvicorn exits before
+# it ever binds a port. The task definition runs SKYLIZE_DEV_AUTH=false, so
+# this is not optional there.
+# SHELL ONLY — created empty on purpose. Populating it is an operations step
+# (MVP_GAP_ANALYSIS O1) and the value must never be committed.
+resource "aws_secretsmanager_secret" "jwt_secret" {
+  name                    = "/${var.project}/${var.environment}/JWT_SECRET"
+  description             = "HS256 signing key for user access/refresh JWTs (SKYLIZE_JWT_SECRET)"
+  recovery_window_in_days = 0
+}
+
 # DB password separate so RDS can reference it
 resource "aws_secretsmanager_secret" "db_password" {
   name                    = "/${var.project}/${var.environment}/DB_PASSWORD"

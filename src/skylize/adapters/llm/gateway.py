@@ -6,10 +6,26 @@ name a provider; they request `llm.generate` through the tool proxy, which calls
 this gateway after governance-token validation. The gateway:
 
   1. selects provider/model per tenant policy and cost routing;
-  2. enforces the per-run **token budget ceiling** BEFORE egress
-     (a call that would exceed `max_token_budget` is refused → TokenBudgetExceeded);
+  2. carries an OPTIONAL per-run token-budget ceiling checked before egress —
+     see the gap note below: nothing populates it today, so this check is
+     currently inert on every live path;
   3. records cost/quality in Langfuse keyed by `governance_token_id`;
   4. normalizes the provider response to a provider-neutral shape.
+
+GAP — the request-level token budget is UNWIRED (documented, not fixed here).
+`max_token_budget` / `tokens_used_so_far` on both request models default to
+None, and no live construction site sets them: AgentExecutionService
+(execution.py, both egresses), LLMStepRunner (orchestrator/runner.py), the
+Temporal judge, and StructuredRequest all omit them. `_check_budget` in the
+Anthropic adapter therefore returns immediately on its `is None` guard every
+time, and `TokenBudgetExceeded` is never raised from that path.
+
+What IS live is a DIFFERENT budget mechanism: the signed GovernanceToken's
+`max_token_budget`, enforced by `contracts/token.py:validate_tool_call` (BUDGET
+stage) which AgentExecutionService calls before each egress with the real
+running total. That is what actually stops an over-budget run today, and it
+raises the same `TokenBudgetExceeded` type — which is why the inert path looks
+covered. Wiring the request-level fields is a separate, deliberate decision.
 
 Foundation scope: the `LLMGateway` Protocol and the request/response/usage
 models. Concrete provider adapters (Anthropic primary, OpenAI failover) are
@@ -19,11 +35,12 @@ provider never touches agent or domain code (anti-lock-in invariant).
 CONTRACT NOTES for Sprint 2 implementers:
   - `model` is a logical name (e.g. "default", "fast", "reasoning"), NOT a
     provider model id. The gateway maps logical → concrete per tenant policy.
-  - Token accounting: `requested_max_tokens` is checked against the remaining
-    run budget (`max_token_budget - tokens_used_so_far`) by the tool proxy
-    before this gateway is called; the gateway additionally records ACTUAL usage
-    from the provider response and the proxy debits the run ledger by
-    `usage.total_tokens`.
+  - Token accounting, AS BUILT: the live pre-egress budget check is the
+    GovernanceToken BUDGET stage (`contracts/token.py:validate_tool_call`),
+    which AgentExecutionService runs before each call with the real running
+    total. The `max_token_budget - tokens_used_so_far` check described on the
+    request models below is a SECOND, currently unwired mechanism (see the GAP
+    note above). The gateway records ACTUAL usage from the provider response.
   - Streaming is out of scope for MVP; `generate` returns a complete response.
   - The gateway is the ONLY module permitted to import a provider SDK.
 """
@@ -74,9 +91,54 @@ class TokenBudgetExceeded(Exception):
 
 
 class LLMProviderUnavailable(Exception):
-    """Raised when a provider is unreachable after retries (retryable 5xx/network
-    errors exhausted). The gateway may fail over to another provider; if none is
-    available the error propagates so the caller can degrade gracefully."""
+    """Raised when a provider is unreachable: a retryable 5xx exhausted the
+    bounded retry budget, or a connection failed outright — the latter raised
+    IMMEDIATELY with no retry, because at that seam it is unknowable whether the
+    provider received (and will bill) the request, and re-sending a possibly
+    billed call risks double-spending. The gateway may fail over to another
+    provider; if none is available the error propagates so the caller can
+    degrade gracefully."""
+
+
+class LLMRateLimited(Exception):
+    """Raised when a provider keeps returning 429 after the bounded retry budget
+    is exhausted (Retry-After honoured when present, else jittered exponential
+    backoff). Distinct from LLMProviderUnavailable so callers can back off on
+    rate limits separately from provider outages."""
+
+
+class LLMTimeout(Exception):
+    """Raised when a provider call exceeds the configured HTTP timeout
+    (Settings.llm_timeout_seconds). NEVER retried (owner decision D2): a
+    timed-out request may have COMPLETED and been billed by the provider while
+    the response was lost, so retrying it could spend real money twice for at
+    most one recorded ledger row. The SDK timeout exception is chained for
+    diagnosis; neither message carries key material."""
+
+
+class LLMMalformedResponse(Exception):
+    """Raised when the provider returns a 2xx whose body cannot be parsed as a
+    Message. A parse failure is a PROVIDER failure, and it is NOT retried
+    (owner decision D4): a served-but-unparseable response means the provider
+    completed — and billed — the generation, so a retry would double-spend
+    exactly like a retried timeout. The parser error is chained for diagnosis;
+    neither message carries key material."""
+
+
+class LLMAuthenticationError(Exception):
+    """Raised on a 401 from the provider — fail closed immediately, no retry.
+
+    The message is static and carries NO key material; the originating SDK
+    exception is deliberately not chained, so no credential can leak into the
+    exception string, a log record, or an emitted event via this path."""
+
+
+class LLMModelNotPriced(Exception):
+    """Raised when a concrete provider model id has no configured price entry.
+
+    Cost estimation keys on the EXACT concrete model id (not a substring), so an
+    unrecognized model id fails loudly instead of being mispriced as a default
+    tier — a wrong bill is worse than a loud error."""
 
 
 class LLMGenerateRequest(BaseModel):
@@ -93,9 +155,24 @@ class LLMGenerateRequest(BaseModel):
     governance_token_id: UUID
     org_id: str
 
+    # Attribution context — REQUIRED and threaded (never resolved by a DB
+    # lookup in the adapter): `correlation_id` is the run-level id minted by
+    # the caller's entrypoint (e.g. AgentExecutionService's run_id or the
+    # Orchestrator's correlation_id) and `agent_id` is the acting agent
+    # (GovernanceToken.agent_id on token-bearing paths). Required fields turn
+    # a missed construction site into a type error, not a silent null.
+    correlation_id: UUID
+    agent_id: str
+
     # Optional run-budget context. When set, adapters refuse a call whose
     # requested_max_tokens exceeds (max_token_budget - tokens_used_so_far)
     # BEFORE any provider egress → TokenBudgetExceeded.
+    # UNWIRED TODAY: no live construction site sets either field, so the
+    # adapter's `_check_budget` short-circuits on its `is None` guard every
+    # time. The budget actually enforced pre-egress is the GovernanceToken's
+    # (contracts/token.py BUDGET stage). See the GAP note in the module
+    # docstring. Left in place — wiring them is a separate decision, not dead
+    # code to delete.
     max_token_budget: int | None = None
     tokens_used_so_far: int | None = None
 
@@ -119,6 +196,22 @@ class LLMGenerateWithToolsRequest(BaseModel):
 
     governance_token_id: UUID
     org_id: str
+
+    # Attribution context — same contract as LLMGenerateRequest.
+    correlation_id: UUID
+    agent_id: str
+
+    # Optional run-budget context. When set, adapters refuse a call whose
+    # requested_max_tokens exceeds (max_token_budget - tokens_used_so_far)
+    # BEFORE any provider egress → TokenBudgetExceeded.
+    # UNWIRED TODAY: no live construction site sets either field, so the
+    # adapter's `_check_budget` short-circuits on its `is None` guard every
+    # time. The budget actually enforced pre-egress is the GovernanceToken's
+    # (contracts/token.py BUDGET stage). See the GAP note in the module
+    # docstring. Left in place — wiring them is a separate decision, not dead
+    # code to delete.
+    max_token_budget: int | None = None
+    tokens_used_so_far: int | None = None
 
 
 class LLMUsage(BaseModel):

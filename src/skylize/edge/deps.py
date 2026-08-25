@@ -9,6 +9,7 @@ from fastapi import Depends, HTTPException, Request
 from ..bootstrap import Container
 from ..schemas.base import RequestContext
 from .auth import build_request_context
+from .errors import CodedHTTPException, ErrorCode
 from .rate_limit import RateLimiter
 
 
@@ -132,12 +133,48 @@ async def enforce_rate_limit(
     return ctx
 
 
+async def enforce_anonymous_rate_limit(
+    request: Request,
+    limiter: RateLimiter = Depends(get_rate_limiter),
+) -> None:
+    """Rate limit a route that runs BEFORE authentication.
+
+    `enforce_rate_limit` cannot be used on `/auth/register|login|refresh`: it
+    resolves `get_context` first, so an unauthenticated caller is refused with
+    401 before any limiting happens — it would break the very routes that mint
+    the first credential. There is no `org_id` to key on at that point, so this
+    keys on the peer address instead.
+
+    TWO HONEST LIMITS, both of which need the Redis move (`rate_limit.py:4-5`)
+    or a trusted proxy header to close:
+      * The peer address is `request.client.host` — deliberately NOT
+        X-Forwarded-For, which any caller can set. Behind a load balancer that
+        collapses to the balancer's address, i.e. one shared bucket, which is
+        strictly more restrictive than intended, never less.
+      * The limiter is in-process (`rate_limit.py:16`), so the effective limit
+        multiplies by worker and replica count.
+
+    Keys are prefixed so an address can never collide with an `org_id` bucket.
+    """
+    peer = request.client.host if request.client else "unknown"
+    if not limiter.allow(f"anon:{peer}"):
+        raise HTTPException(status_code=429, detail="rate limit exceeded")
+
+
 def require_role(
     role: str, *, resolver: Callable[..., Awaitable[RequestContext]] = get_context
 ) -> Callable[..., Awaitable[RequestContext]]:
     async def _checker(ctx: RequestContext = Depends(resolver)) -> RequestContext:
         if role not in ctx.roles:
-            raise HTTPException(status_code=403, detail=f"requires role: {role}")
+            # AUTHORIZATION_FAILED, not a governance outcome: the presented
+            # credential lacks the role, so the handler never ran and nothing
+            # about the request's content was evaluated. Same 403 status and
+            # same detail string as before; only `code` is new.
+            raise CodedHTTPException(
+                status_code=403,
+                detail=f"requires role: {role}",
+                code=ErrorCode.AUTHORIZATION_FAILED,
+            )
         return ctx
 
     return _checker
@@ -156,8 +193,13 @@ def require_any_role(
 
     async def _checker(ctx: RequestContext = Depends(resolver)) -> RequestContext:
         if allowed.isdisjoint(ctx.roles):
-            raise HTTPException(
-                status_code=403, detail=f"requires one of roles: {sorted(allowed)}"
+            # See require_role: this 403 is about the CALLER, never about the
+            # proposal. On /agents/execute it is the case a bare 403 used to
+            # make indistinguishable from a decision-engine REJECT.
+            raise CodedHTTPException(
+                status_code=403,
+                detail=f"requires one of roles: {sorted(allowed)}",
+                code=ErrorCode.AUTHORIZATION_FAILED,
             )
         return ctx
 

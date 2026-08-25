@@ -104,7 +104,8 @@ class MemoryService:
                 hits = await self._qdrant.search(
                     query_vector=query_vec,
                     top_k=k,
-                    filters={"org_id": org_id, "namespace": namespace},
+                    filters={"namespace": namespace},
+                    org_id=org_id,
                 )
                 # hits from QdrantAdapter are plain dicts with score + payload
                 for h in hits:
@@ -310,8 +311,8 @@ class MemoryService:
             await self._qdrant.upsert_vector(
                 doc_id=doc_id,
                 vector=vec,
+                org_id=org_id,
                 metadata={
-                    "org_id": org_id,
                     "namespace": namespace,
                     "entry_id": str(entry_id),
                     "agent_id": agent_id,

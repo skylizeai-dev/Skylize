@@ -160,14 +160,28 @@ class CostLedgerDAL:
         self._db = db
 
     async def resolve_price(self, obs: CostObservation) -> PriceSnapshot:
+        """Resolve the active price for one observation (see resolve_price_for)."""
+        return await self.resolve_price_for(
+            org_id=obs.org_id,
+            provider=obs.provider,
+            model=obs.model,
+            occurred_at=obs.occurred_at,
+        )
+
+    async def resolve_price_for(
+        self, *, org_id: str, provider: str, model: str, occurred_at: datetime
+    ) -> PriceSnapshot:
         """Resolve the active price for (provider, model) at ``occurred_at``.
+
+        Takes bare attribution keys (no token counts) so the gateway adapter
+        can run its PRE-CALL pricing gate before any usage exists to observe.
 
         Global-key-fallback shape (ADR-0006 §BYOK): a tenant-specific row
         (org_id = tenant) wins over the global row (org_id IS NULL); among
         matches the latest ``effective_from`` covering ``occurred_at`` wins.
         Raises ``PricingNotFound`` if nothing covers the point in time.
         """
-        async with self._db.tenant_session(obs.org_id) as conn:
+        async with self._db.tenant_session(org_id) as conn:
             row = await conn.fetchrow(
                 """
                 SELECT input_price_micros_per_mtok,
@@ -183,15 +197,15 @@ class CostLedgerDAL:
                 ORDER BY (org_id IS NULL), effective_from DESC
                 LIMIT 1
                 """,
-                obs.provider,
-                obs.model,
-                obs.org_id,
-                obs.occurred_at,
+                provider,
+                model,
+                org_id,
+                occurred_at,
             )
         if row is None:
             raise PricingNotFound(
-                f"No model_pricing for provider={obs.provider!r} model={obs.model!r} "
-                f"org={obs.org_id!r} at {obs.occurred_at.isoformat()}"
+                f"No model_pricing for provider={provider!r} model={model!r} "
+                f"org={org_id!r} at {occurred_at.isoformat()}"
             )
         return PriceSnapshot(
             input_price_micros_per_mtok=row["input_price_micros_per_mtok"],
@@ -200,15 +214,32 @@ class CostLedgerDAL:
             currency=row["currency"],
         )
 
-    async def record_cost(self, obs: CostObservation) -> CostRecord:
+    async def record_cost(
+        self, obs: CostObservation, *, price: PriceSnapshot | None = None
+    ) -> CostRecord:
         """Record one immutable cost row transactionally.
 
         Resolves + snapshots the price, computes ``cost_micros`` (Decimal,
         HALF-UP), and INSERTs with ``ON CONFLICT (org_id, idempotency_key) DO
         NOTHING`` — a retried call collapses to the single existing row
         (``inserted=False``). A retried LLM call never double-charges.
+
+        ``price`` — OPTIONAL pre-resolved snapshot (owner decision DEC-A: resolve
+        the price ONCE per call). The gateway adapter's pre-call pricing gate has
+        already resolved a price for this exact call, and ``obs.model`` is the
+        provider's RESOLVED model id, which can differ from the id the gate
+        priced (Anthropic resolves aliases). Re-resolving from ``obs.model``
+        therefore risks two outcomes, both wrong AFTER the provider has already
+        billed: a DIFFERENT rate than the one the spend ceiling was checked
+        against, or ``PricingNotFound`` — which would abort the write and lose
+        the record of money already owed. Passing the gate's snapshot makes it
+        the single price for the estimate, the returned cost, and this row.
+
+        Omitted (the default), behaviour is exactly as before: the price is
+        resolved here from ``obs``. Existing callers are unaffected.
         """
-        price = await self.resolve_price(obs)
+        if price is None:
+            price = await self.resolve_price(obs)
         cost_micros = compute_cost_micros(
             input_tokens=obs.input_tokens,
             output_tokens=obs.output_tokens,
@@ -392,3 +423,36 @@ class CostLedgerDAL:
         return micros_to_unit(
             await self.period_total_micros(org_id, provider, billing_period)
         )
+
+    async def org_period_total_micros(
+        self, org_id: str, billing_period: str
+    ) -> int:
+        """Org-wide SUM of ``cost_micros`` across ALL providers for a period.
+
+        The org spend ceiling is ORG-WIDE, across every provider (owner decision
+        D8), so the aggregate it checks against must NOT be provider-scoped. This
+        is ``period_total_micros`` with the ``provider`` filter dropped and
+        otherwise IDENTICAL:
+
+          * kept identical — runs inside ``tenant_session(org_id)`` so the RLS
+            ``tenant_isolation`` policy scopes the SUM to this org; sums
+            ``cost_micros`` (charges NET of reversals, since reversals are
+            negative rows); ``COALESCE(..., 0)`` so an org with no rows totals 0;
+            returns an exact integer (micro-USD), never a float;
+          * changed — WHERE has no ``provider`` predicate, so the total spans
+            every provider in the period.
+
+        The existing provider-scoped ``period_total_micros`` is left untouched —
+        other callers (reconciliation against a single provider invoice line) rely
+        on it.
+        """
+        async with self._db.tenant_session(org_id) as conn:
+            total = await conn.fetchval(
+                """
+                SELECT COALESCE(SUM(cost_micros), 0)
+                FROM ai_cost_ledger
+                WHERE billing_period = $1
+                """,
+                billing_period,
+            )
+        return int(total)

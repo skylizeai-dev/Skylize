@@ -72,10 +72,12 @@ class QdrantMemoryRecallPort:
         self, *, query: str, top_k: int, org_id: str, namespace: str | None
     ) -> list[MemoryHit]:
         vector = await self._embeddings.embed(query)
-        filters: dict[str, str] = {"org_id": org_id}
+        # org_id is passed as the adapter's own scope argument (it rejects an
+        # org_id smuggled inside `filters`); `filters` only ever narrows further.
+        filters: dict[str, str] = {}
         if namespace is not None:
             filters["namespace"] = namespace
-        results = await self._qdrant.search(vector, top_k, filters)
+        results = await self._qdrant.search(vector, top_k, filters, org_id=org_id)
         return [
             MemoryHit(
                 content=str(item.get("content_text") or item.get("content") or ""),

@@ -1,4 +1,4 @@
-"""Extra outbox_poller tests: run() loop, payload deserialize failure, dict payload."""
+"""Extra outbox_poller tests: run() loop, dict payload handling."""
 from __future__ import annotations
 
 import asyncio
@@ -17,7 +17,7 @@ def _make_row(
     stream_key: str = "evt:t:decisions",
     tenant_id: str = "t",
     db_id: int = 1,
-    payload = '{"key": "val"}',
+    payload=None,
     event_type: str = "decision.approved",
     retry_count: int = 0,
 ):
@@ -26,7 +26,8 @@ def _make_row(
         "stream_key": stream_key,
         "tenant_id": tenant_id,
         "id": db_id,
-        "payload": payload,
+        # dict, as the pool's JSONB codec now yields on a real fetch
+        "payload": payload if payload is not None else {"key": "val"},
         "event_type": event_type,
         "retry_count": retry_count,
     }
@@ -93,27 +94,7 @@ async def test_run_recovers_from_exception():
 
 
 # ---------------------------------------------------------------------------
-# Payload deserialize failure → mark_failed called, xadd NOT called
-# ---------------------------------------------------------------------------
-
-async def test_payload_deserialize_failure_marks_failed():
-    poller, conn, redis = _poller()
-    row = _make_row(payload="not-valid-json-{{{")
-    conn.fetch.return_value = [row]
-    conn.execute = AsyncMock()
-
-    await poller._poll_and_publish()
-
-    # xadd should NOT have been called
-    redis.xadd.assert_not_awaited()
-    # mark_failed → UPDATE decision_outbox SET failed_at
-    conn.execute.assert_awaited()
-    sql = conn.execute.call_args.args[0]
-    assert "failed_at" in sql
-
-
-# ---------------------------------------------------------------------------
-# Dict payload (asyncpg JSONB returns dict, not str) → processed normally
+# Dict payload (the pool's JSONB codec yields dicts) → processed normally
 # ---------------------------------------------------------------------------
 
 async def test_dict_payload_processed_without_json_parse(settings):

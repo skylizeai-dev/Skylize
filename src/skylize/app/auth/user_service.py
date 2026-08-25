@@ -18,6 +18,15 @@ class DuplicateEmailError(Exception):
     pass
 
 
+class OrgNotAvailableError(Exception):
+    """Registration was refused: the org_id cannot be used to create a NEW org.
+
+    Either the org already has at least one user, or a concurrent registration
+    won the owner race. Carries no detail about which — the caller only needs to
+    know the identifier is unavailable.
+    """
+
+
 class InvalidCredentialsError(Exception):
     pass
 
@@ -42,27 +51,40 @@ class UserAuthService:
         password: str,
         display_name: str | None = None,
     ) -> UserRow:
+        """Create a NEW organisation and its owner. Refuses an existing org.
+
+        This endpoint is unauthenticated, so what it is allowed to do bounds what
+        a stranger can do. It previously admitted any subsequent registrant to an
+        EXISTING org as `viewer` — a role accepted on `GET /api/v1/agents` and on
+        every deliverable read route — so anyone who knew an org_id could read
+        that tenant's deliverables. Registration now mints an owner for an org
+        that has no users, or refuses.
+
+        The refusal is decided by the STORE, not here: `create_owner_of_new_org`
+        is an atomic conditional write backed by a unique constraint, so two
+        simultaneous registrations for the same new org cannot both become owner.
+        A read-then-write in this method could not make that guarantee.
+        """
         existing = await self._repo.get_by_email(email)
         if existing is not None:
             raise DuplicateEmailError(f"email already registered: {email}")
-
-        # First user in the org becomes owner; subsequent users start as viewer.
-        existing_users = await self._repo.list_by_org(org_id)
-        roles = ["owner"] if not existing_users else ["viewer"]
 
         now = datetime.now(timezone.utc)
         row = UserRow(
             user_id=uuid4(),
             org_id=org_id,
+            # Always owner: this path creates the org, and there is no other role
+            # it could legitimately mint for an org that does not exist yet.
+            roles=["owner"],
             email=email.lower().strip(),
             password_hash=hash_password(password),
             display_name=display_name,
-            roles=roles,
             is_active=True,
             created_at=now,
             last_login_at=None,
         )
-        await self._repo.create_user(row)
+        if not await self._repo.create_owner_of_new_org(row):
+            raise OrgNotAvailableError(org_id)
         return row
 
     async def login(self, *, email: str, password: str) -> LoginResult:

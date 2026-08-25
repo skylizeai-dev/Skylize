@@ -19,7 +19,12 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # disable_existing_loggers=False: fileConfig's default (True) sets
+    # `.disabled` on every logger already instantiated — including `skylize` —
+    # so an IN-PROCESS upgrade (integration-test fixtures, programmatic ops
+    # invocations) would silence the application's logging for the rest of the
+    # process. Alembic only needs its own loggers configured here.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = None  # raw-SQL migrations; no autogenerate
 

@@ -145,6 +145,8 @@ def _request(
         requested_max_tokens=max_tokens,
         governance_token_id=uuid4(),
         org_id="org_1",
+        correlation_id=uuid4(),
+        agent_id="agent_test",
         capability=capability,
     )
 
@@ -242,9 +244,7 @@ async def test_generate_structured_returns_validated_instance(
     schema: type[BaseModel],
 ) -> None:
     gateway = FakeGateway([VALID_JSON[schema]])
-    result = await generate_structured(
-        gateway, _request(), schema, correlation_id=uuid4()
-    )
+    result = await generate_structured(gateway, _request(), schema)
     assert isinstance(result, schema)
     assert len(gateway.calls) == 1  # no fallback needed
 
@@ -252,9 +252,7 @@ async def test_generate_structured_returns_validated_instance(
 async def test_generate_structured_strips_code_fence() -> None:
     fenced = "```json\n" + VALID_JSON[FlatSchema] + "\n```"
     gateway = FakeGateway([fenced])
-    result = await generate_structured(
-        gateway, _request(), FlatSchema, correlation_id=uuid4()
-    )
+    result = await generate_structured(gateway, _request(), FlatSchema)
     assert result.name == "x"
 
 
@@ -262,11 +260,9 @@ async def test_generate_structured_strips_code_fence() -> None:
 async def test_invalid_then_valid_triggers_single_retry_and_audits() -> None:
     gateway = FakeGateway(['{"name":"x"}', VALID_JSON[FlatSchema]])  # 1st missing score
     audit = RecordingAudit()
-    corr = uuid4()
+    req = _request()
 
-    result = await generate_structured(
-        gateway, _request(), FlatSchema, correlation_id=corr, audit=audit
-    )
+    result = await generate_structured(gateway, req, FlatSchema, audit=audit)
 
     assert result.score == 3
     assert len(gateway.calls) == 2  # exactly one retry
@@ -274,7 +270,7 @@ async def test_invalid_then_valid_triggers_single_retry_and_audits() -> None:
     rec = audit.records[0]
     assert rec["action_type"] == STRUCTURED_FALLBACK_ACTION
     assert rec["result"] == "failed"
-    assert rec["correlation_id"] == corr
+    assert rec["correlation_id"] == req.correlation_id
 
 
 async def test_two_invalid_responses_raise_structured_validation_error() -> None:
@@ -282,9 +278,7 @@ async def test_two_invalid_responses_raise_structured_validation_error() -> None
     audit = RecordingAudit()
 
     with pytest.raises(StructuredValidationError) as exc_info:
-        await generate_structured(
-            gateway, _request(), FlatSchema, correlation_id=uuid4(), audit=audit
-        )
+        await generate_structured(gateway, _request(), FlatSchema, audit=audit)
 
     assert exc_info.value.schema_name == "FlatSchema"
     assert exc_info.value.raw_text == '{"still":"bad"}'
@@ -294,9 +288,7 @@ async def test_two_invalid_responses_raise_structured_validation_error() -> None
 
 async def test_fallback_without_audit_sink_still_retries() -> None:
     gateway = FakeGateway(['{"bad":1}', VALID_JSON[FlatSchema]])
-    result = await generate_structured(
-        gateway, _request(), FlatSchema, correlation_id=uuid4(), audit=None
-    )
+    result = await generate_structured(gateway, _request(), FlatSchema, audit=None)
     assert result.name == "x"
     assert len(gateway.calls) == 2
 
@@ -313,7 +305,6 @@ async def test_token_budget_exceeded_propagates_without_fallback() -> None:
             gateway,
             _request(max_tokens=5000),  # over the 100 remaining
             FlatSchema,
-            correlation_id=uuid4(),
             audit=audit,
         )
     # Budget refusal is pre-egress: no retry, no fallback audit.

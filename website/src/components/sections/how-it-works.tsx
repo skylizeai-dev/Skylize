@@ -3,18 +3,18 @@ import { Container, Eyebrow, Reveal, RevealGroup, RevealItem } from "@/component
 const steps = [
   {
     num: "01",
-    title: "Map the operation",
-    body: "We trace how work actually moves through your business — every handoff, queue, and decision — and find where the leverage is.",
+    title: "Mint the authority",
+    body: "Before an agent runs, it is issued a signed token: the tools it may call, the budget it may spend, the human it acts on behalf of, and the minute it expires.",
   },
   {
     num: "02",
-    title: "Deploy the agents",
-    body: "Agents stand up on your existing stack, scoped to real workflows, with guardrails and human approval exactly where it matters.",
+    title: "Verify at the call site",
+    body: "Every outbound action is checked against that token where it is made. In scope and under ceiling, it proceeds. Otherwise it is refused, or held at an approval gate for a human.",
   },
   {
     num: "03",
-    title: "Scale what works",
-    body: "Proven workflows go fully autonomous. Coverage expands as trust compounds — capacity grows without new headcount.",
+    title: "Keep the evidence",
+    body: "Allowed or refused, the decision is written with its token, scope, and delegation chain — so any action can be traced back to the authority that permitted it.",
   },
 ];
 
@@ -25,7 +25,7 @@ export function HowItWorks() {
         <Reveal className="max-w-3xl">
           <Eyebrow index="03">How it works</Eyebrow>
           <h2 className="mt-6 text-balance text-[clamp(2rem,4.5vw,3.25rem)] font-semibold leading-[1.02] tracking-[-0.03em] text-foreground">
-            From manual operation to autonomous system in three moves.
+            Authority is granted, checked, and recorded.
           </h2>
         </Reveal>
 

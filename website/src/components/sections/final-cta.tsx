@@ -26,7 +26,7 @@ export function FinalCta() {
         body: JSON.stringify({
           name: trimmed,
           email: trimmed,
-          message: "Strategy call request from the landing-page contact form.",
+          message: "Design partner application from the landing-page contact form.",
         }),
         signal: AbortSignal.timeout(10_000),
       });
@@ -65,11 +65,12 @@ export function FinalCta() {
       <Container>
         <div className="mx-auto flex max-w-2xl flex-col items-center py-[clamp(6rem,16vh,11rem)] text-center">
           <h2 className="text-balance text-[clamp(2.5rem,6vw,4.5rem)] font-semibold leading-[0.98] tracking-[-0.035em] text-foreground">
-            Find your operational altitude.
+            Govern the agents before you trust them.
           </h2>
           <p className="mt-6 max-w-lg text-lg leading-relaxed text-muted-foreground">
-            Book a strategy call and we&apos;ll map where Skylize takes the most
-            work off your team — and what it returns. No deck, just your operation.
+            We are taking a small number of design partners. Tell us the
+            workflow you cannot yet let an agent touch, and we&apos;ll show you the
+            enforcement path that would make it safe.
           </p>
 
           <div className="mt-10 w-full max-w-md">
@@ -115,7 +116,7 @@ export function FinalCta() {
                     disabled={status === "pending"}
                     className="sm:shrink-0"
                   >
-                    {status === "pending" ? "Sending…" : "Book Strategy Call"}
+                    {status === "pending" ? "Sending…" : "Apply as a Design Partner"}
                   </CtaButton>
                 </motion.form>
               )}
@@ -126,7 +127,7 @@ export function FinalCta() {
               </p>
             ) : null}
             <p className="mt-4 font-mono text-[11px] tracking-[0.1em] text-muted-foreground/70 uppercase">
-              SOC 2 Type II · Your data stays yours
+              Pre-revenue · No customer data in shared models
             </p>
           </div>
         </div>

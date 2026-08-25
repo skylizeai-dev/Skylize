@@ -11,8 +11,8 @@ import { EASE_ALTITUDE } from "@/lib/motion";
 const links = [
   { label: "Platform", href: "#solution" },
   { label: "How it works", href: "#how-it-works" },
-  { label: "Agents", href: "#agents" },
-  { label: "Results", href: "#roi" },
+  { label: "Controls", href: "#controls" },
+  { label: "Status", href: "#status" },
   { label: "FAQ", href: "#faq" },
 ];
 
@@ -88,7 +88,7 @@ export function Navigation() {
               Sign in
             </a>
             <CtaButton href="#contact" arrow>
-              Book Strategy Call
+              Become a Design Partner
             </CtaButton>
           </div>
 
@@ -151,7 +151,7 @@ export function Navigation() {
                   className="w-full"
                   onClick={() => setOpen(false)}
                 >
-                  Book Strategy Call
+                  Apply as a Design Partner
                 </CtaButton>
                 <CtaButton
                   href="/console/login"

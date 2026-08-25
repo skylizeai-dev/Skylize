@@ -34,19 +34,25 @@ src/
 │   │   ├── altitude-line  # the signature hairline
 │   │   ├── container      # measure + section rhythm
 │   │   └── eyebrow / counter / cta-button / reveal / logo
-│   └── sections/          # the 13 landing-page sections
-│       ├── navigation / hero / altitude-dashboard / client-logos
-│       ├── problem / solution / how-it-works / agents / roi
-│       └── case-studies / testimonials / faq / final-cta / footer
+│   └── sections/          # the 9 landing-page sections
+│       ├── navigation / hero / hero-workflow-demo
+│       ├── problem / solution / how-it-works / controls
+│       └── status / faq / final-cta / footer
 ├── hooks/                 # use-intersection, use-media-query
 ├── lib/                   # cn(), motion tokens
 └── styles/tokens.css      # supplemental (timing, z-index, rhythm)
 ```
 
-The hero centerpiece — the **Operational Altitude Dashboard**
-(`sections/altitude-dashboard.tsx`) — is a bespoke visualization of agents,
-workflows, operational systems, and performance, drawn entirely from the
-altitude language (hairlines, ascending throughput curve, live system rows).
+The hero centerpiece (`sections/hero-workflow-demo.tsx`) reuses the REAL
+console components — the same build dial and ActionCard — driven by a scripted
+local timeline. It is provably inert: no fetch, no live build controller, only
+pure routing helpers. That is deliberate, and the reason it may simulate
+timing: it is the one surface with no backend action behind it.
+
+Public copy carries no customer names, no measured results, and no compliance
+badges. Trust signals on this site must be properties of the architecture
+(signed tokens, kill switch, audit trail), which hold before the first
+customer exists. See `sections/controls.tsx` for the standing rule.
 
 ## Develop
 

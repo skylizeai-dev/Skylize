@@ -241,7 +241,24 @@ class UserRepository(Protocol):
     """Human user store + refresh-token lifecycle. Email lookup is cross-tenant
     (login); everything else is scoped by `org_id` at the call site."""
 
-    async def create_user(self, row: UserRow) -> None: ...
+    async def create_user(self, row: UserRow) -> None:
+        """Unconditional insert. NOT the registration path — see below."""
+        ...
+
+    async def create_owner_of_new_org(self, row: UserRow) -> bool:
+        """Insert `row` as the org's owner ONLY IF the org has no users yet.
+
+        Returns True when the row was written, False when the org was already
+        claimed — by an existing user, or by a concurrent registration that won
+        the race. Never raises for the already-claimed case.
+
+        This exists instead of a read-then-write in the service because
+        registration is unauthenticated and is the only owner-minting path: two
+        simultaneous registrations for the same new org must not both become
+        owner. Implementations MUST settle that race in the store (a constraint
+        or an atomic conditional write), never by checking first.
+        """
+        ...
 
     async def get_by_email(self, email: str) -> UserRow | None: ...
 
@@ -371,6 +388,135 @@ class ProcessedEventStore(Protocol):
     async def is_processed(self, key: str, *, org_id: str) -> bool: ...
 
     async def mark_processed(self, key: str, outcome: str, *, org_id: str) -> None: ...
+
+
+# ---------------------------------------------------------------------------
+# HITL escalation write (synchronous request-path decision gate)
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True, slots=True)
+class HitlEscalation:
+    """One human-in-the-loop escalation the SYNCHRONOUS decision gate persists.
+
+    Carries BOTH the parent `decisions` row and the `hitl_queue` row fields:
+    `hitl_queue.decision_id` is an FK to `decisions`, and the synchronous request
+    path (unlike the async OPA publisher) has no separate decisions projection to
+    write the parent first. The `hitl_queue` fields mirror the columns the async
+    writer (`decision_engine/hitl_writer.py`) populates, so a row from either
+    writer is schema-compatible (owner decision K3)."""
+
+    # -- parent `decisions` row --------------------------------------------
+    decision_id: UUID
+    org_id: str
+    correlation_id: UUID
+    causation_event_id: UUID | None
+    partition_key: str
+    proposing_agent: str
+    authority_level: str
+    action_kind: str
+    proposal_json: dict[str, Any]
+    outcome: str  # "deferred_to_human"
+    outcome_reason: str | None
+    policy_version: str | None
+    score_json: dict[str, Any] | None
+    governance_token_id: UUID | None
+    # -- child `hitl_queue` row (the id + escalation reason + lifecycle) ----
+    hitl_id: UUID
+    trigger_reason: str
+    expires_at: datetime
+    created_at: datetime
+    # Serialized HitlReplayEnvelope (schemas/hitl.py) — what a human approval
+    # executes (owner decisions K4/K6). None = no replayable execution (the
+    # OPA-side writer never sets it).
+    request_json: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class HitlQueueItem:
+    """One hitl_queue row as read back for the review/approval path."""
+
+    hitl_id: UUID
+    org_id: str
+    decision_id: UUID | None
+    correlation_id: UUID
+    partition_key: str
+    trigger_reason: str
+    proposal_json: dict[str, Any]
+    request_json: dict[str, Any] | None
+    status: str  # pending|approved|rejected|modified|expired
+    verdict_by: str | None
+    verdict_json: dict[str, Any] | None
+    verdict_at: datetime | None
+    expires_at: datetime | None
+    created_at: datetime
+
+
+class HitlQueueRepository(Protocol):
+    """Writes a human-in-the-loop escalation (and its parent decision) for the
+    SYNCHRONOUS request-path decision gate, and serves the review/approval
+    reads + the exactly-once verdict claim.
+
+    The async OPA engine has its OWN writer (`decision_engine/hitl_writer.py`);
+    this is the request-path sibling. Nothing on the request path imports the
+    `decision_engine` package (owner decision K3)."""
+
+    async def enqueue(self, escalation: HitlEscalation) -> None: ...
+
+    async def list_pending(
+        self, org_id: str, *, limit: int = 50, offset: int = 0
+    ) -> tuple[list[HitlQueueItem], int]:
+        """Newest-first pending rows for one org (partial index
+        idx_hitl_org_pending) plus the total pending count."""
+        ...
+
+    async def get(self, hitl_id: UUID, org_id: str) -> HitlQueueItem | None: ...
+
+    async def claim(
+        self,
+        hitl_id: UUID,
+        org_id: str,
+        *,
+        status_to: str,  # 'approved' | 'rejected'
+        verdict_by: str,
+        verdict_json: dict[str, Any],
+        verdict_at: datetime,
+        require_request: bool,
+    ) -> HitlQueueItem | None:
+        """The exactly-once guard: a CONDITIONAL status update, never a
+        read-then-write. Flips status and records the verdict only when the row
+        is still 'pending', not past expires_at, and (when `require_request`)
+        carries a replayable request_json. Returns the claimed row, or None if
+        the predicate did not match (caller re-reads to type the refusal)."""
+        ...
+
+    async def release(self, hitl_id: UUID, org_id: str, *, from_status: str) -> bool:
+        """Return a claimed row to 'pending' (verdict fields cleared) after a
+        TRANSIENT failed execution, so the approved work is never silently lost.
+        Only a row currently in `from_status` is released. For a PERMANENT
+        failure use `terminate` — releasing an unreplayable row loops it
+        forever."""
+        ...
+
+    async def terminate(self, hitl_id: UUID, org_id: str, *, from_status: str) -> bool:
+        """Move a claimed row to the TERMINAL 'expired' status after a PERMANENT
+        failure — one that will recur identically on every future approval
+        (envelope validation failure, input-schema drift, contract no longer
+        registered), because `request_json` is written once at enqueue and never
+        rewritten.
+
+        'expired' is an existing status-vocabulary value
+        (0001_initial_schema.py:212-214) and migration 0015 already applies it to
+        exactly this class of row (`request_json IS NULL AND status='pending'`);
+        no new status is invented. The verdict columns are deliberately LEFT IN
+        PLACE: a reviewer really did approve, and the row's history should say so.
+        Only a row currently in `from_status` is terminated."""
+        ...
+
+    async def update_verdict_json(
+        self, hitl_id: UUID, org_id: str, verdict_json: dict[str, Any]
+    ) -> None:
+        """Enrich the recorded verdict (e.g. with the produced deliverable_id)."""
+        ...
 
 
 # ---------------------------------------------------------------------------

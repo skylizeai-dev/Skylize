@@ -245,6 +245,9 @@ class LLMAgentRunner:
                 "system": run_input.system,
                 "model": run_input.model,
                 "requested_max_tokens": effective_budget,
+                # The run-level id this runner minted above — dispatch_llm
+                # threads it onto LLMGenerateRequest.correlation_id.
+                "correlation_id": str(run_id),
             },
         )
         allowed_tools = [grant.tool_id for grant in contract.allowed_tools]

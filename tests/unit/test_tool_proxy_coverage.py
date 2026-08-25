@@ -95,7 +95,11 @@ def _tool_call(token, requested: int = 100):
         tool_id=TOOL,
         governance_token_id=token.token_id,
         org_id=ORG,
-        params={"requested_max_tokens": requested, "prompt": "hi"},
+        params={
+            "requested_max_tokens": requested,
+            "prompt": "hi",
+            "correlation_id": str(uuid4()),
+        },
     )
 
 
@@ -232,6 +236,8 @@ async def test_llm_generate_handler_routes_to_gateway() -> None:
         "requested_max_tokens": 100,
         "governance_token_id": str(uuid4()),
         "org_id": ORG,
+        "correlation_id": str(uuid4()),
+        "agent_id": "agent_test",
     }
     result = await handler.handle(payload, ORG)
     assert result["text"] == "from gateway"

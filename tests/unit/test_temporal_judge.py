@@ -57,6 +57,8 @@ def _context(**overrides: Any) -> dict[str, Any]:
         "node": "draft_copy",
         "org_id": ORG,
         "governance_token_id": str(uuid4()),
+        "correlation_id": str(uuid4()),
+        "agent_id": "judged_node_agent",
     }
     ctx.update(overrides)
     return ctx
@@ -136,6 +138,7 @@ def _run_ctx() -> RunContext:
         correlation_id=str(uuid4()),
         thread_id="t1",
         triggered_by="test",
+        governance_token_id=uuid4(),
     )
 
 
@@ -150,6 +153,7 @@ async def test_activity_returns_structured_verdict_from_llm_judge() -> None:
             node_name="draft_copy",
             output={"copy": "fine"},
             success_criteria={"tone": "neutral"},
+            agent_id="draft_copy_agent",
         )
     )
     assert verdict.passed is True
@@ -160,7 +164,9 @@ async def test_activity_returns_structured_verdict_from_llm_judge() -> None:
 async def test_activity_without_judge_fails_closed() -> None:
     acts = WorkflowActivities(repo=None, builder=None, judge=None, minter=None)  # type: ignore[arg-type]
     verdict = await acts.run_judge_verification(
-        JudgeRequest(ctx=_run_ctx(), node_name="n", output={}, success_criteria={})
+        JudgeRequest(
+            ctx=_run_ctx(), node_name="n", output={}, success_criteria={}, agent_id="n_agent",
+        )
     )
     assert verdict.passed is False
     assert verdict.raw["unverified"] is True

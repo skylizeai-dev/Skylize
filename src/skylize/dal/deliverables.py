@@ -23,7 +23,7 @@ def _row(rec: Any) -> DeliverableRow:
         status=rec["status"],
         version=rec["version"],
         parent_id=rec["parent_id"],
-        metadata_json=dict(rec["metadata_json"]) if rec["metadata_json"] else {},
+        metadata_json=rec["metadata_json"] or {},
         created_at=rec["created_at"],
         updated_at=rec["updated_at"],
         approved_at=rec["approved_at"],

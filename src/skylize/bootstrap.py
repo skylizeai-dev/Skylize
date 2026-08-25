@@ -13,6 +13,7 @@ the Governance Authority, Audit service, and Orchestrator.
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass
@@ -20,6 +21,8 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .dal.connection import Database
+    from .dal.cost_ledger import CostLedgerDAL
+    from .dal.org_spend_ceiling import OrgSpendCeilingDAL
 
 from .adapters.llm.content_gate import GuardedLLMGateway, LLMContentGate
 from .adapters.llm.demo_adapter import DemoLLMAdapter
@@ -34,7 +37,11 @@ from .app.decision_engine import DecisionEngine
 from .app.deliverables.service import DeliverableService
 from .app.governance.authority import GovernanceAuthority
 from .app.governance.broadcast import GovernanceBroadcast
+from .app.hitl.service import HitlQueueService
 from .app.orchestrator import LLMStepRunner, Orchestrator
+from .app.principal.journal import JournalRepository, WorkJournal
+from .app.principal.provider import PrincipalAuthorityService, PrincipalRepository
+from .app.principal.spend import PostgresSpendRepository, SpendLedger
 from .app.tenants.service import TenantService
 from .config import Settings, get_settings
 from .contracts.registry import MVP_REGISTRY
@@ -45,6 +52,7 @@ from .dal.ports import (
     CapitalRepository,
     DeliverableRepository,
     GovernanceRepository,
+    HitlQueueRepository,
     ProcessedEventStore,
     TenantRepository,
     UserRepository,
@@ -53,6 +61,132 @@ from .events.bus import EventBus
 from .memory.knowledge_ingestion import KnowledgeIngestionService
 from .tools.builtin import default_tool_registry
 from .tools.proxy import ToolProxy
+
+
+class ConfigurationError(RuntimeError):
+    """The container cannot be wired from the current configuration.
+
+    Raised at composition time so a misconfigured deployment fails to build
+    rather than starting with a silently broken guarantee."""
+
+
+class LLMConfigurationError(ConfigurationError):
+    """The LLM gateway cannot be wired from the current configuration.
+
+    Raised at composition time so a misconfigured deployment fails to build
+    rather than serving fake demo output under a real workload."""
+
+
+log = logging.getLogger("skylize.bootstrap")
+
+
+def resolve_credential_encryption_key(settings: Settings) -> str:
+    """Return the credential-vault Fernet key, failing closed on a real backend.
+
+    Resolution order mirrors `app/governance/keys.py::load_signing_key`, which
+    answers the identical question for the Authority signing key:
+      1. `credential_encryption_key` (SKYLIZE_CREDENTIAL_ENCRYPTION_KEY).
+      2. (real backend) error — no key, no start.
+      3. (memory backend only) mint an ephemeral key.
+
+    Step 2 is the point. `org_credentials.encrypted_value` is NOT NULL
+    (migration 0007) and the row outlives the process that wrote it, but a
+    per-boot random key does not: every credential stored under one became
+    permanently undecryptable the moment that pod restarted, and the vault
+    surfaced it as `DecryptionError("wrong key or corrupted ciphertext")`
+    (app/credentials/encryption.py:20-21) — a corruption message for what was
+    really a configuration mistake made one restart earlier. The old fallback
+    made that outcome the DEFAULT for a production deployment that simply
+    forgot the variable, with no signal at boot. The ephemeral path survives
+    only for `backend == "memory"`, where `InMemoryCredentialRepository`
+    (bootstrap.py:230) discards the rows at process exit anyway, so there is
+    nothing left to be undecryptable.
+
+    The key is parsed here rather than at first use so a malformed or
+    placeholder value fails the boot too, with a message naming the variable,
+    instead of raising a bare `cryptography` ValueError deeper in the wiring.
+    """
+    key = settings.credential_encryption_key.strip()
+    if key:
+        try:
+            FernetEncryptor(key)
+        except Exception as exc:  # noqa: BLE001 — any parse failure is fatal
+            raise ConfigurationError(
+                "SKYLIZE_CREDENTIAL_ENCRYPTION_KEY is set but is not a valid "
+                f"Fernet key ({exc}). It must be urlsafe base64, 32 bytes. "
+                'Generate one with: python -c "from cryptography.fernet import '
+                'Fernet; print(Fernet.generate_key().decode())"'
+            ) from exc
+        return key
+
+    if settings.backend != "memory":
+        raise ConfigurationError(
+            "No credential encryption key configured. Set "
+            "SKYLIZE_CREDENTIAL_ENCRYPTION_KEY when SKYLIZE_BACKEND is not "
+            f"'memory' (got backend={settings.backend!r}). Credentials are "
+            "stored in org_credentials and outlive the process; an ephemeral "
+            "per-boot key would make every one of them undecryptable at the "
+            "next restart. Refusing to start. Generate a key with: python -c "
+            '"from cryptography.fernet import Fernet; '
+            'print(Fernet.generate_key().decode())" and hold it as a real '
+            "secret — losing it is losing every stored credential."
+        )
+
+    log.warning(
+        "No credential encryption key configured; generating an EPHEMERAL "
+        "Fernet key. This is allowed only for the in-memory/dev backend "
+        "(credentials are discarded at process exit) and must never be used "
+        "in production."
+    )
+    return FernetEncryptor.generate_key()
+
+
+async def verify_app_role_is_rls_subject(db: "Database") -> None:
+    """Refuse to start when the runtime database role can bypass RLS.
+
+    The Settings interlock (config.py `_require_distinct_app_dsn_on_a_real_backend`)
+    is a raw string comparison: it catches SKYLIZE_DB_APP_URL left empty or
+    copy-pasted equal to SKYLIZE_DB_URL, but any respelling of the same
+    superuser DSN (localhost vs 127.0.0.1, an added query parameter, a password
+    moved to .pgpass, postgres:// vs postgresql://) sails through it. The
+    authoritative check is not a string comparison — it is asking the database:
+    connect as the configured role and read its own pg_roles row. A SUPERUSER
+    or BYPASSRLS role bypasses every RLS policy regardless of FORCE ROW LEVEL
+    SECURITY.
+
+    Mirrors the pg_roles probe in tests/integration/test_postgres_isolation.py::
+    test_app_role_is_not_superuser_or_bypassrls, folded into one statement run
+    on the runtime's own pool.
+
+    A connection failure is NOT a disqualified role: asyncpg's own errors from
+    acquire/fetch propagate untouched, so an unreachable database surfaces as a
+    connectivity error, never as an RLS finding. ConfigurationError is raised
+    only from a successfully read pg_roles row.
+    """
+    async with db.pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT current_user AS rolname, rolsuper, rolbypassrls "
+            "FROM pg_roles WHERE rolname = current_user"
+        )
+    if row is None:  # pragma: no cover — current_user always has a pg_roles row
+        raise ConfigurationError(
+            "Could not read the runtime role's pg_roles row to verify it is "
+            "subject to RLS; refusing to start rather than assuming it is."
+        )
+    disqualifiers = [
+        name
+        for flag, name in ((row["rolsuper"], "SUPERUSER"), (row["rolbypassrls"], "BYPASSRLS"))
+        if flag
+    ]
+    if disqualifiers:
+        raise ConfigurationError(
+            f"Runtime database role {row['rolname']!r} (SKYLIZE_DB_APP_URL) has "
+            f"{' and '.join(disqualifiers)}. Such a role bypasses every "
+            "row-level-security policy regardless of FORCE ROW LEVEL SECURITY, "
+            "so RLS tenant isolation would be silently inert while every "
+            "request still succeeds. Connect the runtime as the non-superuser, "
+            "NOBYPASSRLS skylize_app role created by migration 0003."
+        )
 
 
 @dataclass
@@ -68,18 +202,28 @@ class Container:
     deliverables: DeliverableService
     credential_vault: CredentialVault
     agent_execution: AgentExecutionService
+    hitl: HitlQueueService
     knowledge_ingestion: KnowledgeIngestionService | None
     decision_engine: DecisionEngine
     # The single shared content-gated gateway reference. Anything that makes
     # LLM calls (incl. the Temporal worker's LLMJudge) must take THIS, never a
     # bare provider adapter.
     llm: LLMGateway
+    # Append-only, principal-scoped log read by GET /me/brief. See
+    # dal/work_journal.py for why nothing writes to it yet.
+    work_journal: WorkJournal
     _closers: list[Callable[[], Awaitable[None]]]
     # The connection pool on the postgres backend (None on memory). Exposed for
     # sibling processes composed from this root — the Temporal worker builds
     # PgWorkflowRepository(container.db) — not for request-path use: services
     # above this layer keep depending on ports, never on the pool.
     db: "Database | None" = None
+    # Read-side spend stores on the postgres backend (None on memory). The
+    # spend position route reads period-to-date spend and the effective-dated
+    # ceiling through these; the ceiling WRITE stays an operator action through
+    # the audited OrgSpendCeilingDAL.set_ceiling seam — no route writes it.
+    cost_ledger: "CostLedgerDAL | None" = None
+    spend_ceiling_dal: "OrgSpendCeilingDAL | None" = None
 
     async def aclose(self) -> None:
         # LIFO, like ExitStack: consumers/subscribers are registered after the
@@ -93,6 +237,10 @@ class Container:
 
 async def build_container(settings: Settings | None = None) -> Container:
     settings = settings or get_settings()
+    # Resolved BEFORE the backend branch below opens any pool: a deployment
+    # missing this key must fail while it is still doing nothing, not after
+    # Postgres and Redis connections are live. Consumed at the vault below.
+    credential_encryption_key = resolve_credential_encryption_key(settings)
     registry = MVP_REGISTRY
     closers: list[Callable[[], Awaitable[None]]] = []
 
@@ -110,15 +258,33 @@ async def build_container(settings: Settings | None = None) -> Container:
     # (memory backend); the postgres branch below swaps in the durable stores.
     capital_repo: CapitalRepository | None = None
     processed_store: ProcessedEventStore | None = None
+    # Request-path HITL writer for the synchronous decision gate (owner decision
+    # K3). In-memory on the memory backend; the durable Pg writer on postgres.
+    hitl_repo: HitlQueueRepository
+    # Work journal (skylize.app.principal): append-only, principal-scoped log
+    # read by GET /me/brief. Written non-transactionally (best-effort, logged
+    # not raised on failure) from edge/routes/cowork.py:204 (chat turns) and
+    # app/hitl/service.py:376 (HITL replay approval) — see those call sites
+    # for why the write can't share the deliverable's transaction.
+    journal_repo: JournalRepository
+    # Human principals + their grants (migration 0019). Read-only: this feeds
+    # PrincipalAuthorityService, which GovernanceAuthority.mint consults ONLY when
+    # a caller passes `on_behalf_of_principal`. No existing request path does, so
+    # wiring it changes no current behaviour -- it removes a fail-closed refusal
+    # that the per-employee shape would otherwise hit.
+    principal_repo: PrincipalRepository
 
     if settings.backend == "memory":
         from .app.governance.broadcast import InMemoryGovernanceBroadcast
         from .dal.credentials import InMemoryCredentialRepository
+        from .app.principal.provider import InMemoryPrincipalRepository
         from .dal.memory import (
             InMemoryApiKeyRepository,
             InMemoryAuditRepository,
             InMemoryDeliverableRepository,
             InMemoryGovernanceRepository,
+            InMemoryHitlQueueRepository,
+            InMemoryJournalRepository,
             InMemoryTenantRepository,
             InMemoryUserRepository,
         )
@@ -133,11 +299,15 @@ async def build_container(settings: Settings | None = None) -> Container:
         deliverable_repo = InMemoryDeliverableRepository()
         credential_repo = InMemoryCredentialRepository()
         broadcast = InMemoryGovernanceBroadcast()
+        hitl_repo = InMemoryHitlQueueRepository()
+        journal_repo = InMemoryJournalRepository()
+        principal_repo = InMemoryPrincipalRepository()
     else:
         from .dal.connection import Database
         from .dal.credentials import PgCredentialRepository
         from .dal.decision_stores import PgCapitalRepository, PgProcessedEventStore
         from .dal.deliverables import PgDeliverableRepository
+        from .dal.hitl import PgHitlQueueRepository
         from .dal.repositories import (
             PgApiKeyRepository,
             PgAuditRepository,
@@ -145,7 +315,9 @@ async def build_container(settings: Settings | None = None) -> Container:
             PgGovernanceRepository,
             PgTenantRepository,
         )
+        from .dal.principal import PgPrincipalRepository
         from .dal.users import PgUserRepository
+        from .dal.work_journal import PostgresJournalRepository
         from .events.redis_adapter import RedisEventBus
         from .events.redis_governance_broadcast import RedisGovernanceBroadcast
 
@@ -153,6 +325,9 @@ async def build_container(settings: Settings | None = None) -> Container:
         # (migrations run separately as the admin role via `alembic upgrade`).
         db = Database(settings.runtime_db_url)
         await db.connect()
+        # The Settings string interlock cannot catch a respelled superuser DSN;
+        # ask the database itself before wiring anything onto this pool.
+        await verify_app_role_is_rls_subject(db)
         redis_bus = RedisEventBus(settings.redis_url)
         bus = redis_bus
         gov_repo = PgGovernanceRepository(db)
@@ -164,6 +339,9 @@ async def build_container(settings: Settings | None = None) -> Container:
         credential_repo = PgCredentialRepository(db)
         capital_repo = PgCapitalRepository(db)
         processed_store = PgProcessedEventStore(db)
+        hitl_repo = PgHitlQueueRepository(db)
+        journal_repo = PostgresJournalRepository(db)
+        principal_repo = PgPrincipalRepository(db)
         redis_broadcast = RedisGovernanceBroadcast(settings.redis_url)
         broadcast = redis_broadcast
 
@@ -179,6 +357,7 @@ async def build_container(settings: Settings | None = None) -> Container:
     audit = AuditService(bus, audit_repo)
     tenants = TenantService(tenant_repo, audit)
     api_keys = ApiKeyService(apikey_repo, audit)
+    work_journal = WorkJournal(journal_repo)
 
     # Human-user auth (register/login/refresh + /me).
     user_auth = UserAuthService(user_repo, settings)
@@ -207,17 +386,22 @@ async def build_container(settings: Settings | None = None) -> Container:
     # deliverables embed back into the tenant's knowledge memory (closed loop).
     deliverables = DeliverableService(deliverable_repo, knowledge_ingestion)
 
-    # Credential vault (at-rest Fernet encryption). With no configured key the
-    # memory backend mints an ephemeral one — fine for dev/tests; production sets
-    # `credential_encryption_key` so stored credentials survive a restart.
-    encryptor = FernetEncryptor(
-        settings.credential_encryption_key or FernetEncryptor.generate_key()
-    )
+    # Credential vault (at-rest Fernet encryption). The key was resolved at the
+    # top of this function; on a real backend an unset one already failed the
+    # boot, so there is no `or generate_key()` fallback to reach here.
+    encryptor = FernetEncryptor(credential_encryption_key)
     credential_vault = CredentialVault(encryptor, credential_repo, audit)
+
+    # Compiles a human's effective authority from their grants. Passed to BOTH
+    # consumers below because they ask different questions of it: mint gates the
+    # requested scope against it, and AgentExecutionService derives which scope to
+    # request in the first place. Neither is reached unless a caller supplies
+    # `on_behalf_of_principal`, which no current request path does.
+    principal_authority = PrincipalAuthorityService(principal_repo)
 
     authority = GovernanceAuthority.build(
         repo=gov_repo, audit=audit, bus=bus, registry=registry, settings=settings,
-        broadcast=broadcast,
+        broadcast=broadcast, principal_authority=principal_authority,
     )
     # Warm the snapshot from the DB system of record BEFORE serving requests, so
     # a restart never forgets an active kill switch / revocation / suspension.
@@ -275,15 +459,66 @@ async def build_container(settings: Settings | None = None) -> Container:
         decision_engine.subscribe(org_id)
     closers.append(decision_engine.stop)
 
-    # LLM gateway: the live Anthropic adapter when a key is configured, else the
-    # deterministic `[DEMO]` adapter (memory backend / tests / no-key local run).
+    # LLM gateway: the live Anthropic adapter when a key is configured. With no
+    # key we fail closed rather than silently serving fake output — UNLESS demo
+    # mode is explicitly opted into (llm_demo_mode), in which case the
+    # DemoLLMAdapter is wired and it logs a WARNING on every call.
+    # Billing-grade cost ledger (ADR-0006) and org spend-ceiling store
+    # (migration 0014): constructed whenever the postgres pool exists (None on
+    # memory — no durable store). Shared by the LLM egress gate below and the
+    # read-only spend position route (edge/routes/spend.py) via the Container.
+    from .dal.cost_ledger import CostLedgerDAL
+    from .dal.org_spend_ceiling import OrgSpendCeilingDAL
+
+    cost_ledger = CostLedgerDAL(db) if db is not None else None
+    spend_ceiling_dal = OrgSpendCeilingDAL(db) if db is not None else None
+
     llm: LLMGateway
     if settings.anthropic_api_key:
         from .adapters.llm.anthropic_adapter import AnthropicAdapter
+        from .adapters.llm.spend_ceiling import SpendCeilingEnforcer
 
-        llm = AnthropicAdapter(settings=settings)
-    else:
+        # Org spend-ceiling gate: wired alongside the ledger on the postgres
+        # backend so every Anthropic egress is price-gated pre-call and recorded
+        # post-call. Both egresses refuse a call before egress when
+        # period-to-date spend plus a biased-high estimate would breach the
+        # org-wide ceiling; a missing ceiling row fails closed. No ceiling store
+        # on the memory backend, so the gate is left unwired (None) there and
+        # the adapter falls back to Settings-float estimates (logged at WARNING).
+        spend_ceiling = (
+            SpendCeilingEnforcer(
+                ceiling_dal=spend_ceiling_dal,
+                cost_ledger=cost_ledger,
+                audit=audit,
+                bus=bus,
+            )
+            if spend_ceiling_dal is not None and cost_ledger is not None
+            else None
+        )
+        anthropic_adapter = AnthropicAdapter(
+            settings=settings,
+            cost_ledger=cost_ledger,
+            spend_ceiling=spend_ceiling,
+        )
+        # The adapter builds its two SDK egress clients once, on first use, and
+        # reuses them for every call; each owns a TCP connection pool. Register
+        # the disposal here, on the SAME `_closers` list Container.aclose()
+        # drains, so the pools are released deterministically at shutdown instead
+        # of waiting on GC finalization. Registered while the concrete adapter is
+        # still in hand — the GuardedLLMGateway wrap below hides `aclose`.
+        # `_closers` runs LIFO, so this closes before the db/redis pools, which
+        # is the right order: stop outbound HTTP first, tear down stores after.
+        closers.append(anthropic_adapter.aclose)
+        llm = anthropic_adapter
+    elif settings.llm_demo_mode:
         llm = DemoLLMAdapter()
+    else:
+        raise LLMConfigurationError(
+            "SKYLIZE_ANTHROPIC_API_KEY is not set. Refusing to build the container "
+            "with a silent demo fallback. Set SKYLIZE_ANTHROPIC_API_KEY for real "
+            "LLM egress, or set SKYLIZE_LLM_DEMO_MODE=true to explicitly run the "
+            "non-production demo adapter."
+        )
 
     # Content gate (constructed above, shared with the knowledge store) wraps the
     # single gateway reference, so every downstream holder of `llm`
@@ -301,14 +536,47 @@ async def build_container(settings: Settings | None = None) -> Container:
     # through the proxy: token signature/expiry/revocation/scope/budget checks
     # against the live governance snapshot, then audit. Null ports back
     # memory.search / search.web until real providers are wired.
+    #
+    # Spend ceiling for spend-capable tool calls (migration 0019). Constructed
+    # only where a durable pool exists — an in-RAM money ceiling is not a ceiling.
+    # On the memory backend this stays None and ToolProxy fails spend-capable
+    # calls closed rather than letting them run unmetered.
+    #
+    # Takes `db.pool` rather than `db`: `PostgresSpendRepository` lives under
+    # `skylize.app`, which the import-linter contract "Application logic contains
+    # no SQL" forbids from importing `skylize.dal.connection` (pyproject.toml).
+    # It therefore accepts an untyped pool. bootstrap is the composition root and
+    # is explicitly allowed to bridge the two.
+    spend_ledger = (
+        SpendLedger(PostgresSpendRepository(db.pool)) if db is not None else None
+    )
     tool_proxy = ToolProxy(
         registry=default_tool_registry(credential_vault=credential_vault),
         audit=audit,
         public_key=authority.public_key,
         live_state_for=authority.live_state_checker,
+        spend_ledger=spend_ledger,
     )
+    # AgentExecutionService also carries the synchronous decision gate (owner
+    # decisions D1/D3/D4/D5): the SAME pure evaluator the async engine uses
+    # (decision_engine.evaluator, D2), the request-path HITL writer (K3), the bus
+    # for terminal-event emission (D5), and the governed-org switch (D3). With no
+    # governed orgs the gate is dormant and execution is unchanged.
     agent_execution = AgentExecutionService(
-        registry, llm, deliverables, tools=tool_proxy, authority=authority, audit=audit
+        registry, llm, deliverables, tools=tool_proxy, authority=authority, audit=audit,
+        evaluator=decision_engine.evaluator, hitl=hitl_repo, bus=bus,
+        governed_org_ids=frozenset(settings.decision_engine_org_ids),
+        principal_authority=principal_authority,
+    )
+    # The human side of the gate: list pending escalations, approve (which
+    # replays the stored request through the SAME agent_execution path with the
+    # gate satisfied by the human verdict) or reject. Same repo instance the
+    # gate enqueues into.
+    hitl_service = HitlQueueService(
+        repo=hitl_repo, execution=agent_execution, audit=audit, bus=bus,
+        # Only a per-employee replay journals (the envelope must carry a
+        # principal); an autonomous approval is unaffected.
+        journal=work_journal,
     )
 
     return Container(
@@ -316,6 +584,8 @@ async def build_container(settings: Settings | None = None) -> Container:
         orchestrator=orchestrator, tenants=tenants, api_keys=api_keys,
         user_auth=user_auth, deliverables=deliverables,
         credential_vault=credential_vault, agent_execution=agent_execution,
+        hitl=hitl_service,
         knowledge_ingestion=knowledge_ingestion, decision_engine=decision_engine,
-        llm=llm, _closers=closers, db=db,
+        llm=llm, work_journal=work_journal, _closers=closers, db=db,
+        cost_ledger=cost_ledger, spend_ceiling_dal=spend_ceiling_dal,
     )

@@ -55,8 +55,12 @@ services:
   # non-superuser `skylize_app` role the gateway then connects as.
   migrate:
     build:
+      # THE gateway image, and the only one. infra/Dockerfile was deleted on
+      # 2026-07-31: compose built it while CI and deploy.ps1 built the root
+      # Dockerfile, so CI validated an image nobody ran. All three now build
+      # this one. See the header of ../Dockerfile.
       context: ..
-      dockerfile: infra/Dockerfile
+      dockerfile: Dockerfile
     command: ["alembic", "upgrade", "head"]
     environment:
       SKYLIZE_DB_URL: postgresql://skylize:${POSTGRES_PASSWORD:-localdev}@postgres:5432/skylize
@@ -68,7 +72,7 @@ services:
   gateway:
     build:
       context: ..
-      dockerfile: infra/Dockerfile
+      dockerfile: Dockerfile
     environment:
       SKYLIZE_BACKEND: postgres
       # Admin DSN is present for completeness, but the RUNTIME uses the app DSN
@@ -78,7 +82,20 @@ services:
       SKYLIZE_REDIS_URL: redis://redis:6379
       # Guardrail policy engine. In-cluster DNS name of the opa service above.
       SKYLIZE_OPA_URL: http://opa:8181
-      SKYLIZE_DEV_AUTH: "true"
+      # MUST be false here. SKYLIZE_BACKEND is postgres above, and dev auth trusts
+      # the X-Dev-Org / X-Dev-User / X-Dev-Roles headers verbatim
+      # (src/skylize/edge/auth.py:39-50) — on a real backend that is not
+      # authentication, it is an open door to every tenant in the database.
+      # Settings REFUSES to construct on that combination
+      # (config.py _forbid_dev_auth_on_a_real_backend), so flipping this back to
+      # "true" does not loosen the stack, it stops the gateway from starting.
+      # Authenticate against this stack the way a deployment does: POST
+      # /api/v1/auth/register then /api/v1/auth/login, and send the access JWT.
+      SKYLIZE_DEV_AUTH: "false"
+      # Required once dev auth is off (config.py _require_jwt_secret_when_prod).
+      # Local-only default, same convention as the DB passwords above; override
+      # via the environment for anything reachable off this machine.
+      SKYLIZE_JWT_SECRET: ${SKYLIZE_JWT_SECRET:-localdev-jwt-secret-change-me}
     ports: ["8000:8000"]
     depends_on:
       postgres: { condition: service_healthy }
@@ -114,7 +131,7 @@ services:
     profiles: ["opa-engine"]
     build:
       context: ..
-      dockerfile: infra/Dockerfile
+      dockerfile: Dockerfile
     command: ["python", "-m", "skylize.decision_engine.worker"]
     environment:
       # The interlock. The worker raises RuntimeError on anything but "opa".

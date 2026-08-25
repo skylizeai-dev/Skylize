@@ -103,10 +103,21 @@ module "ecs" {
   private_subnet_ids     = module.vpc.private_subnet_ids
   alb_target_group_arn   = module.alb.target_group_arn
   alb_sg_id              = module.alb.alb_sg_id
+  # BOOTSTRAP PLACEHOLDER, not the tag that ends up running. CI publishes
+  # SHA-only tags now (:latest was removed from .github/workflows/deploy-staging.yml
+  # on 2026-07-31 so a container that cannot boot stops being published as
+  # :latest), so this reference resolves to nothing until someone pushes a
+  # :latest by hand. That is survivable only because the deploy job re-renders
+  # the task definition with the SHA-tagged image and the service carries
+  # `lifecycle { ignore_changes = [task_definition] }`. A `terraform apply`
+  # against an empty ECR still creates a revision 1 whose image cannot be
+  # pulled. Point this at a real tag before relying on terraform alone to
+  # stand the service up.
   ecr_image_uri          = "${module.ecr.repository_url}:latest"
   task_execution_role_arn = module.iam.task_execution_role_arn
   task_role_arn           = module.iam.task_role_arn
   secret_arns             = module.secrets.secret_arns
+  jwt_secret_arn          = module.secrets.jwt_secret_arn
   db_host                 = module.rds.db_endpoint
   redis_host              = module.elasticache.redis_endpoint
 }

@@ -1,6 +1,7 @@
 import { headers } from "next/headers";
 import { AltitudeLine, Container, Eyebrow } from "@/components/skylize";
 import { CreativeRunner } from "@/components/console/creative-runner";
+import { GovernanceDemo } from "@/components/console/governance-demo";
 import { KillSwitchPanel } from "@/components/console/kill-switch-panel";
 import { cn } from "@/lib/utils";
 
@@ -143,6 +144,10 @@ export default async function ConsolePage() {
           )}
         </section>
       </div>
+
+      <AltitudeLine className="my-12" />
+
+      <GovernanceDemo />
 
       <AltitudeLine className="my-12" />
 

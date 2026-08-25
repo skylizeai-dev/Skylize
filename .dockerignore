@@ -1,0 +1,81 @@
+# Build context exclusions for the gateway image (root Dockerfile).
+#
+# There was no .dockerignore until 2026-07-31. Measured on the machine that
+# wrote this file, the un-ignored context was ~11.8 GB: .claude 9.9 GB,
+# .git 903 MB, website 817 MB (node_modules 584 MB + .next 231 MB),
+# .mypy_cache 94 MB. Every byte of that was transferred to the daemon on every
+# build even though the Dockerfile COPYs only four paths.
+#
+# The image itself was also polluted: `COPY src ./src` shipped 406 __pycache__
+# files, including .pyc compiled by CPython 3.14 into a 3.12 image.
+#
+# The gateway build needs exactly: pyproject.toml, src/, migrations/,
+# alembic.ini. Nothing else here is required by any stage.
+
+# --- VCS + agent/session state ----------------------------------------------
+.git
+.gitignore
+.gitattributes
+.github
+.claude
+.ds-sync
+
+# --- Python build/test/tool caches ------------------------------------------
+# NOTE the `**/` prefixes. .dockerignore patterns are anchored at the context
+# root, so a bare `__pycache__` would exclude only a top-level directory of
+# that name and would leave every src/skylize/**/__pycache__ in place — which
+# is precisely the pollution this file exists to stop.
+**/__pycache__
+**/*.py[cod]
+**/*.egg-info
+.eggs
+build
+dist
+.mypy_cache
+.pytest_cache
+.ruff_cache
+.hypothesis
+.grimp_cache
+.import_linter_cache
+.coverage
+htmlcov
+.tox
+.nox
+
+# --- Virtualenvs -------------------------------------------------------------
+.venv
+venv
+env
+
+# --- Frontend: not part of the gateway image --------------------------------
+website
+node_modules
+
+# --- Tests: not installed by the wheel, not run in the image ----------------
+tests
+
+# --- Infra + docs: not read from /app at runtime (verified: no reference to
+#     /app/infra anywhere in src/). Keeping terraform state, compose files and
+#     the docs tree out of a runtime image is also the right blast radius.
+infra
+docs
+policy
+scripts
+*.md
+
+# --- Local secrets and editor cruft. `.env` must never enter an image: the
+#     process reads .env from its CWD (/app), so a leaked file would silently
+#     override the injected Secrets Manager values.
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store
+.idea
+.vscode
+.playwright-mcp
+
+# --- Terraform state, should it ever be produced locally ---------------------
+*.tfstate
+*.tfstate.*
+.terraform

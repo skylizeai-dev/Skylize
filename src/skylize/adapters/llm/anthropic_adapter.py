@@ -3,11 +3,34 @@ AnthropicAdapter — live LLM backend via the Anthropic Python SDK.
 
 Used when SKYLIZE_ANTHROPIC_API_KEY is present. Logical model names map to
 concrete Anthropic model IDs via Settings (llm_model_default / fast /
-reasoning). The adapter refuses over-budget calls BEFORE any provider egress,
-retries a 5xx once (1s pause) then raises LLMProviderUnavailable, accounts
-cost in USD micros from Settings prices, and optionally reports every
-generation to Langfuse and OpenTelemetry — observability failures never fail
-the call, and prompt text is never logged.
+reasoning). The adapter carries a request-level budget check that is INERT on
+every live path today (nothing populates `max_token_budget` — see
+`_check_budget` and gateway.py's GAP note; the live pre-egress budget is the
+GovernanceToken's). It refuses UNPRICED and over-CEILING calls before any
+provider egress, wraps BOTH egress paths (generate + generate_with_tools) in one bounded retry
+policy (Settings-driven: 429 honours Retry-After else jittered backoff → then
+LLMRateLimited; 5xx jittered backoff → then LLMProviderUnavailable; 400 /
+context overflow re-raised immediately; 401 fails closed with no key material
+in the error, logs, or events), accounts cost in USD micros from Settings
+prices, and optionally reports every generation to Langfuse and OpenTelemetry —
+observability failures never fail the call, and prompt text is never logged.
+
+Price is resolved EXACTLY ONCE per call (owner decision DEC-A): the pre-call
+gate's ``PriceSnapshot`` is threaded through to the spend-ceiling estimate, the
+response's cost_usd_micros, and the ai_cost_ledger row, so the rate a call is
+gated at is always the rate it is charged at, and a pricing gap on the model id
+the provider RESOLVES to can never abort the ledger write after real spend
+(DEC-B). The row still records the resolved id (DEC-C), and a divergence
+between requested and resolved id is logged at ERROR (DEC-D).
+
+The adapter is the SOLE retry authority (owner decision D1): both SDK clients
+are built with max_retries=0 so exactly one HTTP request reaches the provider
+per adapter attempt. Requests are bounded by Settings.llm_timeout_seconds
+(owner decision D3); a timeout maps to LLMTimeout and is NEVER retried (owner
+decision D2 — the provider may have completed and billed the lost response), a
+connection failure maps to LLMProviderUnavailable without retry, and an
+unparseable response body maps to LLMMalformedResponse without retry (owner
+decision D4).
 """
 
 from __future__ import annotations
@@ -15,6 +38,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
+from collections.abc import Awaitable, Callable
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, TypeVar
 from uuid import UUID
 
@@ -22,18 +48,25 @@ import anthropic
 from pydantic import BaseModel
 
 from .gateway import (
+    LLMAuthenticationError,
     LLMContentBlock,
     LLMGenerateRequest,
     LLMGenerateResponse,
     LLMGenerateWithToolsRequest,
+    LLMMalformedResponse,
     LLMMessage,
+    LLMModelNotPriced,
     LLMProviderUnavailable,
+    LLMRateLimited,
+    LLMTimeout,
     LLMUsage,
     TokenBudgetExceeded,
 )
 
 if TYPE_CHECKING:
+    from ...dal.cost_ledger import CostLedgerDAL, PriceSnapshot
     from ...tools.base import ToolDefinition
+    from .spend_ceiling import SpendCeilingEnforcer
     from .structured import StructuredRequest
 
 log = logging.getLogger(__name__)
@@ -126,6 +159,59 @@ def _normalize_anthropic_message(
     return "".join(text_parts), blocks
 
 
+def _generate_input_chars(request: LLMGenerateRequest) -> int:
+    """Total input character count for the single-shot `generate` egress.
+
+    Feeds the spend-ceiling input-token estimate (see spend_ceiling.py). Counts
+    the prompt plus the system prompt — the whole input payload the provider will
+    tokenize.
+    """
+    return len(request.prompt) + len(request.system or "")
+
+
+def _tools_input_chars(
+    request: LLMGenerateWithToolsRequest,
+    tools: list["ToolDefinition"],
+    anthropic_tools: list[dict[str, Any]],
+) -> int:
+    """Total input character count for the `generate_with_tools` egress.
+
+    Sums the system prompt, every message text / tool-result / tool-input block,
+    and the tool definitions (id, description, JSON schema) — all of which count
+    toward the provider's input tokens. Feeds the spend-ceiling estimate, which
+    then biases the token count high.
+
+    ``anthropic_tools`` is the ALREADY-BUILT payload from `_to_anthropic_tools`,
+    positionally aligned with ``tools``. Each entry's ``input_schema`` is the
+    very object that payload carries, so ``model_json_schema()`` is called once
+    per tool per turn instead of twice: this function used to rebuild every
+    schema itself, and `_to_anthropic_tools` rebuilt them again two lines later
+    (Pydantic v2 does not memoize it), so every tool-loop iteration built every
+    schema twice.
+
+    THE COUNT IS BYTE-IDENTICAL to the previous formula — deliberately. The
+    summands are unchanged (``tool_id`` + ``description`` + the serialized
+    schema); only the schema OBJECT is now reused rather than regenerated, and
+    ``json.dumps`` is deterministic for a given object. Measuring the outer
+    payload entry instead would also have been safe (it is strictly longer, by
+    the JSON framing and key names) but it would have RAISED the estimate, and
+    this number feeds the spend-ceiling gate: silently moving it, in either
+    direction, changes which borderline calls are refused. Keeping it exact
+    makes "behaviour unchanged" checkable rather than argued.
+    """
+    total = len(request.system or "")
+    for message in request.messages:
+        for block in message.content:
+            total += len(block.text or "")
+            total += len(block.tool_output or "")
+            if block.tool_input:
+                total += len(json.dumps(block.tool_input, default=str))
+    for tool, built in zip(tools, anthropic_tools, strict=True):
+        total += len(tool.tool_id) + len(tool.description)
+        total += len(json.dumps(built["input_schema"], default=str))
+    return total
+
+
 class AnthropicAdapter:
     """Live Anthropic Claude adapter. Requires `pip install anthropic`."""
 
@@ -136,13 +222,46 @@ class AnthropicAdapter:
         settings: Any,
         *,
         api_key: str | None = None,
+        base_url: str | None = None,
         langfuse_client: Any = None,
         tracer: Any = None,
+        cost_ledger: "CostLedgerDAL | None" = None,
+        spend_ceiling: "SpendCeilingEnforcer | None" = None,
     ) -> None:
         self._settings = settings
+        # Billing-grade cost ledger (ADR-0006). When wired (postgres backend),
+        # every egress is price-gated BEFORE the SDK call and recorded AFTER
+        # the provider responds. When None (memory backend / unit harnesses)
+        # the adapter keeps the documented Settings-float fallback for
+        # cost_usd_micros and records nothing.
+        self._cost_ledger = cost_ledger
+        # Org spend-ceiling gate (migration 0014). Wired alongside the cost ledger
+        # on the postgres backend: BOTH egresses refuse a call before egress when
+        # period-to-date spend plus a biased-high estimate would breach the
+        # org-wide ceiling. None (memory backend / unit harnesses) => no gate.
+        self._spend_ceiling = spend_ceiling
+        # ONE key per adapter, fixed here and never reassigned. This is the
+        # precondition that makes client reuse safe (see `_sync_client`): the
+        # adapter holds no CredentialVault, performs no per-org key lookup, and
+        # never reads CostObservation.byok, so every call this instance makes
+        # goes out under this one key. If per-org / BYOK key resolution is ever
+        # added, the cached clients below MUST become per-key or one tenant's
+        # call would be sent with another tenant's credential.
         self._api_key = api_key or str(getattr(settings, "anthropic_api_key", "") or "")
+        # Empty string when unset; `_client_kwargs` omits base_url in that case so
+        # the SDK falls back to its own default endpoint resolution (env + built-in).
+        self._base_url = base_url or str(getattr(settings, "anthropic_base_url", "") or "")
         self._langfuse = langfuse_client
         self._tracer = tracer
+        # Retry policy bounds (from Settings; no magic numbers in the helper body).
+        self._retry_max_attempts = int(getattr(settings, "llm_retry_max_attempts", 3))
+        self._retry_base_delay = float(getattr(settings, "llm_retry_base_delay_seconds", 1.0))
+        self._retry_max_delay = float(getattr(settings, "llm_retry_max_delay_seconds", 30.0))
+        self._retry_jitter = float(getattr(settings, "llm_retry_jitter_seconds", 0.5))
+        # Provider HTTP timeout (owner decision D3) — Settings-driven, applied to
+        # both egress clients via `_client_kwargs`. A timed-out call is never
+        # retried (owner decision D2; see `_call_with_retry`).
+        self._timeout_seconds = float(getattr(settings, "llm_timeout_seconds", 120.0))
         # Strict logical -> concrete map; unknown logical names fail loudly so a
         # typo never silently lands on the wrong (priced) model.
         self._model_map: dict[str, str] = {
@@ -150,8 +269,101 @@ class AnthropicAdapter:
             "fast": str(settings.llm_model_fast),
             "reasoning": str(settings.llm_model_reasoning),
         }
+        # There is deliberately NO price map here. Price comes from model_pricing
+        # via the cost ledger, resolved once per call by `_require_price`, or the
+        # call is refused. The Settings-float map that used to live here is gone;
+        # so is the `llm_price_*` block in config.py that fed it.
+        #
+        # The two egress clients: built ONCE, on first use, and reused for every
+        # subsequent call (see `_sync_client` / `_async_client`). Both are
+        # released by `aclose()`, which bootstrap registers on the Container's
+        # closer list — never left to the garbage collector.
+        self._sync_client_instance: anthropic.Anthropic | None = None
+        self._async_client_instance: anthropic.AsyncAnthropic | None = None
 
     # -- helpers --------------------------------------------------------------
+
+    def _client_kwargs(self) -> dict[str, Any]:
+        """Constructor kwargs shared by both egress clients (sync + async).
+
+        The adapter is the SOLE retry authority (owner decision D1):
+        max_retries=0 disables the SDK's internal retry (default 2), which would
+        otherwise run UNDER `_call_with_retry` and turn every adapter attempt
+        into up to three real HTTP requests — compounding rate-limit pressure
+        and real spend in a way no caller can observe or bound.
+
+        The timeout is Settings-driven (owner decision D3) so a hung request
+        fails within a configured bound instead of the SDK's ~600s default.
+
+        base_url is included ONLY when configured; when unset the argument is
+        omitted entirely so the Anthropic SDK applies its own default endpoint
+        (rather than being handed an explicit None).
+        """
+        kwargs: dict[str, Any] = {
+            "api_key": self._api_key,
+            "max_retries": 0,
+            "timeout": self._timeout_seconds,
+        }
+        if self._base_url:
+            kwargs["base_url"] = self._base_url
+        return kwargs
+
+    def _sync_client(self) -> anthropic.Anthropic:
+        """The ONE sync egress client for this adapter, built on first use.
+
+        Both egresses used to construct a fresh SDK client inside the request
+        path and never close it. In the tool loop that is one leaked
+        AsyncAnthropic per ITERATION, each holding its own TCP connection pool
+        until the garbage collector happens to finalize it — file descriptors and
+        idle sockets accumulating for the process lifetime.
+
+        Per-call construction bought nothing: every argument in
+        `_client_kwargs()` (api_key, max_retries, timeout, base_url) is fixed in
+        `__init__` and identical on every call, so the client built for call N is
+        indistinguishable from the one built for call N+1.
+
+        SAFE ONLY BECAUSE THE KEY IS FIXED PER ADAPTER. `self._api_key` is set
+        once in `__init__`; the adapter holds no CredentialVault and does no
+        per-org lookup. A shared client under per-org/BYOK keys would send one
+        tenant's call with another tenant's credential — silently. If that
+        resolution is ever added, this cache must be keyed by credential.
+
+        LAZY, not built in `__init__`, for two reasons: the SDK client is only
+        needed once a call is actually made (a container that never calls the
+        provider opens no pool), and the async sibling binds an httpx pool to the
+        event loop that first uses it, which must be the loop the calls run on.
+        `httpx.Client` is thread-safe, so the `asyncio.to_thread` hop in
+        `generate` may share this instance freely.
+        """
+        if self._sync_client_instance is None:
+            self._sync_client_instance = anthropic.Anthropic(**self._client_kwargs())
+        return self._sync_client_instance
+
+    def _async_client(self) -> anthropic.AsyncAnthropic:
+        """The ONE async egress client for this adapter (see `_sync_client`).
+
+        This is the instance the tool loop used to leak once per iteration.
+        """
+        if self._async_client_instance is None:
+            self._async_client_instance = anthropic.AsyncAnthropic(**self._client_kwargs())
+        return self._async_client_instance
+
+    async def aclose(self) -> None:
+        """Release both egress clients' connection pools.
+
+        Registered on the Container's `_closers` list at bootstrap, so
+        `Container.aclose()` disposes the pools deterministically on shutdown
+        rather than leaving them to GC finalization.
+
+        The instance references are deliberately NOT cleared: a call made after
+        shutdown then fails loudly on the closed client instead of silently
+        opening a replacement pool that nothing would ever close. Closing twice
+        is harmless (both SDK clients are idempotent on close).
+        """
+        if self._sync_client_instance is not None:
+            self._sync_client_instance.close()
+        if self._async_client_instance is not None:
+            await self._async_client_instance.close()
 
     def _concrete_model(self, logical: str) -> str:
         try:
@@ -162,8 +374,23 @@ class AnthropicAdapter:
             ) from None
 
     @staticmethod
-    def _check_budget(request: LLMGenerateRequest) -> None:
-        """Refuse before egress when the request cannot fit the remaining budget."""
+    def _check_budget(request: LLMGenerateRequest | LLMGenerateWithToolsRequest) -> None:
+        """Refuse before egress when the request cannot fit the remaining budget.
+
+        INERT ON EVERY LIVE PATH TODAY. `max_token_budget` defaults to None on
+        both request models and no live construction site sets it — not
+        AgentExecutionService's single-shot or tool egress, not LLMStepRunner,
+        not the Temporal judge, not StructuredRequest — so this returns at the
+        guard below on every call and never raises.
+
+        The budget that IS enforced pre-egress is the signed GovernanceToken's,
+        via `contracts/token.py:validate_tool_call` (BUDGET stage), which
+        AgentExecutionService runs before each call with the real running total.
+        It raises the same `TokenBudgetExceeded` type, which is why this inert
+        path reads as covered. Kept, not deleted: the check is correct and the
+        fields are part of the gateway contract; POPULATING them is a separate,
+        deliberate decision. See the GAP note in gateway.py's module docstring.
+        """
         if request.max_token_budget is None:
             return
         remaining = request.max_token_budget - (request.tokens_used_so_far or 0)
@@ -175,22 +402,313 @@ class AnthropicAdapter:
                 f"tokens_used_so_far={request.tokens_used_so_far or 0})"
             )
 
-    async def _call_with_retry(self, client: Any, kwargs: dict[str, Any]) -> Any:
-        """One retry on 5xx after a 1s pause; 4xx raises immediately."""
+    async def _require_price(
+        self, *, org_id: str, model_id: str
+    ) -> "PriceSnapshot":
+        """PRE-CALL pricing gate (owner decision D1); returns the resolved price.
+
+        This is the ONLY price resolution in a call (owner decision DEC-A). The
+        concrete model must have an active model_pricing row BEFORE any provider
+        egress — a pricing gap refuses the call with a typed error instead of
+        producing an unrecordable (budget-cap-evading) charge. The returned
+        ``PriceSnapshot`` is then the single source for all three money outputs
+        of the call: the spend-ceiling estimate (`_enforce_spend_ceiling`), the
+        response's ``cost_usd_micros``, and the ai_cost_ledger row
+        (`_settle_cost` hands it to ``record_cost`` rather than letting the DAL
+        re-resolve). No second lookup, no unit drift, and no chance of the
+        estimate and the charge disagreeing.
+
+        NO LEDGER MEANS NO PRICE SOURCE, AND THAT IS A REFUSAL. There used to be
+        a Settings-float fallback here for deployments with no ledger wired. Two
+        of its three prices were the published prices of models that no longer
+        exist — haiku 0.80/4.0 is retired Haiku 3.5, opus 15.0/75.0 is deprecated
+        Opus 4.1 — so it did not merely approximate, it silently under-charged
+        Haiku by 20% and over-charged Opus by 200%. A wrong number recorded as
+        money is worse than no call, so this refuses instead, and it refuses HERE,
+        before egress: refusing after the response would mean the provider had
+        already billed the account for a call that then failed.
+        """
+        if self._cost_ledger is None:
+            raise LLMModelNotPriced(
+                f"no cost ledger is wired, so there is no price source for "
+                f"{model_id!r}; refusing the call before egress rather than "
+                "estimating one (a guessed price becomes a wrong charge)"
+            )
+        from ...dal.cost_ledger import PricingNotFound
+
         try:
-            return await asyncio.to_thread(client.messages.create, **kwargs)
-        except anthropic.APIStatusError as exc:
-            if exc.response.status_code < 500:
-                raise
-            await asyncio.sleep(1)
+            return await self._cost_ledger.resolve_price_for(
+                org_id=org_id,
+                provider=self._PROVIDER,
+                model=model_id,
+                occurred_at=datetime.now(timezone.utc),
+            )
+        except PricingNotFound as exc:
+            raise LLMModelNotPriced(
+                f"no model_pricing entry for concrete model {model_id!r}; "
+                "refusing the call before egress (a pricing gap must not "
+                "become a way to evade budget caps)"
+            ) from exc
+
+    async def _enforce_spend_ceiling(
+        self,
+        request: LLMGenerateRequest | LLMGenerateWithToolsRequest,
+        *,
+        price: "PriceSnapshot | None",
+        attempted_tool: str,
+        input_chars: int,
+    ) -> None:
+        """Refuse before egress when the org spend ceiling would be breached.
+
+        Active only when the enforcer is wired AND a price was resolved (both
+        arrive together with the cost ledger on the postgres backend). Mirrors how
+        ``_require_price`` / ``_settle_cost`` are gated on a wired ledger: on the
+        memory backend / unit harnesses there is no ceiling store, so this is a
+        no-op. Raises ``OrgSpendCeilingExceeded`` (from the enforcer) on refusal,
+        BEFORE any SDK client is constructed or called.
+        """
+        if self._spend_ceiling is None or price is None:
+            return
+        await self._spend_ceiling.enforce(
+            org_id=request.org_id,
+            agent_id=request.agent_id,
+            governance_token_id=request.governance_token_id,
+            correlation_id=request.correlation_id,
+            attempted_tool=attempted_tool,
+            input_chars=input_chars,
+            requested_max_tokens=request.requested_max_tokens,
+            price=price,
+        )
+
+    @staticmethod
+    def _parse_retry_after(exc: anthropic.APIStatusError) -> float | None:
+        """The provider's Retry-After (seconds) if present and numeric, else None.
+
+        Only the delta-seconds form is honoured; an HTTP-date value falls through
+        to backoff (returns None). Never raises.
+        """
+        try:
+            header = exc.response.headers.get("retry-after")
+        except Exception:  # noqa: BLE001 — a malformed response must not break retry
+            return None
+        if header is None:
+            return None
+        try:
+            value = float(header)
+        except (TypeError, ValueError):
+            return None
+        return value if value >= 0 else None
+
+    def _retry_delay(self, attempt: int, exc: anthropic.APIStatusError) -> float:
+        """Seconds to sleep before the next attempt (1-indexed `attempt`).
+
+        429 honours Retry-After when present (capped at the max delay); otherwise
+        both 429 and 5xx use jittered exponential backoff bounded by the max delay.
+        """
+        if exc.response.status_code == 429:
+            retry_after = self._parse_retry_after(exc)
+            if retry_after is not None:
+                return min(retry_after, self._retry_max_delay)
+        backoff = min(self._retry_base_delay * (2.0 ** (attempt - 1)), self._retry_max_delay)
+        return backoff + random.uniform(0.0, self._retry_jitter)
+
+    async def _call_with_retry(self, invoke: Callable[[], Awaitable[Any]]) -> Any:
+        """Retry an already-bound provider call uniformly across egress paths.
+
+        Client-agnostic: `invoke` is a zero-argument callable returning a FRESH
+        awaitable for the provider call. The sync egress (generate) binds it
+        through asyncio.to_thread on anthropic.Anthropic; the async egress
+        (generate_with_tools) binds anthropic.AsyncAnthropic.messages.create
+        directly. Both paths share this one reliability wrapper regardless of
+        client type, so the two egresses are wrapped identically.
+
+        Policy (all bounds from Settings):
+          * 401 — fail closed immediately as LLMAuthenticationError; the message
+            carries no key material and the SDK exception is not chained.
+          * 429 — honour Retry-After, else jittered exponential backoff; bounded
+            attempts; then LLMRateLimited.
+          * >=500 — jittered exponential backoff; bounded attempts; then
+            LLMProviderUnavailable.
+          * other 4xx (incl. 400 / context overflow) — re-raise the provider's
+            typed error immediately, no retry.
+          * timeout — LLMTimeout immediately, NEVER retried (owner decision D2).
+          * connection failure — LLMProviderUnavailable immediately, no retry.
+          * unparseable response body — LLMMalformedResponse immediately, no
+            retry (owner decision D4).
+        """
+        last_exc: anthropic.APIStatusError | None = None
+        for attempt in range(1, self._retry_max_attempts + 1):
             try:
-                return await asyncio.to_thread(client.messages.create, **kwargs)
-            except anthropic.APIStatusError as retry_exc:
-                if retry_exc.response.status_code < 500:
-                    raise
+                return await invoke()
+            except anthropic.APITimeoutError as exc:
+                # Owner decision D2 — timeouts are NOT retried: a timed-out
+                # request may have COMPLETED and been billed by the provider
+                # while the response was lost. Retrying it spends real money a
+                # second time while the ledger records at most one row.
+                # Under-charging the ledger is an accounting defect;
+                # double-spending is a customer-visible one.
+                raise LLMTimeout(
+                    f"anthropic request exceeded the configured "
+                    f"{self._timeout_seconds}s timeout (never retried)"
+                ) from exc
+            except anthropic.APIConnectionError as exc:
+                # Non-timeout connection failure (refused / reset / dropped
+                # mid-response). This seam cannot distinguish a request the
+                # provider never saw from one it received and will bill, so it
+                # fails closed with no retry — the same double-spend rationale
+                # as the timeout above. The chained SDK message is static
+                # ("Connection error.") and carries no key material.
                 raise LLMProviderUnavailable(
-                    f"anthropic unavailable after retry: {retry_exc}"
-                ) from retry_exc
+                    "anthropic connection failed before a response was read "
+                    "(not retried)"
+                ) from exc
+            except json.JSONDecodeError as exc:
+                # Owner decision D4 — a malformed/truncated body is a PROVIDER
+                # failure, mapped and NOT retried: a 2xx the SDK cannot parse
+                # means the provider completed (and billed) the generation, so
+                # retrying would double-spend like a retried timeout would.
+                raise LLMMalformedResponse(
+                    "anthropic returned an unparseable response body "
+                    "(not retried)"
+                ) from exc
+            except anthropic.APIStatusError as exc:
+                status = exc.response.status_code
+                if status == 401:
+                    # Fail closed. Static message, no chaining (`from None`) so no
+                    # credential can reach the exception string, logs, or events.
+                    raise LLMAuthenticationError(
+                        "anthropic authentication failed (401)"
+                    ) from None
+                if status != 429 and status < 500:
+                    # 400 / context overflow and other non-retryable 4xx.
+                    raise
+                last_exc = exc
+                if attempt >= self._retry_max_attempts:
+                    break
+                await asyncio.sleep(self._retry_delay(attempt, exc))
+
+        if last_exc is None:
+            # The loop only breaks after a retryable failure, so reaching here
+            # means it never ran: `range(1, self._retry_max_attempts + 1)` was
+            # empty, i.e. the attempt budget is < 1. Settings refuses that at
+            # boot (config.Settings._require_at_least_one_llm_attempt), but this
+            # is a REAL raise, not an assert: under `python -O` an assert is
+            # compiled out and the next line would raise AttributeError on None
+            # -- an error unrelated to the cause, for a call in which no provider
+            # request was ever attempted. Correctness must not depend on
+            # assertions being enabled.
+            raise LLMProviderUnavailable(
+                f"llm_retry_max_attempts={self._retry_max_attempts} is below 1, "
+                "so no anthropic request was attempted; it is a TOTAL attempt "
+                "count (use 1 for a single attempt with no retries)"
+            )
+        if last_exc.response.status_code == 429:
+            raise LLMRateLimited(
+                f"anthropic rate limited after {self._retry_max_attempts} attempts"
+            ) from last_exc
+        raise LLMProviderUnavailable(
+            f"anthropic unavailable after {self._retry_max_attempts} attempts"
+        ) from last_exc
+
+    async def _settle_cost(
+        self,
+        *,
+        request: LLMGenerateRequest | LLMGenerateWithToolsRequest,
+        message: Any,
+        prompt_tokens: int,
+        completion_tokens: int,
+        gate_model_id: str,
+        price: "PriceSnapshot | None",
+    ) -> int:
+        """Record the served call in the cost ledger; return its cost in micros.
+
+        Called ONLY after a provider response was actually received, so the
+        timeout / retry-exhausted / 401 paths can never write a row. With a
+        wired ledger, ONE CostObservation is built from first-hand response
+        data — the provider's RESOLVED model id (owner decision D3) and the
+        provider message id as the idempotency key. A ledger write failure is
+        logged at ERROR with the correlation_id and re-raised: a call whose
+        charge cannot be recorded must not be reported as a silent success.
+
+        ONE PRICE PER CALL (owner decision DEC-A). ``price`` is the snapshot the
+        PRE-CALL gate (`_require_price`) resolved for ``gate_model_id``, and it
+        is handed to ``record_cost`` rather than letting the DAL re-resolve from
+        ``observation.model``. Those two ids are NOT always the same: Anthropic
+        resolves aliases, so the provider can report serving a different id than
+        the one requested. Re-resolving from the resolved id priced the ledger
+        row at a rate the spend ceiling was never checked against, or — when
+        model_pricing carries no row for that form — raised PricingNotFound
+        AFTER the provider had already billed the account, aborting the write
+        and losing the record of money owed entirely.
+
+        AFTER REAL SPEND, A ROW IS ALWAYS WRITTEN (owner decision DEC-B): a
+        pricing gap on the resolved id can no longer fail this write, because no
+        price lookup happens here at all. The row still records what actually
+        served the request (DEC-C: ``model`` is the provider's resolved id);
+        only the PRICE comes from the gate's snapshot.
+
+        A DIVERGENCE IS REPORTABLE, NOT SILENT (owner decision DEC-D): when the
+        resolved id differs from the gate's id, that is logged at ERROR with the
+        org, correlation id, both ids, and the price actually applied.
+
+        THERE IS NO LEDGER-LESS BRANCH. `_require_price` refuses the call before
+        egress when no cost ledger is wired, so reaching here without one would
+        mean a provider call had been made and billed with no way to record it.
+        The assertion states that invariant rather than silently pricing the
+        response from a Settings float, which is what used to happen.
+        """
+        assert self._cost_ledger is not None, (
+            "_settle_cost reached with no cost ledger; _require_price must have "
+            "refused this call before egress"
+        )
+
+        from ...dal.cost_ledger import CostObservation
+
+        resolved_model_id = str(message.model)
+        if resolved_model_id != gate_model_id:
+            # DEC-D. The call is NOT failed and the price is NOT re-resolved —
+            # the gate's snapshot is the single price for this call by DEC-A —
+            # but the divergence is surfaced loudly so an alias the price list
+            # does not carry is fixed in model_pricing rather than absorbed.
+            log.error(
+                "llm_resolved_model_diverged org_id=%s correlation_id=%s "
+                "requested_model=%s resolved_model=%s applied_input_micros_per_mtok=%s "
+                "applied_output_micros_per_mtok=%s applied_pricing_version=%s",
+                request.org_id,
+                request.correlation_id,
+                gate_model_id,
+                resolved_model_id,
+                price.input_price_micros_per_mtok if price is not None else None,
+                price.output_price_micros_per_mtok if price is not None else None,
+                price.pricing_version if price is not None else None,
+            )
+
+        occurred_at = datetime.now(timezone.utc)
+        observation = CostObservation(
+            org_id=request.org_id,
+            correlation_id=request.correlation_id,
+            agent_id=request.agent_id,
+            run_id=request.governance_token_id,
+            provider=self._PROVIDER,
+            # DEC-C — first-hand observation of what actually served the request.
+            model=resolved_model_id,
+            input_tokens=prompt_tokens,
+            output_tokens=completion_tokens,
+            occurred_at=occurred_at,
+            billing_period=occurred_at.strftime("%Y-%m"),
+            idempotency_key=str(message.id),
+        )
+        try:
+            record = await self._cost_ledger.record_cost(observation, price=price)
+        except Exception:
+            log.error(
+                "cost_ledger_write_failed correlation_id=%s model=%s idempotency_key=%s",
+                request.correlation_id,
+                observation.model,
+                observation.idempotency_key,
+            )
+            raise
+        return record.cost_micros
 
     def _record_langfuse(
         self, request: LLMGenerateRequest, model_id: str, response: LLMGenerateResponse
@@ -224,6 +742,15 @@ class AnthropicAdapter:
     async def generate(self, request: LLMGenerateRequest) -> LLMGenerateResponse:
         self._check_budget(request)
         model_id = self._concrete_model(request.model)
+        price = await self._require_price(org_id=request.org_id, model_id=model_id)
+        # Org spend-ceiling gate — refuses BEFORE the SDK client is built/called,
+        # so a refused call never reaches the provider and never writes a ledger row.
+        await self._enforce_spend_ceiling(
+            request,
+            price=price,
+            attempted_tool="llm.generate",
+            input_chars=_generate_input_chars(request),
+        )
 
         span = self._tracer.start_span("llm.generate") if self._tracer is not None else None
         if span is not None:
@@ -240,8 +767,11 @@ class AnthropicAdapter:
             if request.system:
                 kwargs["system"] = request.system
 
-            client = anthropic.Anthropic(api_key=self._api_key)
-            message = await self._call_with_retry(client, kwargs)
+            # The adapter's ONE sync client, not a fresh one per call.
+            client = self._sync_client()
+            message = await self._call_with_retry(
+                lambda: asyncio.to_thread(lambda: client.messages.create(**kwargs))
+            )
 
             text = "".join(
                 block.text
@@ -250,6 +780,15 @@ class AnthropicAdapter:
             )
             prompt_tokens = int(message.usage.input_tokens)
             completion_tokens = int(message.usage.output_tokens)
+            cost_usd_micros = await self._settle_cost(
+                request=request,
+                message=message,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                gate_model_id=model_id,
+                # DEC-A: the gate's snapshot, not a second resolution.
+                price=price,
+            )
             response = LLMGenerateResponse(
                 text=text,
                 provider=self._PROVIDER,
@@ -259,7 +798,7 @@ class AnthropicAdapter:
                     completion_tokens=completion_tokens,
                     total_tokens=prompt_tokens + completion_tokens,
                 ),
-                cost_usd_micros=self._estimate_cost(model_id, prompt_tokens, completion_tokens),
+                cost_usd_micros=cost_usd_micros,
             )
             self._record_langfuse(request, model_id, response)
             return response
@@ -274,8 +813,27 @@ class AnthropicAdapter:
     async def generate_with_tools(
         self, request: LLMGenerateWithToolsRequest, tools: list["ToolDefinition"]
     ) -> LLMGenerateResponse:
+        self._check_budget(request)
         model_id = self._concrete_model(request.model)
+        # Build the tool payload ONCE, before the pre-egress reads: the
+        # character-count estimate below then measures the schemas already built
+        # here instead of regenerating every one of them (Pydantic v2 does not
+        # memoize model_json_schema(), so each tool-loop iteration built every
+        # schema twice). Hoisting it above the DB round trips also means a tool
+        # registry with a post-sanitization name collision — a construction-time
+        # programming error — is refused without touching the database at all,
+        # rather than after the price and ceiling reads. Both orders refuse
+        # before any provider egress, so nothing is spent either way.
         anthropic_tools, name_map = _to_anthropic_tools(tools)
+        price = await self._require_price(org_id=request.org_id, model_id=model_id)
+        # Org spend-ceiling gate — same pre-egress refusal as generate(), on the
+        # second egress. Refuses before the async SDK client is built/called.
+        await self._enforce_spend_ceiling(
+            request,
+            price=price,
+            attempted_tool="llm.generate_with_tools",
+            input_chars=_tools_input_chars(request, tools, anthropic_tools),
+        )
         kwargs: dict[str, Any] = dict(
             model=model_id,
             max_tokens=request.requested_max_tokens,
@@ -286,11 +844,22 @@ class AnthropicAdapter:
         if request.system:
             kwargs["system"] = request.system
 
-        client = anthropic.AsyncAnthropic(api_key=self._api_key)
-        message = await client.messages.create(**kwargs)
+        # The adapter's ONE async client. This construction was inside the tool
+        # loop's per-iteration path, leaking a connection pool every iteration.
+        client = self._async_client()
+        message = await self._call_with_retry(lambda: client.messages.create(**kwargs))
         text, blocks = _normalize_anthropic_message(message, name_map=name_map)
         prompt_tokens = int(message.usage.input_tokens)
         completion_tokens = int(message.usage.output_tokens)
+        cost_usd_micros = await self._settle_cost(
+            request=request,
+            message=message,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            gate_model_id=model_id,
+            # DEC-A: the gate's snapshot, not a second resolution.
+            price=price,
+        )
         return LLMGenerateResponse(
             text=text,
             provider=self._PROVIDER,
@@ -300,7 +869,7 @@ class AnthropicAdapter:
                 completion_tokens=completion_tokens,
                 total_tokens=prompt_tokens + completion_tokens,
             ),
-            cost_usd_micros=self._estimate_cost(model_id, prompt_tokens, completion_tokens),
+            cost_usd_micros=cost_usd_micros,
             stop_reason=message.stop_reason,
             content=blocks,
         )
@@ -317,19 +886,8 @@ class AnthropicAdapter:
         parsed = json.loads(response.text)
         return schema.model_validate(parsed)
 
-    def _estimate_cost(self, model_id: str, prompt_tokens: int, completion_tokens: int) -> int:
-        settings = self._settings
-        if "haiku" in model_id:
-            in_price = float(getattr(settings, "llm_price_haiku_in", 0.80))
-            out_price = float(getattr(settings, "llm_price_haiku_out", 4.0))
-        elif "opus" in model_id:
-            in_price = float(getattr(settings, "llm_price_opus_in", 15.0))
-            out_price = float(getattr(settings, "llm_price_opus_out", 75.0))
-        else:
-            in_price = float(getattr(settings, "llm_price_sonnet_in", 3.0))
-            out_price = float(getattr(settings, "llm_price_sonnet_out", 15.0))
-        cost_usd = (
-            (prompt_tokens / 1_000_000) * in_price
-            + (completion_tokens / 1_000_000) * out_price
-        )
-        return int(cost_usd * 1_000_000)
+    # `_estimate_cost` used to live here: the Settings-float fallback that priced
+    # a response when no cost ledger was wired. It is GONE, not stubbed — see
+    # `_require_price`, which now refuses before egress instead. Keeping a
+    # raise-only stub would have left the refusal at settle time, i.e. after the
+    # provider had already billed the call.

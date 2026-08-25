@@ -28,6 +28,8 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -47,23 +49,100 @@ from ...app.governance.authority import GovernanceAuthority, GovernanceDenied
 from ...contracts.base import AgentContract
 from ...contracts.registry import AgentRegistry, resolve_model
 from ...contracts.token import ValidationStage, validate_tool_call
-from ...dal.ports import DeliverableRow
+from ...dal.ports import DeliverableRow, HitlEscalation, HitlQueueRepository
+from ...events.bus import EventBus
+from ...schemas.hitl import HitlReplayEnvelope
+from ...schemas.events.decision import (
+    DecisionApproved,
+    DecisionDeferredToHuman,
+    DecisionEvaluated,
+    DecisionRejected,
+)
 from ...tools.base import ToolError
 from ...tools.proxy import ToolProxy
+from ..principal.errors import AuthorityExceeded, AuthorityUnavailable
+from ..principal.provider import AuthorityProvider
+from ..decision_engine.evaluator import DecisionEvaluator
+from ..decision_engine.events import (
+    AGENT_EXECUTE_ACTION_KIND,
+    DecisionProposal,
+    DecisionResult,
+    hitl_id_for,
+)
 
 log = logging.getLogger(__name__)
 
+# HITL ticket lifetime — mirrors the async writer's default
+# (decision_engine/hitl_writer.py:34) so both writers agree.
+_HITL_EXPIRY_HOURS = 48
+
+# Terminal outcome -> audit `result` vocabulary. IDENTICAL to the inline engine's
+# mapping (app/decision_engine/engine.py) so a synchronous decision audits the
+# same way an async one does.
+_DECISION_AUDIT_RESULT: dict[str, str] = {
+    "approved": "success",
+    "rejected": "denied",
+    "deferred_to_human": "escalated",
+}
+
+# Deliverable type per agent. EVERY registered agent must appear here — a
+# deliverable's type is part of the audit record this product sells, so no agent
+# may be typed by omission. `tests/contract/test_agent_contracts.py` fails when a
+# registered agent is missing, which is what makes that a rule rather than a
+# convention.
+#
+# "other" is a DELIBERATE value, not a default. The vocabulary is fixed by the
+# CHECK constraint on `deliverables.deliverable_type` (migration 0006:42-47:
+# marketing_copy, seo_report, ad_creative, strategy_doc, social_post, email_copy,
+# landing_page, blog_post, research_report, competitor_analysis, other) and is
+# mirrored at the edge (`edge/routes/deliverables.py:18-22`). Where an agent's
+# contract does not determine which of those ten a run produces — because the
+# contract carries no output-kind field and the output schema names no artefact
+# type — the honest entry is "other". Picking a narrower one would be a guess
+# stamped onto an audit record. Each such entry below records why.
 _AGENT_DELIVERABLE_TYPE: dict[str, str] = {
+    # -- Derived from the agent's output schema / contract role ---------------
     "hook_generator_agent": "marketing_copy",
     "ad_copy_agent": "ad_creative",
     "caption_writer_agent": "social_post",
-    "script_writer_agent": "other",
     "cta_optimizer_agent": "marketing_copy",
     "copy_director": "marketing_copy",
     "vp_creative": "strategy_doc",
     "director_growth": "strategy_doc",
     "seo_keyword_agent": "seo_report",
+    # -- Deliberately "other": no vocabulary term describes the artefact -----
+    # A video/ad script is not any of the ten (nearest, blog_post, is a
+    # different medium).
+    "script_writer_agent": "other",
+    # A budget summary is a finance artefact; the vocabulary has no finance term.
     "cfo_agent": "other",
+    # Executive judgement/decision records. `strategy_doc` would over-claim:
+    # these contracts approve, veto, and route rather than author a strategy.
+    "ceo": "other",
+    "cmo": "other",
+    # Art direction is a visual brief; `ad_creative` means the finished asset.
+    "art_director": "other",
+    # Production scheduling and resourcing output; no vocabulary term applies.
+    "creative_operations_manager": "other",
+    # Brand/tone verdicts on someone else's copy — a review, not copy. Calling
+    # them `marketing_copy` would mistype a compliance record as the asset.
+    "brand_guardian_agent": "other",
+    "tone_of_voice_agent": "other",
+    # A fraud/risk verdict. `research_report` would misrepresent a control.
+    "fraud_detection_agent": "other",
+    # Outreach drafts. NOT `email_copy`: the contract does not fix the channel,
+    # so the type would be right only when the channel happens to be email.
+    "sdr_outreach_agent": "other",
+    # A qualification verdict on a lead, not a document.
+    "lead_qualifier_agent": "other",
+    # Agency intake/drafting whose artefact kind is set by the engagement, not
+    # by the contract.
+    "agency_requirements_analyst": "other",
+    "agency_deliverable_drafter": "other",
+    # A conversational turn, not a document. The co-work agent's output is a
+    # reply in a live session; no term in the ten-value vocabulary describes it,
+    # and it does not normally produce a deliverable at all.
+    "cowork_agent": "other",
 }
 
 
@@ -79,6 +158,51 @@ class AgentToolLoopExceeded(AgentOutputError):
     """The tool-use loop hit max_tool_iterations without a final answer."""
 
 
+class AgentGovernanceRejected(Exception):
+    """The synchronous decision gate rejected the request (owner decision D4:
+    HTTP 403 carrying the decision reason). No LLM call, no deliverable, no
+    ledger row."""
+
+
+class AgentDeferredToHuman(Exception):
+    """The synchronous decision gate deferred the request to a human (owner
+    decision D4: HTTP 202 carrying hitl_id). A hitl_queue row is written first —
+    guaranteed by _govern's ordering (D3): the row is durable before the terminal
+    DecisionDeferredToHuman event and the audit record are emitted, so this
+    exception is never raised for a hitl_id that does not exist. No LLM call, no
+    deliverable, no ledger row."""
+
+    def __init__(self, *, hitl_id: UUID, reason: str) -> None:
+        super().__init__(reason)
+        self.hitl_id = hitl_id
+        self.reason = reason
+
+
+@dataclass(frozen=True, slots=True)
+class HitlApprovalContext:
+    """Proof that a HUMAN approved a previously deferred request.
+
+    Constructed ONLY by HitlQueueService.approve after its conditional
+    status='pending' claim succeeded. When execute() receives one, the
+    synchronous decision gate is already satisfied — the human verdict IS the
+    decision the gate deferred to — so the evaluator is not consulted again
+    (re-running it would defer forever).
+
+    This object is unreachable from the ordinary request path by construction:
+    POST /api/v1/agents/execute deserializes ExecuteAgentRequest
+    (extra="forbid" — any extra body field is a 422) and calls execute() with
+    exactly org_id/agent_id/input_data/user_id. An HTTP body is data; it can
+    never inject a Python object into a keyword argument the route does not
+    pass."""
+
+    hitl_id: UUID
+    decision_id: UUID | None
+    # The ORIGINAL request correlation — recorded as causation_id on the
+    # replay's audit record so defer -> approve -> execute is traceable (K8).
+    original_correlation_id: UUID
+    approved_by: str
+
+
 class AgentExecutionService:
     def __init__(
         self,
@@ -89,6 +213,11 @@ class AgentExecutionService:
         tools: ToolProxy | None = None,
         authority: GovernanceAuthority | None = None,
         audit: AuditService | None = None,
+        evaluator: DecisionEvaluator | None = None,
+        hitl: HitlQueueRepository | None = None,
+        bus: EventBus | None = None,
+        governed_org_ids: frozenset[str] = frozenset(),
+        principal_authority: AuthorityProvider | None = None,
     ) -> None:
         self._registry = registry
         self._llm = llm
@@ -96,6 +225,17 @@ class AgentExecutionService:
         self._tools = tools
         self._authority = authority
         self._audit = audit
+        # Synchronous decision gate (owner decisions D1/D3/D4/D5). When
+        # `governed_org_ids` is empty (the default, and every existing unit-test
+        # harness), the gate never runs and execution is byte-identical to today.
+        self._evaluator = evaluator
+        self._hitl = hitl
+        self._bus = bus
+        self._governed_org_ids = governed_org_ids
+        # Only the per-employee shape needs it. When absent, an execute() that
+        # names `on_behalf_of_principal` FAILS CLOSED (_principal_scope_for)
+        # rather than falling back to an ungated agent-rooted token.
+        self._principal_authority = principal_authority
 
     async def execute(
         self,
@@ -104,16 +244,54 @@ class AgentExecutionService:
         agent_id: str,
         input_data: dict[str, Any],
         user_id: str,
+        hitl_approval: HitlApprovalContext | None = None,
+        on_behalf_of_principal: str | None = None,
     ) -> DeliverableRow:
+        """Run one agent.
+
+        ``on_behalf_of_principal`` selects the PER-EMPLOYEE shape: the minted
+        token additionally binds that human, and the run can do no more than the
+        intersection of the contract's manifest with the human's own compiled
+        authority. Absent (the default, and every pre-existing caller), nothing
+        about this method changes -- the mint is agent-rooted, the token is v1.0,
+        and the signing input is byte-for-byte what it was before this parameter
+        existed. That is not merely intended: `canonical_signing_bytes`
+        (contracts/token.py:94-124) writes `token_version` / `on_behalf_of` ONLY
+        inside its `token_version != "1.0"` branch, so with no principal the keys
+        are ABSENT from the payload rather than present-and-null.
+        """
         # 1. Resolve contract (raises AgentNotRegistered on unknown id)
         contract = self._registry.resolve(agent_id)
 
-        # 2. Validate input
+        # 2. Validate input. On a HITL replay this IS the K7 re-validation: the
+        # stored payload is checked against the agent's CURRENT input schema
+        # before the gate, the mint, and any LLM spend — schema drift surfaces
+        # here as AgentInputError and nothing executes.
         input_cls = resolve_model(contract.input_schema)
         try:
             validated_input = input_cls.model_validate(input_data)
         except ValidationError as exc:
             raise AgentInputError(str(exc)) from exc
+
+        # 2.5 Synchronous in-process governance gate (owner decisions D1/D3/D4/D5).
+        # Governed orgs only (decision_engine_org_ids is the sole switch, D3); every
+        # other org executes exactly as today. Runs BEFORE prompt building, the
+        # governance-token mint, and any LLM spend: a reject/defer verdict means no
+        # LLM call, no deliverable, and no ledger row. `run_id` is the per-request
+        # correlation the decision, the mint, the LLM call, and the audit all share.
+        #
+        # A HitlApprovalContext skips the evaluator: the gate already ran for the
+        # original request and DEFERRED — the human approval it produced is the
+        # gate's resolution, and re-evaluating would defer again forever. The
+        # decision events + audit for that resolution are emitted by
+        # HitlQueueService before this method is ever called.
+        run_id: UUID = uuid4()
+        if org_id in self._governed_org_ids and hitl_approval is None:
+            await self._govern(
+                contract=contract, org_id=org_id, agent_id=agent_id,
+                correlation_id=run_id, validated_input=validated_input, user_id=user_id,
+                on_behalf_of_principal=on_behalf_of_principal,
+            )
 
         # 3. Build prompts
         system_prompt = _build_system_prompt(contract)
@@ -121,11 +299,11 @@ class AgentExecutionService:
 
         # 4. Call LLM — tool loop when the contract declares invocable_tools,
         # single-shot generate() otherwise (unchanged behavior).
-        run_id: UUID = uuid4()
         if contract.invocable_tools:
             token, response_text, provider, total_tokens = await self._execute_with_tools(
                 contract=contract, org_id=org_id, correlation_id=run_id,
                 system_prompt=system_prompt, user_prompt=user_prompt,
+                on_behalf_of_principal=on_behalf_of_principal,
             )
             governance_token_id = token.token_id
             log.info(
@@ -142,7 +320,11 @@ class AgentExecutionService:
             max_tokens = min(contract.max_token_budget // 2, 4096)
             if self._authority is not None:
                 token = await self._authority.mint(
-                    contract, org_id=org_id, correlation_id=run_id
+                    contract, org_id=org_id, correlation_id=run_id,
+                    scope=await self._principal_scope_for(
+                        contract, org_id=org_id, principal_id=on_behalf_of_principal
+                    ),
+                    on_behalf_of_principal=on_behalf_of_principal,
                 )
                 governance_token_id = token.token_id
                 # Pre-egress governance re-validation on the canonical single-shot
@@ -198,6 +380,8 @@ class AgentExecutionService:
                 temperature=0.7,
                 governance_token_id=governance_token_id,
                 org_id=org_id,
+                correlation_id=run_id,
+                agent_id=agent_id,
             )
             response = await self._llm.generate(llm_request)
             response_text = response.text
@@ -239,6 +423,11 @@ class AgentExecutionService:
 
         # 7. Persist
         deliverable_type = _AGENT_DELIVERABLE_TYPE.get(agent_id, "other")
+        metadata: dict[str, Any] = {
+            "input": input_data, "user_id": user_id, "llm_provider": provider,
+        }
+        if hitl_approval is not None:
+            metadata["replay_of_hitl_id"] = str(hitl_approval.hitl_id)
         row = await self._deliverables.create_deliverable(
             org_id=org_id,
             agent_id=agent_id,
@@ -246,9 +435,11 @@ class AgentExecutionService:
             title=title,
             content_markdown=content_markdown,
             governance_token_id=governance_token_id,
-            metadata={"input": input_data, "user_id": user_id, "llm_provider": provider},
+            metadata=metadata,
         )
         if self._audit is not None:
+            # On a HITL replay, causation_id carries the ORIGINAL request
+            # correlation (K8): defer -> approve -> execute share one chain.
             await self._audit.record(
                 org_id=org_id,
                 correlation_id=run_id,
@@ -257,9 +448,341 @@ class AgentExecutionService:
                 source_agent_id=agent_id,
                 authority_level=contract.authority_level,
                 governance_token_id=governance_token_id,
-                result_reason=f"deliverable={row.id} provider={provider}",
+                causation_id=(
+                    hitl_approval.original_correlation_id if hitl_approval else None
+                ),
+                result_reason=(
+                    f"deliverable={row.id} provider={provider}"
+                    + (f" hitl_id={hitl_approval.hitl_id}" if hitl_approval else "")
+                ),
             )
         return row
+
+    async def _principal_scope_for(
+        self, contract: AgentContract, *, org_id: str, principal_id: str | None
+    ) -> list[str] | None:
+        """The scope to REQUEST at mint, or None to keep mint's own default.
+
+        Returns None for the autonomous shape, which is what makes the no-principal
+        path byte-identical: mint then takes its `scope is None` branch
+        (governance/authority.py:296-298) and defaults to the contract manifest
+        exactly as it did before this method existed.
+
+        For the per-employee shape it returns the INTERSECTION of the manifest
+        with the human's compiled authority. Asking for the full manifest instead
+        would make the agent unusable by anyone who does not personally hold every
+        tool in it -- the same trap CoworkSessionService._mint documents
+        (app/cowork/session.py:101-114) and resolves the same way. Computing the
+        snapshot here and again inside mint is deliberate, for the reason given
+        there: mint's is the authoritative recompilation, so a grant withdrawn
+        between the two makes mint raise rather than honour what this computed a
+        moment earlier.
+
+        An EMPTY intersection raises rather than requesting a zero-tool token:
+        that is not a degraded run, it is an unauthorized one.
+        """
+        if principal_id is None:
+            return None
+        if self._principal_authority is None:
+            raise AuthorityUnavailable(
+                f"execute() was called on behalf of principal {principal_id!r} but "
+                "AgentExecutionService was built without a principal-authority "
+                "provider; refusing rather than running an ungated principal token"
+            )
+        snapshot = await self._principal_authority.snapshot_for(
+            org_id=org_id, principal_id=principal_id, at=datetime.now(timezone.utc)
+        )
+        manifest = [grant.tool_id for grant in contract.allowed_tools]
+        effective = sorted(set(manifest) & snapshot.scopes)
+        if not effective:
+            raise AuthorityExceeded(
+                requested=sorted(manifest),
+                ceiling=[],
+                excess=sorted(manifest),
+                principal_id=principal_id,
+            )
+        return effective
+
+    # ── Synchronous decision gate (D1/D3/D4/D5) ──────────────────────────────
+
+    async def _govern(
+        self,
+        *,
+        contract: AgentContract,
+        org_id: str,
+        agent_id: str,
+        correlation_id: UUID,
+        validated_input: Any,
+        user_id: str,
+        on_behalf_of_principal: str | None = None,
+    ) -> None:
+        """Run the synchronous decision gate and act on the verdict.
+
+        Reuses the pure inline evaluator (owner decision D2): builds a
+        DecisionProposal for this agent.execute request and calls the same
+        DecisionEvaluator.evaluate the async engine uses. The audit record AND the
+        terminal decision event are emitted for ALL THREE outcomes before this
+        method returns or raises (owner decision D5). Returns on `approved`
+        (execution proceeds unchanged); raises on the two non-approve terminals so
+        the route can map them (D4): AgentGovernanceRejected -> 403,
+        AgentDeferredToHuman -> 202.
+
+        ORDERING (D3). On a deferral the hitl_queue row is written BEFORE the
+        terminal event and the audit record. It used to be the other way round,
+        contradicting both AgentDeferredToHuman's docstring ("A hitl_queue row is
+        written first") and edge/routes/agents.py ("the hitl_queue row was
+        written before this response") — and, worse, a subscriber reacting to
+        DecisionDeferredToHuman raced an empty table, while an _enqueue_hitl
+        failure (Postgres down, FK violation, RLS refusal) 500'd the request with
+        a terminal "deferred, hitl_id=X" event and audit record already published
+        for a row that would never exist. A published terminal event now always
+        describes a row that is already durable.
+        """
+        if self._evaluator is None:
+            raise RuntimeError(
+                f"org_id={org_id!r} is governed (decision_engine_org_ids) but "
+                "AgentExecutionService was built without a DecisionEvaluator"
+            )
+        proposal = _build_execution_proposal(
+            contract=contract, org_id=org_id, agent_id=agent_id, correlation_id=correlation_id
+        )
+        result = await self._evaluator.evaluate(proposal)
+
+        # D3: durable row first. A raise here means NO terminal event and NO
+        # audit record were published — the caller gets the failure and there is
+        # nothing downstream claiming a hitl_id that was never written.
+        hitl_id: UUID | None = None
+        if result.outcome == "deferred_to_human":
+            hitl_id = hitl_id_for(proposal.proposal_id)
+            await self._enqueue_hitl(
+                contract, proposal, result, hitl_id,
+                validated_input=validated_input, user_id=user_id,
+                on_behalf_of_principal=on_behalf_of_principal,
+            )
+
+        # D3: emission failure AFTER a written row is LOGGED AT ERROR NAMING THE
+        # ROW AND RE-RAISED — never swallowed. Justification: an unannounced but
+        # real 'pending' row stays visible and actionable in the reviewer's queue
+        # (a human approval re-emits the terminal event), whereas swallowing the
+        # failure would report a decision as delivered that no subscriber ever
+        # received.
+        try:
+            # H2: the id derived (and enqueued) above is passed in, not derived
+            # a second time inside _emit_decision.
+            await self._emit_decision(proposal, result, hitl_id=hitl_id)
+        except Exception:
+            if hitl_id is not None:
+                log.error(
+                    "hitl_row_written_but_decision_emit_failed",
+                    extra={
+                        "hitl_id": str(hitl_id),
+                        "org_id": proposal.org_id,
+                        "correlation_id": str(proposal.correlation_id),
+                        "decision_id": str(result.decision_id),
+                    },
+                    exc_info=True,
+                )
+            raise
+
+        if result.outcome == "approved":
+            return
+        if result.outcome == "rejected":
+            raise AgentGovernanceRejected(
+                "; ".join(result.reasons) or "governance rejected the request"
+            )
+        # deferred_to_human — the row is already durable; surface the 202.
+        assert hitl_id is not None  # set above for exactly this outcome
+        raise AgentDeferredToHuman(
+            hitl_id=hitl_id,
+            reason="; ".join(result.reasons) or result.hitl_trigger or "deferred to human",
+        )
+
+    async def _enqueue_hitl(
+        self,
+        contract: AgentContract,
+        proposal: DecisionProposal,
+        result: DecisionResult,
+        hitl_id: UUID,
+        *,
+        validated_input: Any,
+        user_id: str,
+        on_behalf_of_principal: str | None = None,
+    ) -> None:
+        """Persist the HITL escalation (and its parent decision) via the app-layer
+        DAL (owner decision K3). hitl_id is minted once by hitl_id_for
+        (events.py:54) and is the SAME id carried by the 202 response and the
+        terminal event. request_json (owner decisions K4/K6) is the serialized
+        HitlReplayEnvelope a later human approval executes.
+
+        The principal binding goes in the ENVELOPE (request_json), not in
+        proposal_json: HitlQueueService.approve rebuilds the execute() call purely
+        from the envelope, and reads proposal_json only for department /
+        action_kind / proposal_id. A binding stored only in proposal_json would be
+        durable and unreachable, which is worse than not storing it. As an ID
+        only -- see schemas/hitl.py for why storing the authority itself would
+        defeat the recompilation."""
+        if self._hitl is None:
+            raise RuntimeError(
+                f"org_id={proposal.org_id!r} deferred to human but "
+                "AgentExecutionService was built without a HitlQueueRepository"
+            )
+        now = datetime.now(timezone.utc)
+        envelope = HitlReplayEnvelope(
+            agent_id=proposal.proposing_agent_id,
+            input=validated_input.model_dump(mode="json"),
+            user_id=user_id,
+            correlation_id=proposal.correlation_id,
+            on_behalf_of_principal=on_behalf_of_principal,
+        )
+        await self._hitl.enqueue(
+            HitlEscalation(
+                decision_id=result.decision_id,
+                org_id=proposal.org_id,
+                correlation_id=proposal.correlation_id,
+                causation_event_id=proposal.source_event_id,
+                partition_key=proposal.partition_key,
+                proposing_agent=result.proposing_agent,
+                authority_level=result.authority_level or contract.authority_level,
+                action_kind=result.action_kind,
+                proposal_json=proposal.model_dump(mode="json"),
+                outcome=result.outcome,
+                outcome_reason="; ".join(result.reasons) or None,
+                policy_version=result.policy_version,
+                score_json=None,
+                governance_token_id=proposal.governance_token_id,
+                hitl_id=hitl_id,
+                trigger_reason=(
+                    result.hitl_trigger or "; ".join(result.reasons) or "deferred_to_human"
+                ),
+                expires_at=now + timedelta(hours=_HITL_EXPIRY_HOURS),
+                created_at=now,
+                request_json=envelope.model_dump(mode="json"),
+            )
+        )
+
+    async def _emit_decision(
+        self,
+        proposal: DecisionProposal,
+        result: DecisionResult,
+        *,
+        hitl_id: UUID | None = None,
+    ) -> None:
+        """Emit the terminal decision synchronously (owner decision D5).
+
+        Reuses the inline engine's terminal event classes — DecisionEvaluated then
+        exactly one of DecisionApproved / DecisionRejected / DecisionDeferredToHuman
+        — published on the same EventBus as DecisionEngine._emit, plus the
+        AuditService.record mirror. No new event type or stream is invented. A
+        decision that approves is still a decision and is recorded like the others.
+
+        ``hitl_id`` is the id `_govern` already derived and ENQUEUED, passed in
+        rather than re-derived here. Both sites used to call
+        ``hitl_id_for(proposal.proposal_id)`` independently; they agreed only
+        because that helper happens to be pure, so the event's id and the written
+        row's id were two derivations that nothing forced to match. It is
+        required for a ``deferred_to_human`` result and unused otherwise.
+        """
+        if self._bus is None:
+            raise RuntimeError(
+                f"org_id={proposal.org_id!r} is governed but AgentExecutionService "
+                "was built without an EventBus for decision emission"
+            )
+        await self._bus.publish(
+            DecisionEvaluated(
+                tenant_id=proposal.org_id,
+                partition_key=proposal.partition_key,
+                department="decision",
+                governance_token_id=proposal.governance_token_id,
+                causation_id=proposal.source_event_id,
+                correlation_id=proposal.correlation_id,
+                payload=DecisionEvaluated.Payload(
+                    decision_id=result.decision_id,
+                    proposing_agent=result.proposing_agent,
+                    action_kind=result.action_kind,
+                    stages_completed=result.stages_completed,
+                    policy_version=result.policy_version,
+                ),
+            )
+        )
+        if result.outcome == "approved":
+            await self._bus.publish(
+                DecisionApproved(
+                    tenant_id=proposal.org_id,
+                    partition_key=proposal.partition_key,
+                    department="decision",
+                    governance_token_id=proposal.governance_token_id,
+                    causation_id=proposal.source_event_id,
+                    correlation_id=proposal.correlation_id,
+                    payload=DecisionApproved.Payload(
+                        decision_id=result.decision_id,
+                        action_kind=result.action_kind,
+                        approved_scope={
+                            "agent": result.proposing_agent,
+                            "department": proposal.department,
+                            "partition_key": proposal.partition_key,
+                        },
+                    ),
+                )
+            )
+        elif result.outcome == "rejected":
+            await self._bus.publish(
+                DecisionRejected(
+                    tenant_id=proposal.org_id,
+                    partition_key=proposal.partition_key,
+                    department="decision",
+                    governance_token_id=proposal.governance_token_id,
+                    causation_id=proposal.source_event_id,
+                    correlation_id=proposal.correlation_id,
+                    payload=DecisionRejected.Payload(
+                        decision_id=result.decision_id,
+                        action_kind=result.action_kind,
+                        stage_rejected_at=result.stage_failed_at or "unknown",
+                        reasons=result.reasons,
+                        policy_version=result.policy_version,
+                    ),
+                )
+            )
+        else:  # deferred_to_human
+            if hitl_id is None:  # pragma: no cover - _govern always supplies it
+                raise RuntimeError(
+                    "a deferred_to_human decision must carry the hitl_id of the "
+                    "row _govern already enqueued; none was passed"
+                )
+            await self._bus.publish(
+                DecisionDeferredToHuman(
+                    tenant_id=proposal.org_id,
+                    partition_key=proposal.partition_key,
+                    department="decision",
+                    governance_token_id=proposal.governance_token_id,
+                    causation_id=proposal.source_event_id,
+                    correlation_id=proposal.correlation_id,
+                    payload=DecisionDeferredToHuman.Payload(
+                        decision_id=result.decision_id,
+                        # The id of the row written above — not a second derivation.
+                        hitl_id=hitl_id,
+                        trigger_reason=result.hitl_trigger or "unspecified",
+                        routed_to=result.routed_to or "human_owner",
+                    ),
+                )
+            )
+        if self._audit is not None:
+            await self._audit.record(
+                org_id=proposal.org_id,
+                correlation_id=proposal.correlation_id,
+                action_type=f"decision.{result.outcome}",
+                result=_DECISION_AUDIT_RESULT[result.outcome],
+                source_agent_id=result.proposing_agent or None,
+                authority_level=result.authority_level,
+                governance_token_id=proposal.governance_token_id,
+                causation_id=proposal.source_event_id,
+                partition_key=proposal.partition_key,
+                inputs={"action_kind": result.action_kind, "stages": result.stages_completed},
+                outputs={
+                    "reasons": result.reasons,
+                    "score": result.score.value if result.score else None,
+                },
+                result_reason="; ".join(result.reasons) or None,
+            )
 
     async def _execute_with_tools(
         self,
@@ -269,6 +792,7 @@ class AgentExecutionService:
         correlation_id: UUID,
         system_prompt: str,
         user_prompt: str,
+        on_behalf_of_principal: str | None = None,
     ) -> tuple[Any, str, str, int]:
         if self._tools is None or self._authority is None or self._audit is None:
             raise RuntimeError(
@@ -276,7 +800,16 @@ class AgentExecutionService:
                 "AgentExecutionService was built without a ToolProxy/GovernanceAuthority/AuditService"
             )
 
-        token = await self._authority.mint(contract, org_id=org_id, correlation_id=correlation_id)
+        # With no principal both keyword arguments are None, which is exactly
+        # mint's own default for each -- the same branches, the same v1.0 signing
+        # input as before this parameter existed.
+        token = await self._authority.mint(
+            contract, org_id=org_id, correlation_id=correlation_id,
+            scope=await self._principal_scope_for(
+                contract, org_id=org_id, principal_id=on_behalf_of_principal
+            ),
+            on_behalf_of_principal=on_behalf_of_principal,
+        )
 
         available = []
         for tool_id in contract.invocable_tools:
@@ -340,6 +873,8 @@ class AgentExecutionService:
                 temperature=0.7,
                 governance_token_id=token.token_id,
                 org_id=org_id,
+                correlation_id=correlation_id,
+                agent_id=token.agent_id,
             )
             response = await self._llm.generate_with_tools(request, available)
             provider = response.provider
@@ -429,6 +964,34 @@ class AgentExecutionService:
 
 
 # ── Private helpers ──────────────────────────────────────────────────────────
+
+def _build_execution_proposal(
+    *, contract: AgentContract, org_id: str, agent_id: str, correlation_id: UUID
+) -> DecisionProposal:
+    """Build the DecisionProposal the synchronous gate evaluates for one
+    agent.execute request.
+
+    All ids derive from the per-request correlation id (so hitl_id_for is stable
+    and the decision is idempotent on it). The proposal carries no spend and
+    requires_external_launch=False: the external-publication signal for THIS
+    vertical is the contract's human_in_loop_triggers, read by the evaluator
+    (owner decision K1), not this flag (which drives the async business-event
+    path). action_kind is the authorized agent.execute kind (K2)."""
+    return DecisionProposal(
+        proposal_id=correlation_id,
+        correlation_id=correlation_id,
+        partition_key=f"agent_execute:{agent_id}:{correlation_id}",
+        org_id=org_id,
+        department=contract.department,
+        proposing_agent_id=agent_id,
+        action_kind=AGENT_EXECUTE_ACTION_KIND,
+        requires_external_launch=False,
+        occurred_at=datetime.now(timezone.utc),
+        source_event_id=correlation_id,
+        source_type=AGENT_EXECUTE_ACTION_KIND,
+        metadata={},
+    )
+
 
 def _build_system_prompt(contract: Any) -> str:
     lines = [

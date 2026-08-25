@@ -75,8 +75,13 @@ class Settings(BaseSettings):
     jwt_refresh_token_ttl_days: int = 14
 
     # Credential vault at-rest encryption (Fernet key: urlsafe base64, 32 bytes).
-    # Empty → the composition root mints an ephemeral dev key (memory backend);
-    # in production set this so stored credentials survive a restart.
+    # REQUIRED in production, exactly like governance_signing_key_pem above:
+    # when backend != "memory" and this is empty, startup fails closed
+    # (bootstrap.py `resolve_credential_encryption_key`). It used to fall back
+    # to a per-boot ephemeral key, which silently made every credential written
+    # to org_credentials undecryptable at the next restart. Only the in-memory
+    # backend, whose credential rows die with the process, may run without it.
+    # Hold it as a real secret: losing it is losing every stored credential.
     credential_encryption_key: str = ""
 
     # Rate limiting (per org, per window).
@@ -127,12 +132,22 @@ class Settings(BaseSettings):
     search_provider: str = "brave"
     search_api_key: str = ""
 
-    # HMAC-SHA256 secrets for inbound webhook verification; empty = check disabled.
+    # HMAC-SHA256 secret for inbound webhook verification; empty = check disabled.
     knowledge_webhook_secret: str = ""    # X-Hub-Signature-256 from n8n knowledge ingest
-    agent_prompts_hmac_secret: str = ""  # X-Skylize-Signature on agent-prompts endpoint
 
     # LLM provider keys
     anthropic_api_key: str = ""
+    # Optional Anthropic API base URL override (e.g. a regional gateway or a
+    # record/replay proxy). None/empty = the SDK default endpoint; the adapter
+    # omits the argument entirely rather than passing None so the SDK's own
+    # default resolution (env + built-in URL) is untouched.
+    anthropic_base_url: str | None = None
+    # Demo LLM mode. OFF by default so a missing anthropic_api_key fails the
+    # container build closed (bootstrap raises a typed config error naming the
+    # missing variable) rather than silently falling back to fake output. Set
+    # true to explicitly opt into the deterministic DemoLLMAdapter, which logs a
+    # WARNING on every call. Never enable in production.
+    llm_demo_mode: bool = False
     openai_api_key: str = ""
     langfuse_public_key: str = ""
     langfuse_secret_key: str = ""
@@ -149,13 +164,33 @@ class Settings(BaseSettings):
     llm_model_fast: str = "claude-haiku-4-5-20251001"
     llm_model_reasoning: str = "claude-opus-4-6"
 
-    # Pricing per 1M tokens in USD (configurable so ops can update without redeploy)
-    llm_price_sonnet_in: float = 3.0
-    llm_price_sonnet_out: float = 15.0
-    llm_price_haiku_in: float = 0.80
-    llm_price_haiku_out: float = 4.0
-    llm_price_opus_in: float = 15.0
-    llm_price_opus_out: float = 75.0
+    # LLM egress retry policy — shared by BOTH the generate (sync) and
+    # generate_with_tools (async) egress paths. All bounds live here (no magic
+    # numbers in the adapter). 429 honours Retry-After when present, else uses
+    # jittered exponential backoff; 5xx uses jittered exponential backoff; both
+    # are bounded by llm_retry_max_attempts. 400/401 are never retried.
+    llm_retry_max_attempts: int = 3        # total attempts per call (initial + retries)
+    llm_retry_base_delay_seconds: float = 1.0   # exponential backoff base (attempt 1)
+    llm_retry_max_delay_seconds: float = 30.0   # cap on any single backoff sleep
+    llm_retry_jitter_seconds: float = 0.5       # max random jitter added to each backoff
+    # Provider HTTP timeout, applied to BOTH egress clients. 120s bounds the
+    # longest plausible non-streaming completion (a few thousand output tokens
+    # at tens of tokens/second, with headroom); the SDK default (~600s) only
+    # keeps hung connections pinned for ten minutes. A timed-out call is never
+    # retried (see anthropic_adapter._call_with_retry).
+    llm_timeout_seconds: float = 120.0
+
+    # NO PRICE FIELDS HERE, DELIBERATELY. There used to be six `llm_price_*`
+    # floats used as a fallback when no cost ledger was wired. Two of the three
+    # tiers were the published prices of models that no longer exist — haiku
+    # 0.80/4.0 is RETIRED Haiku 3.5, opus 15.0/75.0 is DEPRECATED Opus 4.1 — so
+    # the fallback under-charged Haiku by 20% and over-charged Opus by 200%
+    # against the models actually configured above. `model_pricing` (migration
+    # 0013, read through the cost ledger) is the single source of truth for
+    # price, and a deployment with no ledger now REFUSES the call rather than
+    # estimating one (adapters/llm/anthropic_adapter.py `_require_price`).
+    # Do not reintroduce prices here: a second price source is how the two
+    # disagreed in the first place.
 
     @model_validator(mode="after")
     def _forbid_wildcard_cors(self) -> "Settings":
@@ -175,6 +210,80 @@ class Settings(BaseSettings):
         if not self.dev_auth and not self.jwt_secret:
             raise ValueError(
                 "SKYLIZE_JWT_SECRET must be set when dev_auth is disabled"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _forbid_dev_auth_on_a_real_backend(self) -> "Settings":
+        # Fail closed at boot. `dev_auth` makes edge/auth.py trust the X-Dev-Org /
+        # X-Dev-User / X-Dev-Roles headers VERBATIM (auth.py:39-50): any caller
+        # asserts any org and any role, with nothing verified. That is a local
+        # convenience, not authentication. On a real backend it means every
+        # tenant's data is readable by anyone who can reach the port, so the two
+        # settings are refused together rather than shipping that combination.
+        if self.dev_auth and self.backend != "memory":
+            raise ValueError(
+                "SKYLIZE_DEV_AUTH must be false when SKYLIZE_BACKEND is not "
+                f"'memory' (got backend={self.backend!r}). Dev auth trusts the "
+                "X-Dev-* headers verbatim, so it is not authentication at all. "
+                "Set SKYLIZE_DEV_AUTH=false (and SKYLIZE_JWT_SECRET, which the "
+                "check below then requires), or run SKYLIZE_BACKEND=memory."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _require_distinct_app_dsn_on_a_real_backend(self) -> "Settings":
+        # Fail closed at boot. `runtime_db_url` falls back to `db_url` when
+        # `db_app_url` is empty (see the property above), and `db_url` is the
+        # table-OWNING superuser used for migrations. A table owner bypasses RLS
+        # regardless of FORCE ROW LEVEL SECURITY
+        # (migrations/versions/0003_app_role_rls_subject.py:7-12), so forgetting
+        # SKYLIZE_DB_APP_URL silently disables every tenant-isolation policy in
+        # the schema while every request still succeeds.
+        #
+        # The comparison is deliberately a raw string equality after stripping
+        # surrounding whitespace: NOT a DSN parse. It catches the copy-paste case
+        # (the same string in both variables) without pretending to normalise
+        # hosts, ports, query parameters, or credentials. Two spellings of the
+        # same superuser DSN still pass this check -- see the .env.example note.
+        if self.backend != "memory":
+            app_dsn = self.db_app_url.strip()
+            if not app_dsn:
+                raise ValueError(
+                    "SKYLIZE_DB_APP_URL must be set when SKYLIZE_BACKEND is not "
+                    f"'memory' (got backend={self.backend!r}). Empty means the "
+                    "runtime connects as the table-owning superuser from "
+                    "SKYLIZE_DB_URL, which bypasses every RLS policy. Set it to "
+                    "the non-superuser skylize_app role created by migration 0003."
+                )
+            if app_dsn == self.db_url.strip():
+                raise ValueError(
+                    "SKYLIZE_DB_APP_URL must differ from SKYLIZE_DB_URL when "
+                    f"SKYLIZE_BACKEND is not 'memory' (got backend={self.backend!r}). "
+                    "SKYLIZE_DB_URL is the table-owning superuser used for "
+                    "migrations; connecting the runtime as that role bypasses "
+                    "every RLS policy. Set SKYLIZE_DB_APP_URL to the "
+                    "non-superuser skylize_app role created by migration 0003."
+                )
+        return self
+
+    @model_validator(mode="after")
+    def _require_at_least_one_llm_attempt(self) -> "Settings":
+        # Fail closed at boot. This is a TOTAL attempt count, not a retry count,
+        # and the adapter's loop is `range(1, llm_retry_max_attempts + 1)`. At 0
+        # that range is empty: the provider is never invoked, no HTTP request is
+        # made, and the adapter falls out of the loop into its "retries
+        # exhausted" tail with no exception to report -- an error unrelated to
+        # the real cause, for a call that was never attempted. Setting 0 to
+        # "disable retries" is a plausible operator action, so it is refused
+        # here rather than turned into a silent no-op at call time.
+        if self.llm_retry_max_attempts < 1:
+            raise ValueError(
+                "SKYLIZE_LLM_RETRY_MAX_ATTEMPTS must be >= 1; it is the TOTAL "
+                "number of attempts per call (initial attempt + retries), not a "
+                "retry count. Use 1 to disable retries: one attempt, no retry. "
+                f"Got {self.llm_retry_max_attempts}, which would make zero "
+                "provider requests."
             )
         return self
 

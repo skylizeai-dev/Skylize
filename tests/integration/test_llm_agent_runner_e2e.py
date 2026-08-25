@@ -66,15 +66,39 @@ def _settings(**overrides: object) -> Settings:
         "llm_model_default": "claude-sonnet-4-6",
         "llm_model_fast": "claude-haiku-4-5-20251001",
         "llm_model_reasoning": "claude-opus-4-6",
-        "llm_price_sonnet_in": 3.0,
-        "llm_price_sonnet_out": 15.0,
-        "llm_price_haiku_in": 0.80,
-        "llm_price_haiku_out": 4.0,
-        "llm_price_opus_in": 15.0,
-        "llm_price_opus_out": 75.0,
     }
     base.update(overrides)
     return Settings(**base)  # type: ignore[arg-type]
+
+
+def _priced_gateway() -> AnthropicAdapter:
+    """An adapter with a price source.
+
+    The adapter refuses before egress when no cost ledger is wired: a deployment
+    with no ledger has no price for the call, and the Settings floats that used
+    to stand in were the published prices of models that no longer exist. These
+    cases are about the runner and the transport, not about money, so they supply
+    a resolvable price rather than asserting on one.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    from skylize.dal.cost_ledger import CostRecord, PriceSnapshot
+
+    ledger = MagicMock()
+    ledger.resolve_price_for = AsyncMock(
+        return_value=PriceSnapshot(
+            input_price_micros_per_mtok=3_000_000,
+            output_price_micros_per_mtok=15_000_000,
+            pricing_version=1,
+            currency="USD",
+        )
+    )
+    ledger.record_cost = AsyncMock(
+        return_value=CostRecord(
+            entry_id=uuid4(), cost_micros=0, currency="USD", inserted=True
+        )
+    )
+    return AnthropicAdapter(settings=_settings(), cost_ledger=ledger)
 
 
 def _contract(
@@ -213,7 +237,7 @@ def _build_runner(
     if audit is None:
         audit = FakeAudit()
     if gateway is None:
-        gateway = AnthropicAdapter(settings=_settings())
+        gateway = _priced_gateway()
 
     proxy = ToolProxy(
         redis=redis,
@@ -391,7 +415,7 @@ async def test_e2e_run_timeout_raised_when_dispatch_exceeds_ceiling() -> None:
         registry=FakeRegistry(contract),
         governance=FakeGovernance(token=token),
         tool_proxy=proxy,
-        gateway=AnthropicAdapter(settings=_settings()),
+        gateway=_priced_gateway(),
         audit_publisher=audit,
     )
 

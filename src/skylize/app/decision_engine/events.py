@@ -32,10 +32,22 @@ from ...schemas.events.sales import (
 # decision_id / hitl_id, which is what makes replay and idempotency stable.
 _DECISION_NS = UUID("6f9619ff-8b86-d011-b42d-00c04fc964ff")
 
+# The synchronous agent-execution vertical's action kind. A first-class
+# KNOWN_ACTION_KINDS member (owner decision K2): the request-path gate
+# (POST /api/v1/agents/execute) builds a proposal with this kind, so policy_check
+# must recognize it rather than reject it as an unknown action class. This is an
+# authorized enum extension, not an invented value.
+AGENT_EXECUTE_ACTION_KIND = "agent.execute"
+
 # The action classes the engine knows how to evaluate. An unknown class is never
 # guessed — policy stage rejects it (decision_engine.md §6).
 KNOWN_ACTION_KINDS: frozenset[str] = frozenset(
-    {"creative.review", "sales.campaign", "sales.budget_reallocation"}
+    {
+        "creative.review",
+        "sales.campaign",
+        "sales.budget_reallocation",
+        AGENT_EXECUTE_ACTION_KIND,
+    }
 )
 
 DecisionOutcome = Literal["approved", "rejected", "deferred_to_human"]

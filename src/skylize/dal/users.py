@@ -26,6 +26,47 @@ class PgUserRepository:
                 row.display_name, row.roles, row.is_active, row.created_at,
             )
 
+    async def create_owner_of_new_org(self, row: UserRow) -> bool:
+        """Claim an org by inserting its owner, or report it already claimed.
+
+        TWO mechanisms, both required:
+
+        1. ``INSERT ... SELECT ... WHERE NOT EXISTS`` implements the rule the
+           owner decided — registration creates a NEW org only, so an org with
+           ANY existing user is refused. ``RETURNING`` makes "wrote nothing"
+           observable as ``None``.
+        2. The partial unique index ``users_one_owner_per_org`` (migration 0017)
+           settles the race. Under READ COMMITTED the NOT EXISTS subquery takes
+           no lock on rows that do not exist yet, so two concurrent registrations
+           for the same NEW org can both pass it; exactly one then survives the
+           index, and the loser arrives here as a unique violation.
+
+        Only a violation of that index means "already claimed". Any other unique
+        violation — notably ``users_email_unique`` — is a different condition and
+        is re-raised untouched.
+        """
+        import asyncpg
+
+        try:
+            async with self._db.admin_session() as conn:
+                written = await conn.fetchval(
+                    """
+                    INSERT INTO users
+                        (user_id, org_id, email, password_hash, display_name,
+                         roles, is_active, created_at)
+                    SELECT $1,$2,$3,$4,$5,$6,$7,$8
+                    WHERE NOT EXISTS (SELECT 1 FROM users WHERE org_id = $2)
+                    RETURNING user_id
+                    """,
+                    row.user_id, row.org_id, row.email, row.password_hash,
+                    row.display_name, row.roles, row.is_active, row.created_at,
+                )
+        except asyncpg.UniqueViolationError as exc:
+            if exc.constraint_name == "users_one_owner_per_org":
+                return False
+            raise
+        return written is not None
+
     async def get_by_email(self, email: str) -> UserRow | None:
         async with self._db.admin_session() as conn:
             rec = await conn.fetchrow(

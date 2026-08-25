@@ -15,7 +15,6 @@ monotonicity. That contract is what the old client-minted-id scheme violated.
 """
 from __future__ import annotations
 
-import json
 import uuid
 from collections import defaultdict
 from contextlib import asynccontextmanager
@@ -115,7 +114,8 @@ def _row(*, db_id: int, event_id: str, stream_key: str, outbox_row_id: str):
         "stream_key": stream_key,
         "tenant_id": stream_key.split(":")[1],
         "id": db_id,
-        "payload": json.dumps({"event_id": event_id, "event_type": "decision.approved"}),
+        # dict, as the pool's JSONB codec now yields on a real fetch
+        "payload": {"event_id": event_id, "event_type": "decision.approved"},
         "event_type": "decision.approved",
         "retry_count": 0,
     }
@@ -200,7 +200,7 @@ async def test_no_row_marked_published_without_stream_entry():
     assert on_stream_event_ids == {"e1", "e3"}
     assert published == {1, 3}
     # Invariant, stated directly: every published row has a stream entry.
-    id_to_event = {r["id"]: json.loads(r["payload"])["event_id"] for r in rows}
+    id_to_event = {r["id"]: r["payload"]["event_id"] for r in rows}
     for db_id in published:
         assert id_to_event[db_id] in on_stream_event_ids
 

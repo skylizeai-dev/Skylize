@@ -10,14 +10,18 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime, timezone
+from typing import Any
 from uuid import UUID
 
+from ..app.principal.models import JournalCursor, JournalEntry
 from .ports import (
     AgentStateRow,
     ApiKeyRow,
     AuditRow,
     BudgetCeiling,
     DeliverableRow,
+    HitlEscalation,
+    HitlQueueItem,
     KillScope,
     RefreshTokenRow,
     TenantRow,
@@ -216,6 +220,116 @@ class InMemoryProcessedEventStore:
         self._seen[(org_id, key)] = outcome
 
 
+class InMemoryHitlQueueRepository:
+    """In-memory HITL escalation store (memory backend + tests). Mirrors the Pg
+    implementation's contract: enqueue records the escalation; the review path
+    reads it back as HitlQueueItem and claims verdicts with the same
+    only-while-pending predicate. Tests still read raw escalations via `all`."""
+
+    def __init__(self) -> None:
+        self._rows: list[HitlEscalation] = []
+        # hitl_id -> mutable verdict state mirroring the Pg row's lifecycle
+        # columns: [status, verdict_by, verdict_json, verdict_at].
+        self._state: dict[UUID, list[Any]] = {}
+
+    async def enqueue(self, escalation: HitlEscalation) -> None:
+        self._rows.append(escalation)
+        self._state[escalation.hitl_id] = ["pending", None, None, None]
+
+    def all(self) -> list[HitlEscalation]:
+        return list(self._rows)
+
+    def _item(self, e: HitlEscalation) -> HitlQueueItem:
+        status, verdict_by, verdict_json, verdict_at = self._state[e.hitl_id]
+        return HitlQueueItem(
+            hitl_id=e.hitl_id,
+            org_id=e.org_id,
+            decision_id=e.decision_id,
+            correlation_id=e.correlation_id,
+            partition_key=e.partition_key,
+            trigger_reason=e.trigger_reason,
+            proposal_json=dict(e.proposal_json),
+            request_json=dict(e.request_json) if e.request_json is not None else None,
+            status=status,
+            verdict_by=verdict_by,
+            verdict_json=verdict_json,
+            verdict_at=verdict_at,
+            expires_at=e.expires_at,
+            created_at=e.created_at,
+        )
+
+    async def list_pending(
+        self, org_id: str, *, limit: int = 50, offset: int = 0
+    ) -> tuple[list[HitlQueueItem], int]:
+        pending = [
+            self._item(e)
+            for e in self._rows
+            if e.org_id == org_id and self._state[e.hitl_id][0] == "pending"
+        ]
+        pending.sort(key=lambda i: i.created_at, reverse=True)
+        return pending[offset : offset + limit], len(pending)
+
+    async def get(self, hitl_id: UUID, org_id: str) -> HitlQueueItem | None:
+        for e in self._rows:
+            if e.hitl_id == hitl_id and e.org_id == org_id:
+                return self._item(e)
+        return None
+
+    async def claim(
+        self,
+        hitl_id: UUID,
+        org_id: str,
+        *,
+        status_to: str,
+        verdict_by: str,
+        verdict_json: dict[str, Any],
+        verdict_at: datetime,
+        require_request: bool,
+    ) -> HitlQueueItem | None:
+        for e in self._rows:
+            if e.hitl_id != hitl_id or e.org_id != org_id:
+                continue
+            state = self._state[e.hitl_id]
+            if state[0] != "pending":
+                return None
+            if e.expires_at is not None and e.expires_at <= verdict_at:
+                return None
+            if require_request and e.request_json is None:
+                return None
+            self._state[e.hitl_id] = [status_to, verdict_by, dict(verdict_json), verdict_at]
+            return self._item(e)
+        return None
+
+    async def release(self, hitl_id: UUID, org_id: str, *, from_status: str) -> bool:
+        for e in self._rows:
+            if e.hitl_id == hitl_id and e.org_id == org_id:
+                if self._state[e.hitl_id][0] != from_status:
+                    return False
+                self._state[e.hitl_id] = ["pending", None, None, None]
+                return True
+        return False
+
+    async def terminate(self, hitl_id: UUID, org_id: str, *, from_status: str) -> bool:
+        """Terminal 'expired' for a permanently unreplayable row; verdict kept
+        (mirrors PgHitlQueueRepository.terminate)."""
+        for e in self._rows:
+            if e.hitl_id == hitl_id and e.org_id == org_id:
+                state = self._state[e.hitl_id]
+                if state[0] != from_status:
+                    return False
+                state[0] = "expired"
+                return True
+        return False
+
+    async def update_verdict_json(
+        self, hitl_id: UUID, org_id: str, verdict_json: dict[str, Any]
+    ) -> None:
+        for e in self._rows:
+            if e.hitl_id == hitl_id and e.org_id == org_id:
+                self._state[e.hitl_id][2] = dict(verdict_json)
+                return
+
+
 class InMemoryUserRepository:
     """In-memory human-user store + refresh-token lifecycle (memory backend + tests)."""
 
@@ -227,6 +341,25 @@ class InMemoryUserRepository:
     async def create_user(self, row: UserRow) -> None:
         self._users[row.user_id] = row
         self._by_email[row.email.lower()] = row.user_id
+
+    async def create_owner_of_new_org(self, row: UserRow) -> bool:
+        """Mirror of the Pg conditional insert (dal/users.py).
+
+        The two guards there — "no user in this org" and "at most one owner per
+        org" — are both applied, so the memory backend refuses exactly what
+        Postgres refuses. There is no race to settle: this store is a plain dict
+        mutated from a single event loop, so the check and the write cannot be
+        interleaved. The Pg implementation needs migration 0017's unique index
+        precisely because that is not true there.
+        """
+        if any(u.org_id == row.org_id for u in self._users.values()):
+            return False
+        if any(
+            u.org_id == row.org_id and "owner" in u.roles for u in self._users.values()
+        ):  # pragma: no cover - implied by the check above; kept for parity
+            return False
+        await self.create_user(row)
+        return True
 
     async def get_by_email(self, email: str) -> UserRow | None:
         user_id = self._by_email.get(email.lower())
@@ -350,3 +483,54 @@ def _descends_from(
             return True
         cursor = rows.get(cursor.parent_id)
     return False
+
+
+class InMemoryJournalRepository:
+    """In-memory work-journal store (memory backend + tests). Upholds the same
+    `JournalRepository` protocol (skylize.app.principal.journal) as
+    `PostgresJournalRepository`, including the ascending-seq, org+principal
+    scoping `since()` relies on."""
+
+    def __init__(self) -> None:
+        self._entries: list[JournalEntry] = []
+        self._cursors: dict[tuple[str, str], JournalCursor] = {}
+        self._next_seq = 1
+
+    async def append(self, entry: JournalEntry) -> int:
+        seq = self._next_seq
+        self._next_seq += 1
+        self._entries.append(entry.model_copy(update={"seq": seq}))
+        return seq
+
+    async def since(
+        self, *, org_id: str, principal_id: str, after_seq: int, limit: int = 200
+    ) -> list[JournalEntry]:
+        matched = [
+            e
+            for e in self._entries
+            if e.org_id == org_id and e.principal_id == principal_id and e.seq > after_seq
+        ]
+        matched.sort(key=lambda e: e.seq)
+        return matched[:limit]
+
+    async def get_cursor(
+        self, *, org_id: str, principal_id: str
+    ) -> JournalCursor | None:
+        return self._cursors.get((org_id, principal_id))
+
+    async def advance_cursor(
+        self, *, org_id: str, principal_id: str, to_seq: int, at: datetime
+    ) -> None:
+        key = (org_id, principal_id)
+        existing = self._cursors.get(key)
+        if existing is not None and existing.last_seen_seq >= to_seq:
+            return
+        self._cursors[key] = JournalCursor(
+            org_id=org_id, principal_id=principal_id, last_seen_seq=to_seq, last_seen_at=at
+        )
+
+    async def head_seq(self, *, org_id: str, principal_id: str) -> int:
+        matched = [
+            e.seq for e in self._entries if e.org_id == org_id and e.principal_id == principal_id
+        ]
+        return max(matched, default=0)

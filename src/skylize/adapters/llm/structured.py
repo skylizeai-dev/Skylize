@@ -36,9 +36,12 @@ retry, auditing each fallback as `llm_gateway.structured_fallback`. A second
 failure raises `StructuredValidationError` — no silent malformed return.
 
 Token budget (AC #7): structured generation routes through the gateway's normal
-budget-checked egress (`LLMGenerateRequest`/`generate`), so the per-run
-`max_token_budget` ceiling and `TokenBudgetExceeded` apply unchanged. Schema
-construction never bypasses the budget.
+egress (`LLMGenerateRequest`/`generate`) and never bypasses whatever that path
+enforces — it adds no side channel. Note what that path actually enforces
+today: `to_generate_request` does NOT set `max_token_budget`, so the adapter's
+request-level `_check_budget` is inert here exactly as it is everywhere else
+(gateway.py's GAP note). The live pre-egress ceilings on this route are the
+GovernanceToken BUDGET stage and the org spend ceiling.
 """
 
 from __future__ import annotations
@@ -113,6 +116,10 @@ class StructuredRequest(BaseModel):
     governance_token_id: UUID
     org_id: str
 
+    # Attribution context — mirrors LLMGenerateRequest (required, threaded).
+    correlation_id: UUID
+    agent_id: str
+
     # The enforcement mode of the provider this request will route to.
     capability: StructuredCapability = StructuredCapability.NONE
 
@@ -126,6 +133,8 @@ class StructuredRequest(BaseModel):
             temperature=self.temperature,
             governance_token_id=self.governance_token_id,
             org_id=self.org_id,
+            correlation_id=self.correlation_id,
+            agent_id=self.agent_id,
         )
 
 
@@ -308,7 +317,6 @@ async def generate_structured(
     request: StructuredRequest,
     schema: type[T],
     *,
-    correlation_id: UUID,
     audit: AuditSink | None = None,
 ) -> T:
     """Generate a validated `schema` instance via provider-native enforcement.
@@ -347,7 +355,7 @@ async def generate_structured(
         if audit is not None:
             await audit.record(
                 org_id=request.org_id,
-                correlation_id=correlation_id,
+                correlation_id=request.correlation_id,
                 action_type=STRUCTURED_FALLBACK_ACTION,
                 result="failed",
                 governance_token_id=request.governance_token_id,

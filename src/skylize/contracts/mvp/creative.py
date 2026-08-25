@@ -116,7 +116,14 @@ hook_generator_agent = AgentContract(
     failure_mode=FailureMode.FALLBACK_DEGRADED,
     memory_read_access=["creative:copy:hooks", "brand:voice"],
     memory_write_access=[],
-    human_in_loop_triggers=[],
+    # A hook_generator deliverable (ad/scroll-stopping hooks) is destined for
+    # external publication, so under the synchronous decision gate it defers to a
+    # human (owner decisions D6/K1). FIRST_EXTERNAL_LAUNCH is the existing
+    # human-in-loop trigger the evaluator reads for that vertical; it does not
+    # affect the async business-event path, where a hook_generator proposal
+    # short-circuits at authority (a worker cannot launch externally) or has
+    # requires_external_launch=False (so the trigger never matches in hitl_check).
+    human_in_loop_triggers=[HumanInLoopTrigger.FIRST_EXTERNAL_LAUNCH],
 )
 
 ad_copy_agent = AgentContract(
