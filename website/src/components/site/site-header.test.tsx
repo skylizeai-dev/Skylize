@@ -6,13 +6,9 @@ import { SiteHeader } from "@/components/site/site-header";
 afterEach(cleanup);
 
 describe("SiteHeader", () => {
-  it("exposes real /console/login sign-in links (not placeholder #)", () => {
+  it("does not expose a sign-in link", () => {
     render(<SiteHeader />);
-    const signIns = screen.getAllByRole("link", { name: "Sign in" });
-    expect(signIns.length).toBeGreaterThan(0);
-    for (const link of signIns) {
-      expect(link).toHaveAttribute("href", "/console/login");
-    }
+    expect(screen.queryByRole("link", { name: "Sign in" })).not.toBeInTheDocument();
   });
 
   it("links only to destinations that exist", () => {
@@ -29,7 +25,6 @@ describe("SiteHeader", () => {
       "/#apply",
       "/console-preview",
       "/my-day",
-      "/console/login",
     ]);
     for (const link of screen.getAllByRole("link")) {
       expect(allowed).toContain(link.getAttribute("href"));

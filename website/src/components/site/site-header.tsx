@@ -100,12 +100,6 @@ export function SiteHeader({ current = "home" }: { current?: SitePage }) {
               {link.label}
             </Link>
           ))}
-          <Link
-            href="/console/login"
-            className="font-mono text-[11px] tracking-[0.12em] text-muted-foreground uppercase transition-colors duration-200 hover:text-foreground"
-          >
-            Sign in
-          </Link>
           <SiteButton href="/#apply" size="sm">
             Apply as a Design Partner
           </SiteButton>
@@ -154,18 +148,6 @@ export function SiteHeader({ current = "home" }: { current?: SitePage }) {
                     </Link>
                   </li>
                 ))}
-                <li className="border-b border-border">
-                  <Link
-                    href="/console/login"
-                    onClick={() => setOpen(false)}
-                    className="flex items-baseline justify-between gap-4 py-4 font-serif text-2xl font-normal text-foreground"
-                  >
-                    Sign in
-                    <span className="font-mono text-[11px] tracking-[0.12em] text-muted-foreground tabular-nums">
-                      0{links.length + 1}
-                    </span>
-                  </Link>
-                </li>
               </ul>
               <div className="mt-auto pt-8">
                 <SiteButton
