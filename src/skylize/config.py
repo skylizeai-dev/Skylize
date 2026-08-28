@@ -84,6 +84,16 @@ class Settings(BaseSettings):
     # Hold it as a real secret: losing it is losing every stored credential.
     credential_encryption_key: str = ""
 
+    # Slack HITL approval notifier (platform-level, not a tenant credential —
+    # docs/06_integrations/integration_inputs.md §2.3). Bot token for Skylize's
+    # own workspace (chat:write scope) and the pre-designated channel to post
+    # approval requests into. Both empty = notifier disabled. Set only one and
+    # boot fails closed (bootstrap.py `resolve_slack_notifier_config`) — a bot
+    # token with nowhere to post, or a channel with no way to post to it, is a
+    # half-configured feature that would otherwise fail silently per-request.
+    slack_bot_token: str = ""
+    slack_approval_channel_id: str = ""
+
     # Rate limiting (per org, per window).
     rate_limit_per_minute: int = 120
     # Tighter dedicated budget for the sensitive GET /credentials/resolve path.

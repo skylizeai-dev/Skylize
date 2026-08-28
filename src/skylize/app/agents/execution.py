@@ -46,6 +46,7 @@ from ...adapters.llm.gateway import (
 from ...app.audit.service import AuditService
 from ...app.deliverables.service import DeliverableService
 from ...app.governance.authority import GovernanceAuthority, GovernanceDenied
+from ...app.notifications.slack import SlackApprovalNotifier
 from ...contracts.base import AgentContract
 from ...contracts.registry import AgentRegistry, resolve_model
 from ...contracts.token import ValidationStage, validate_tool_call
@@ -218,6 +219,7 @@ class AgentExecutionService:
         bus: EventBus | None = None,
         governed_org_ids: frozenset[str] = frozenset(),
         principal_authority: AuthorityProvider | None = None,
+        slack_notifier: SlackApprovalNotifier | None = None,
     ) -> None:
         self._registry = registry
         self._llm = llm
@@ -232,6 +234,11 @@ class AgentExecutionService:
         self._hitl = hitl
         self._bus = bus
         self._governed_org_ids = governed_org_ids
+        # Optional: platform-level HITL notifier (docs/06_integrations/
+        # integration_inputs.md §2.3). None when SLACK_BOT_TOKEN /
+        # SLACK_APPROVAL_CHANNEL_ID are unset — the gate behaves exactly as
+        # before, no notification attempted.
+        self._slack_notifier = slack_notifier
         # Only the per-employee shape needs it. When absent, an execute() that
         # names `on_behalf_of_principal` FAILS CLOSED (_principal_scope_for)
         # rather than falling back to an ungated agent-rooted token.
@@ -659,6 +666,21 @@ class AgentExecutionService:
                 request_json=envelope.model_dump(mode="json"),
             )
         )
+        # Best-effort notification — the row above is already durable, so a
+        # Slack outage must never fail the request that produced the 202. See
+        # SlackApprovalNotifier's docstring for why failures are logged, not
+        # raised.
+        if self._slack_notifier is not None:
+            await self._slack_notifier.notify_pending_approval(
+                hitl_id=hitl_id,
+                org_id=proposal.org_id,
+                proposing_agent=result.proposing_agent,
+                action_kind=result.action_kind,
+                trigger_reason=(
+                    result.hitl_trigger or "; ".join(result.reasons) or "deferred_to_human"
+                ),
+                expires_at=now + timedelta(hours=_HITL_EXPIRY_HOURS),
+            )
 
     async def _emit_decision(
         self,

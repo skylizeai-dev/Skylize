@@ -38,6 +38,7 @@ from .app.deliverables.service import DeliverableService
 from .app.governance.authority import GovernanceAuthority
 from .app.governance.broadcast import GovernanceBroadcast
 from .app.hitl.service import HitlQueueService
+from .app.notifications.slack import SlackApprovalNotifier
 from .app.orchestrator import LLMStepRunner, Orchestrator
 from .app.principal.journal import JournalRepository, WorkJournal
 from .app.principal.provider import PrincipalAuthorityService, PrincipalRepository
@@ -141,6 +142,39 @@ def resolve_credential_encryption_key(settings: Settings) -> str:
     return FernetEncryptor.generate_key()
 
 
+def resolve_slack_notifier_config(settings: Settings) -> tuple[str, str] | None:
+    """Return `(bot_token, channel_id)` for the Slack HITL notifier, or None
+    when the feature is off.
+
+    Platform-level secret, same shape as `resolve_credential_encryption_key`:
+    a `SKYLIZE_*` env var read into `Settings`, resolved once at composition
+    time so a misconfiguration fails the boot rather than the first HITL
+    escalation after a deploy (docs/06_integrations/integration_inputs.md
+    §2.3, `[APPROVED]` 2026-08-28).
+
+    Unlike the encryption key this feature is OPT-IN, not required for every
+    deployment: both `slack_bot_token` and `slack_approval_channel_id` empty
+    means the notifier is simply disabled (`AgentExecutionService` runs with
+    `slack_notifier=None`, byte-identical to before this feature existed).
+    Setting exactly one of the two is refused — a bot token with nowhere to
+    post, or a channel with no credential to post with, is a half-configured
+    feature that would otherwise fail silently on the first real escalation.
+    """
+    token = settings.slack_bot_token.strip()
+    channel = settings.slack_approval_channel_id.strip()
+    if not token and not channel:
+        return None
+    if not token or not channel:
+        missing = "SLACK_BOT_TOKEN" if not token else "SLACK_APPROVAL_CHANNEL_ID"
+        present = "SLACK_APPROVAL_CHANNEL_ID" if not token else "SLACK_BOT_TOKEN"
+        raise ConfigurationError(
+            f"SKYLIZE_{present} is set but SKYLIZE_{missing} is not. Both are "
+            "required together to enable the Slack HITL approval notifier, or "
+            "neither to leave it disabled."
+        )
+    return token, channel
+
+
 async def verify_app_role_is_rls_subject(db: "Database") -> None:
     """Refuse to start when the runtime database role can bypass RLS.
 
@@ -241,6 +275,9 @@ async def build_container(settings: Settings | None = None) -> Container:
     # missing this key must fail while it is still doing nothing, not after
     # Postgres and Redis connections are live. Consumed at the vault below.
     credential_encryption_key = resolve_credential_encryption_key(settings)
+    # Same reasoning: fail before any pool opens rather than on the first HITL
+    # escalation after a bad deploy.
+    slack_notifier_config = resolve_slack_notifier_config(settings)
     registry = MVP_REGISTRY
     closers: list[Callable[[], Awaitable[None]]] = []
 
@@ -562,11 +599,18 @@ async def build_container(settings: Settings | None = None) -> Container:
     # (decision_engine.evaluator, D2), the request-path HITL writer (K3), the bus
     # for terminal-event emission (D5), and the governed-org switch (D3). With no
     # governed orgs the gate is dormant and execution is unchanged.
+    slack_notifier: SlackApprovalNotifier | None = None
+    if slack_notifier_config is not None:
+        slack_bot_token, slack_channel_id = slack_notifier_config
+        slack_notifier = SlackApprovalNotifier(
+            bot_token=slack_bot_token, channel_id=slack_channel_id,
+        )
     agent_execution = AgentExecutionService(
         registry, llm, deliverables, tools=tool_proxy, authority=authority, audit=audit,
         evaluator=decision_engine.evaluator, hitl=hitl_repo, bus=bus,
         governed_org_ids=frozenset(settings.decision_engine_org_ids),
         principal_authority=principal_authority,
+        slack_notifier=slack_notifier,
     )
     # The human side of the gate: list pending escalations, approve (which
     # replays the stored request through the SAME agent_execution path with the

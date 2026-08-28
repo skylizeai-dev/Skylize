@@ -287,8 +287,9 @@ it is not recorded anywhere and must not be assumed.
 
 ## 2.3 - Slack
 
-> **Section status: `[OWNER-DECISION-REQUIRED]` - Q2.3a answered by owner
-> (platform-level); ready for final owner sign-off on this section as a whole.**
+> **Section status: `[APPROVED]` - 2026-08-28 (owner). Post-only HITL notifier per
+> Q2.3a/b/c below; button-interaction handling explicitly out of scope for this
+> approval and remains `[RESEARCH-SUGGESTED, UNVERIFIED]`.**
 
 `[CODE-VERIFIED]` Slack exists in the tree only as an example in a migration comment
 (`migrations/versions/0007_org_credentials.py:8`) and as the example scope string
@@ -457,6 +458,6 @@ reads `[APPROVED]` **and** the preconditions in 4.0 are met.
 - 2.0 Provider classification: __________________________  (owner, date)
 - 2.1 Stripe: __________________________________________  (owner, date)
 - 2.2 AWS / GCP: _______________________________________  (owner, date)
-- 2.3 Slack: ___________________________________________  (owner, date)
+- 2.3 Slack: Approved as post-only HITL notifier (2.3 above)  2026-08-28  (owner)
 - 2.4 GitHub: __________________________________________  (owner, date)
 - 3.0 Credential schema: _______________________________  (owner, date)
