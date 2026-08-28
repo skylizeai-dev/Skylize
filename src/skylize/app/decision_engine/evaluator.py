@@ -50,7 +50,12 @@ _RANK: dict[AuthorityLevel, int] = {
 # Stage names (mirrored into the emitted DecisionEvaluated record).
 STAGE_SECURITY = "safety_veto"
 STAGE_AUTHORITY = "authority_check"
-STAGE_POLICY = "opa_policy"
+# NOT "opa_policy": this stage is `policy_check` below -- pure inline Python
+# that never contacts OPA, Rego, or an OPA server. The literal is mirrored
+# verbatim into DecisionEvaluated.payload.stages_completed and the audit
+# record (engine.py), so naming it after OPA told every auditor reading
+# those records that a policy engine had gated the decision when none had.
+STAGE_POLICY = "inline_policy"
 STAGE_SCORING = "scoring"
 STAGE_CAPITAL = "capital_allocation"
 STAGE_CONFLICT = "conflict_resolution"

@@ -493,7 +493,7 @@ async def test_all_stages_pass_approved() -> None:
     assert result.outcome == "approved"
     assert result.stages_completed == [
         "authority_check",
-        "opa_policy",
+        "inline_policy",
         "scoring",
         "capital_allocation",
         "conflict_resolution",

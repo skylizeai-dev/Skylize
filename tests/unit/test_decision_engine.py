@@ -77,7 +77,7 @@ async def test_handle_event_rejects_worker_spend() -> None:
     )
     rejected = bus.published_of_type("decision.rejected")
     assert rejected
-    assert rejected[0].payload.stage_rejected_at == "opa_policy"
+    assert rejected[0].payload.stage_rejected_at == "inline_policy"
 
 
 async def test_handle_event_defers_external_launch_by_worker() -> None:
