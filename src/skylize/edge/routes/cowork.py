@@ -39,7 +39,7 @@ from ...app.principal.models import ActorKind
 from ...bootstrap import Container
 from ...schemas.agents.cowork import CoworkTurnIn
 from ...schemas.base import RequestContext
-from ..deps import enforce_rate_limit, get_container, require_any_role_or_user
+from ..deps import enforce_rate_limit_or_user, get_container, require_any_role_or_user
 from ..errors import CodedHTTPException, ErrorCode
 
 router = APIRouter(prefix="/api/v1/cowork", tags=["cowork"])
@@ -70,7 +70,7 @@ class CoworkTurnResponse(BaseModel):
     status_code=201,
     # Same limiter as /agents/execute: a turn calls a paid provider, and a chat
     # surface invites far more of them than a batch endpoint does.
-    dependencies=[Depends(enforce_rate_limit)],
+    dependencies=[Depends(enforce_rate_limit_or_user)],
 )
 async def cowork_turn(
     body: CoworkTurnIn,

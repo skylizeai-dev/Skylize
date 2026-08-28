@@ -15,7 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ...bootstrap import Container
 from ...schemas.base import RequestContext
-from ..deps import enforce_rate_limit, get_container, require_any_role_or_user
+from ..deps import enforce_rate_limit_or_user, get_container, require_any_role_or_user
 from ..errors import CodedHTTPException, ErrorCode
 
 router = APIRouter(prefix="/api/v1/agents", tags=["agents"])
@@ -62,7 +62,7 @@ class AgentListResponse(BaseModel):
     # The most expensive route in the product: it calls a paid provider. The
     # limiter is per-org and IN-PROCESS (edge/rate_limit.py:16), so the
     # effective limit is the configured value times the worker/replica count.
-    dependencies=[Depends(enforce_rate_limit)],
+    dependencies=[Depends(enforce_rate_limit_or_user)],
 )
 async def execute_agent(
     body: ExecuteAgentRequest,

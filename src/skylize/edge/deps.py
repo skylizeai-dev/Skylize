@@ -133,6 +133,29 @@ async def enforce_rate_limit(
     return ctx
 
 
+async def enforce_rate_limit_or_user(
+    ctx: RequestContext = Depends(get_context_or_user),
+    limiter: RateLimiter = Depends(get_rate_limiter),
+) -> RequestContext:
+    """Same limiter as `enforce_rate_limit`, resolved through `get_context_or_user`.
+
+    For routes whose OWN `ctx` dependency is `require_any_role_or_user` (i.e. the
+    human-facing console routes that accept a Skylize access JWT). Pairing those
+    with `enforce_rate_limit` resolves the caller TWICE through two different
+    auth paths, and the limiter's `get_context` leg rejects a Skylize JWT with
+    401 before the route's own — correct — resolver ever runs.
+
+    This changes no token verification, signature, scope, or audit behaviour: it
+    reuses the existing `get_context_or_user`, which itself falls back to
+    `get_context` for every X-Dev-*/OIDC/API-key caller. Routes that consume the
+    RETURNED context as their RBAC/tenant source keep using `enforce_rate_limit`
+    unchanged.
+    """
+    if not limiter.allow(ctx.org_id):
+        raise HTTPException(status_code=429, detail="rate limit exceeded")
+    return ctx
+
+
 async def enforce_anonymous_rate_limit(
     request: Request,
     limiter: RateLimiter = Depends(get_rate_limiter),
