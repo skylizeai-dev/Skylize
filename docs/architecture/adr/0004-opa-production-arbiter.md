@@ -1,9 +1,121 @@
 # ADR 0004 — OPA/Rego Is the Production Governance Arbiter; Inline Evaluator Is the Dev/Fallback
 
-**Status:** Accepted
+**Status:** Accepted (2026-07-17) — **CORRECTED 2026-08-28**, see [Correction](#correction-2026-08-28) below
 **Date:** 2026-07-17
 **Deciders:** Principal Architect, human owner
 **Related:** [decision_engine.md §header](../../04_decision_engine/decision_engine.md) · [guardrails.md](../../04_decision_engine/guardrails.md) · [ADR-0001](./0001-governance-signature-scheme.md) · [ADR-0003](./0003-n8n-admin-governance-gap.md) · `src/skylize/decision_engine/` · `src/skylize/app/decision_engine/` · `src/skylize/bootstrap.py` · branch `feat/opa-composition-glue` (prototype, unmerged) · external ADR register (Word doc), referenced there as "ADR-003" — untracked in this repository, cited here only as a pointer, not quoted
+
+---
+
+## Correction (2026-08-28)
+
+*Added after a forensic review of the code this ADR describes. The decision
+above stands and is not rewritten. This section records where the ADR's title
+and framing have been read as claiming more than the code does, and states the
+current position precisely. Where the Context section's implementation notes
+have gone stale since 2026-07-17, they are corrected here rather than edited in
+place.*
+
+### What the title implies, and what is actually running
+
+The title says OPA "**Is** the Production Governance Arbiter." Read alone —
+which is how a title gets read — that states a fact about the running system.
+It is not one, and was never meant to be: §4 of the Decision already says
+`"opa"` is the *destination*, not the current state. The title outran its own
+body. **Read the title as "is the designated production arbiter," a commitment,
+not a description.**
+
+**The arbiter running in production today, in every environment, is the inline
+evaluator** (`src/skylize/app/decision_engine/evaluator.py`). Not as a fallback
+that OPA might yield to under load — as the only engine that has ever gated a
+decision on this platform.
+
+- `src/skylize/config.py:122` — `decision_engine: Literal["inline", "opa"] = "inline"`.
+- `src/skylize/bootstrap.py:472-478` — raises `RuntimeError` for **any** value
+  other than `"inline"`. There is no environment in which `"opa"` boots.
+- **This guard is correct and must not be relaxed.** See the next subsection for
+  what would happen if it were.
+
+### The OPA package is fail-closed by design — and that is why it must stay unwired
+
+The OPA package's fail-closed posture is real, implemented, and verified:
+
+- `decision_engine/opa_client.py` raises `OPAPolicyDenied` on timeout, connect
+  error, non-200, malformed body, and a non-dict `result`; a missing `allow` key
+  defaults to `False` (`opa_client.py:163`). OPA being unreachable cannot become
+  a silent allow.
+- `decision_engine/pipeline.py:253-267` converts that exception into a terminal
+  `DecisionOutcome.REJECTED`.
+
+But fail-closed is only a virtue when the policy set can also say yes. **It
+cannot.** All seven `.rego` files under `policy/skylize/decision/` carry
+`default allow := false` and contain **zero rules that set `allow := true`** —
+`decision.rego` describes itself as a "fail-closed SKELETON... it contains NO
+business logic and can never approve anything."
+
+So flipping `SKYLIZE_DECISION_ENGINE=opa` today would not produce stricter
+governance. It would reject **100% of business actions**, unconditionally,
+including every legitimate one. The bootstrap guard is not a temporary
+inconvenience blocking a finished feature; it is what stands between the
+platform and a total, silent outage of every governed action. Relaxing it before
+real Rego content exists is a production incident, not a cutover.
+
+### The inline evaluator is permissive by default — the inverse posture
+
+The engine that *is* running has the opposite default from the one this ADR
+designates. `app/decision_engine/evaluator.py`'s `policy_check` (`:314-341`)
+tests three specific deny conditions — unknown action class, non-positive or
+sub-director spend, `brand_safety == "blocked"` — and if none matches, **falls
+through to `_PASS`** (`:341`). An action nobody wrote a rule against is
+approved.
+
+This is implicit-approve. It is the correct posture for a development stand-in
+and the wrong one for a governance arbiter, and it is worth stating plainly
+because the ADR's own framing invites the opposite assumption: a reader who
+knows OPA is fail-closed, and reads this ADR's title, may conclude the platform
+is fail-closed. **It is not.** Inverting the inline evaluator to default-deny is
+scheduled work and is not done.
+
+### No decision has ever passed real Rego
+
+Not in production, and not in any test. Every `allow=true` under
+`tests/decision_engine/` comes from `_MockOPA` or a patched `httpx` response —
+`test_consumer_integration.py`, `test_orchestrator_integration.py`,
+`test_pipeline.py`, `test_resume.py`, `test_department_vocabulary.py`,
+`test_opa_client.py`. The only tests that would exercise a live OPA server
+(`test_opa_client_integration.py:60,76`) **skip** without `SKYLIZE_TEST_OPA_URL`,
+and they skip in the default run.
+
+What the OPA test suite proves is that the client and pipeline handle OPA's
+responses correctly. It proves nothing whatever about whether the policies
+decide correctly, because no policy has ever decided anything.
+
+### Stale implementation notes in the Context section
+
+The Context section's "Current implementation state" described branch HEAD
+`96f00381` on 2026-07-17. Three of its items have since changed — recorded here,
+not edited above:
+
+| Context claim (2026-07-17) | Status 2026-08-28 |
+|---|---|
+| "No `SKYLIZE_DECISION_ENGINE` flag exists on this branch" | **Landed.** `config.py:122`, guard at `bootstrap.py:472-478`. |
+| "`consumer.py` and `constants.py` still target placeholder Redis stream names" | **Rebuilt** onto the `EventBus` port per ADR-0005; `SUBSCRIBED_STREAMS` deleted. |
+| "No `policy_inputs.md` exists in the repository" | **Authored.** `docs/04_decision_engine/policy_inputs.md`, status DRAFT — awaiting owner approval. Rego may not be written against it until approved. |
+
+The three preconditions in Decision §4 are therefore **partially** met: the
+transport is rebuilt and the input contract is drafted. **Real Rego content and
+wire-parity confirmation remain outstanding, and the input contract is
+unapproved.** `"opa"` stays unenablable.
+
+### Corrected position
+
+1. The OPA package **exists**, is **genuinely fail-closed**, and is
+   **deliberately unwired** — blocked on real policy content, not on plumbing.
+2. The live arbiter is the **inline evaluator**, which is
+   **permissive-by-default** and scheduled for inversion to default-deny.
+3. `bootstrap.py:472` **stays as it is.** It is the correct guard.
+4. Any document, brief, or diligence material stating that OPA gates production
+   decisions today is **wrong** and must be corrected before it is distributed.
 
 ---
 
