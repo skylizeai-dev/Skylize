@@ -96,6 +96,19 @@ services:
       # Local-only default, same convention as the DB passwords above; override
       # via the environment for anything reachable off this machine.
       SKYLIZE_JWT_SECRET: ${SKYLIZE_JWT_SECRET:-localdev-jwt-secret-change-me}
+      # Required on a non-memory backend (app/governance/keys.py fails closed
+      # when empty). No default here on purpose -- an empty value should fail
+      # closed exactly like the real signing key does, not fall back silently.
+      SKYLIZE_GOVERNANCE_SIGNING_KEY_PEM: ${SKYLIZE_GOVERNANCE_SIGNING_KEY_PEM:-}
+      # Required on a non-memory backend (config.py / bootstrap fail closed
+      # when empty). No default here either, same reasoning.
+      SKYLIZE_CREDENTIAL_ENCRYPTION_KEY: ${SKYLIZE_CREDENTIAL_ENCRYPTION_KEY:-}
+      # Real Claude when set; empty falls through to SKYLIZE_LLM_DEMO_MODE below.
+      SKYLIZE_ANTHROPIC_API_KEY: ${SKYLIZE_ANTHROPIC_API_KEY:-}
+      # Explicit opt-in to the deterministic DemoLLMAdapter when no Anthropic key
+      # is configured (bootstrap.py LLMConfigurationError otherwise). Never "true"
+      # in a real deployment.
+      SKYLIZE_LLM_DEMO_MODE: ${SKYLIZE_LLM_DEMO_MODE:-false}
     ports: ["8000:8000"]
     depends_on:
       postgres: { condition: service_healthy }
