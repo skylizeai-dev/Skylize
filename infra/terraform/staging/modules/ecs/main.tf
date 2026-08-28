@@ -156,22 +156,38 @@ resource "aws_ecs_task_definition" "api" {
           name      = "SKYLIZE_JWT_SECRET"
           valueFrom = var.jwt_secret_arn
         },
+        # ADDED 2026-08-28. Closes the boot blocker described below. Read by
+        # migration 0003 during this container's `alembic upgrade head`, BEFORE
+        # uvicorn starts, to create skylize_app with a password instead of
+        # without one. Named variable, not a secret_arns index.
+        {
+          name      = "SKYLIZE_APP_DB_PASSWORD"
+          valueFrom = var.app_db_password_arn
+        },
       ]
 
-      # STILL MISSING, AND STILL A BOOT BLOCKER -- SKYLIZE_APP_DB_PASSWORD.
-      # This container's CMD is `alembic upgrade head && uvicorn ...`, and
-      # migration 0003 reads SKYLIZE_APP_DB_PASSWORD from the environment to
-      # decide whether skylize_app is created `LOGIN PASSWORD '<pw>'` or a bare
-      # `LOGIN` with no password at all. Nothing in this terraform creates the
-      # skylize_app role -- modules/rds/main.tf provisions only the `skylize`
-      # master user -- so the role comes into existence here, on first boot,
-      # with NO password. The DATABASE_APP_URL secret then carries a password
-      # that RDS will reject, and bootstrap.py fails at `await db.connect()`.
-      # The ordering (migration creates the role before uvicorn connects) is
-      # fine; the password is not. Closing this needs a DB_APP_PASSWORD secret
-      # shell wired both here as an environment secret AND into whatever
-      # populates DATABASE_APP_URL, so the two agree. Not created here because
-      # it is coupled to a secret value the owner must choose.
+      # RESOLVED 2026-08-28 -- SKYLIZE_APP_DB_PASSWORD is wired above.
+      #
+      # What it was: this container's CMD is `alembic upgrade head && uvicorn
+      # ...`, and migration 0003 reads SKYLIZE_APP_DB_PASSWORD from the
+      # environment to decide whether skylize_app is created
+      # `LOGIN PASSWORD '<pw>'` or a bare `LOGIN` with no password at all
+      # (0003_app_role_rls_subject.py:49-50). Nothing in this terraform creates
+      # the skylize_app role -- modules/rds/main.tf provisions only the
+      # `skylize` master user -- so the role came into existence here, on first
+      # boot, with NO password. The DATABASE_APP_URL secret then carried a
+      # password RDS would reject, and bootstrap.py failed at
+      # `await db.connect()`. The ordering (migration creates the role before
+      # uvicorn connects) was always fine; the password was not.
+      #
+      # STILL AN OPERATIONS STEP, NOT AN AUTOMATED ONE. The shell is created
+      # empty in modules/secrets/main.tf and terraform never writes a value into
+      # it. Two secrets must be populated with the SAME password before the
+      # first boot of a fresh database:
+      #   /<project>/<env>/APP_DB_PASSWORD   -- the bare password
+      #   /<project>/<env>/DATABASE_APP_URL  -- a DSN embedding that same password
+      # Nothing verifies they agree. A mismatch is an authentication failure at
+      # boot, not a degraded mode.
 
       healthCheck = {
         command     = ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]

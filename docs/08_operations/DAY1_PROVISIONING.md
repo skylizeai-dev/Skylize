@@ -40,6 +40,113 @@ sense.
 
 ---
 
+## 1b. Resolution status (2026-08-28)
+
+*The inventory above was read-only. This section records what has since been
+wired, and corrects two claims in it that did not survive re-verification.*
+
+### RESOLVED — `SKYLIZE_APP_DB_PASSWORD` is now provisioned
+
+The 9th missing item is closed in terraform. Four additive changes:
+
+| File | Change |
+|---|---|
+| [modules/secrets/main.tf](infra/terraform/staging/modules/secrets/main.tf) | new `aws_secretsmanager_secret "app_db_password"` -> `/${project}/${environment}/APP_DB_PASSWORD`. **Shell only** — no `secret_version`, no value in the repo. |
+| [modules/secrets/outputs.tf](infra/terraform/staging/modules/secrets/outputs.tf) | named output `app_db_password_arn`, plus an append at index `[8]` of `secret_arns` so `modules/iam` grants `GetSecretValue` on it. |
+| [modules/ecs/variables.tf](infra/terraform/staging/modules/ecs/variables.tf) | `variable "app_db_password_arn"` — named, not a positional index, per the module's own warning. |
+| [modules/ecs/main.tf](infra/terraform/staging/modules/ecs/main.tf) | `SKYLIZE_APP_DB_PASSWORD` added to the task definition's `secrets` block; the "STILL MISSING, AND STILL A BOOT BLOCKER" comment replaced with the resolved state and the remaining operations step. |
+| [staging/main.tf](infra/terraform/staging/main.tf) | passes `app_db_password_arn = module.secrets.app_db_password_arn`. |
+
+Settings plumbing: `Settings.app_db_password` ([src/skylize/config.py](src/skylize/config.py)).
+Declared so the variable is documented and discoverable; its real consumer is
+`os.environ` inside [migrations/versions/0003_app_role_rls_subject.py:49](migrations/versions/0003_app_role_rls_subject.py#L49),
+which runs under alembic and never constructs `Settings`. Also added to
+[.env.example](.env.example).
+
+**Deliberately not validated as required.** Migration 0003 is idempotent and its
+`ALTER` branch does not reset an existing role's password, so a deploy against a
+database where `skylize_app` already exists is correct with this unset. A hard
+validator would fail those deploys for no reason. The case it guards is a fresh
+database.
+
+`terraform validate` passes on the modified configuration.
+
+**Still an operations step.** The shell is empty; terraform never writes a value
+into it. `APP_DB_PASSWORD` and the password embedded in `DATABASE_APP_URL` must
+be the same string, and **nothing verifies that they agree** — a mismatch is an
+authentication failure at boot, not a degraded mode. Populate both together.
+
+### CORRECTION — `SKYLIZE_DB_APP_URL` fail-loud was already implemented
+
+The task driving this section asked for fail-loud behaviour to replace a silent
+fallback to the superuser. **That was already in place, twice over**, and no
+behaviour change was needed:
+
+1. [config.py `_require_distinct_app_dsn_on_a_real_backend`](src/skylize/config.py) —
+   raises inside `Settings()` when `backend != "memory"` and `db_app_url` is
+   empty **or** equal to `db_url`. `Settings()` is constructed at module import
+   of `skylize.edge.gateway`, so uvicorn exits before binding a port.
+2. [bootstrap.py `verify_app_role_is_rls_subject`](src/skylize/bootstrap.py) —
+   connects and reads the role's own `pg_roles` row, refusing to start on a
+   `SUPERUSER` or `BYPASSRLS` role. This catches what the string comparison
+   cannot: a different spelling of the same superuser DSN.
+
+The `runtime_db_url` property does still contain `self.db_app_url or self.db_url`,
+but that branch is **unreachable on any real backend** — only `SKYLIZE_BACKEND=memory`
+reaches it, where there is no Postgres and no RLS to bypass. The comments around
+it described it as a dev-acceptable production fallback, which was stale and
+misleading; they have been corrected to state the interlock. No logic changed.
+
+`.github/workflows/deploy-staging.yml` needs **no change**. Its
+`SKYLIZE_APP_DB_PASSWORD: testpass` at lines 115 and 137 belongs to the
+integration-test job's ephemeral Postgres service container, not to any deployed
+environment. The deployed container's `SKYLIZE_DB_APP_URL` comes from the
+registered ECS task definition (`secret_arns[1]`); the deploy job downloads that
+task definition and swaps **only the image**
+(`amazon-ecs-render-task-definition`, lines 207-220), so environment wiring is
+terraform's job alone.
+
+### 3d — dead secrets: one is dead, one is not
+
+**`langfuse_secret_key` — genuinely inert. Recommendation: mark unused, do NOT wire.**
+
+- No `langfuse` client is ever constructed from settings. `bootstrap.py` contains
+  no reference to langfuse at all.
+- The two consumers take an injected client defaulting to `None`
+  ([anthropic_adapter.py:226](src/skylize/adapters/llm/anthropic_adapter.py#L226),
+  [decision_engine/pipeline.py:118](src/skylize/decision_engine/pipeline.py#L118)),
+  and both no-op when it is `None`. The only callers that pass one are three
+  unit tests passing a mock.
+- `langfuse` is **not a declared dependency** — it appears in `pyproject.toml`
+  only inside a prose comment.
+
+Wiring the env var would connect a secret to a client nobody builds, from a
+package that is not installed. That produces a deployment which *looks*
+instrumented and is not — the same class of false capability signal ADR-0004's
+correction addresses. Leave the Secrets Manager shell (harmless, empty, already
+IAM-granted) and treat `Settings.langfuse_public_key` / `langfuse_secret_key` as
+**declared but unconsumed** until a real Langfuse client is constructed in
+`bootstrap.py`. Populating the AWS secret today has no effect and should not be
+part of Day-1.
+
+**`db_password` — NOT dead. The audit above was wrong about this one.**
+
+Section 1 listed it alongside `langfuse_secret_key` as having "no path
+connecting" the secret to anything. It has one — it is simply not an ECS path.
+[modules/rds/main.tf:29-31](infra/terraform/staging/modules/rds/main.tf#L29-L31)
+reads it through a `data "aws_secretsmanager_secret_version"` block and
+[:46](infra/terraform/staging/modules/rds/main.tf#L46) assigns it as the RDS
+instance's master `password`. It is consumed at `terraform apply` time by
+Terraform itself, not at runtime by the container, which is exactly why it has —
+and should have — no task-definition wiring.
+
+**Recommendation: neither wire it nor mark it unused. Mark it Terraform-internal.**
+It does, however, still ship the placeholder `"REPLACE_ME_BEFORE_APPLY"` with
+`ignore_changes`, so the master password must be replaced before the RDS
+instance is created or the database comes up with a known literal password.
+
+---
+
 ## 2. Governance signing key generation vs. consumption
 
 [scripts/gen_governance_key.py](scripts/gen_governance_key.py):

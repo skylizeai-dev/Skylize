@@ -66,3 +66,34 @@ resource "aws_secretsmanager_secret_version" "db_password" {
     ignore_changes = [secret_string]
   }
 }
+
+# ADDED 2026-08-28. Password for the NON-SUPERUSER `skylize_app` role, i.e. the
+# role the runtime actually connects as.
+#
+# BOOT-CRITICAL, and the failure is not obvious from the error. The container's
+# CMD is `alembic upgrade head && uvicorn ...`. Migration 0003 reads
+# SKYLIZE_APP_DB_PASSWORD from the environment and creates the role as
+# `LOGIN PASSWORD '<pw>'` when set, or a bare `LOGIN` with NO PASSWORD when it
+# is not (migrations/versions/0003_app_role_rls_subject.py:49-50). Nothing else
+# in this terraform creates that role -- modules/rds/main.tf provisions only the
+# `skylize` master user -- so the role comes into existence on first boot, and
+# with this unset it is created passwordless. The DATABASE_APP_URL secret then
+# presents a password RDS will reject, and bootstrap fails at `await db.connect()`.
+#
+# THIS VALUE AND THE PASSWORD EMBEDDED IN DATABASE_APP_URL MUST BE THE SAME
+# STRING. They are two separate secrets describing one credential; nothing
+# checks that they agree, and a mismatch is an authentication failure at boot.
+# Populate both in the same operation.
+#
+# Migration 0003 is idempotent and its ALTER branch does NOT reset the password,
+# so once the role exists this secret is only read on a database where the role
+# has yet to be created. It is provisioned anyway: a rebuilt database that boots
+# without it is silently back to the passwordless-role failure above.
+#
+# SHELL ONLY -- created empty on purpose, with no aws_secretsmanager_secret_version.
+# The value is chosen and populated out of band; it must never be committed.
+resource "aws_secretsmanager_secret" "app_db_password" {
+  name                    = "/${var.project}/${var.environment}/APP_DB_PASSWORD"
+  description             = "Password for the non-superuser skylize_app role (SKYLIZE_APP_DB_PASSWORD, read by migration 0003). MUST match the password inside DATABASE_APP_URL."
+  recovery_window_in_days = 0
+}

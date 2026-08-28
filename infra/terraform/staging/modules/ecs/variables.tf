@@ -17,6 +17,11 @@ variable "secret_arns" { type = list(string) }
 # task definition needs get their own variable so the wiring is named.
 variable "jwt_secret_arn" { type = string }
 
+# Named for the same reason as jwt_secret_arn above: not an index into
+# secret_arns. Password for the non-superuser skylize_app role, read by
+# migration 0003 during the container CMD's `alembic upgrade head`.
+variable "app_db_password_arn" { type = string }
+
 variable "db_host" { type = string }
 variable "redis_host" { type = string }
 # These three were written as `{ type = number; default = 512 }`. HCL2 has no

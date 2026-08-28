@@ -30,16 +30,52 @@ class Settings(BaseSettings):
     # Two DSNs by privilege (Sprint-2 RLS fix):
     #   db_url      — admin/superuser; used ONLY for migrations + extension setup.
     #   db_app_url  — the non-superuser `skylize_app` role the RUNTIME connects as.
-    #                 It is NOBYPASSRLS, so tenant isolation actually applies. If
-    #                 unset, falls back to db_url (acceptable only for local/dev;
-    #                 production MUST set a distinct non-superuser app DSN).
+    #                 It is NOBYPASSRLS, so tenant isolation actually applies.
+    #
+    # `runtime_db_url` below falls back to db_url when db_app_url is empty, but
+    # that fallback is UNREACHABLE on any real backend and must stay that way:
+    # `_require_distinct_app_dsn_on_a_real_backend` raises inside Settings()
+    # when backend != "memory" and db_app_url is empty or equal to db_url, and
+    # bootstrap's `verify_app_role_is_rls_subject` then asks pg_roles directly
+    # and refuses to start on a SUPERUSER/BYPASSRLS role. The fallback exists
+    # only for SKYLIZE_BACKEND=memory, where there is no Postgres and no RLS to
+    # bypass. It is not a production degraded mode -- a missing app DSN is a
+    # hard boot failure, because a silent fall back to the table-owning
+    # superuser would disable every tenant-isolation policy in the schema while
+    # every request still succeeded.
     db_url: str = "postgresql://skylize:localdev@localhost:5432/skylize"
     db_app_url: str = ""
     redis_url: str = "redis://localhost:6379"
 
+    # MIGRATION-TIME INPUT, not a runtime connection setting. Declared here so
+    # SKYLIZE_APP_DB_PASSWORD is a first-class, documented setting rather than a
+    # bare environment variable only a migration knows about.
+    #
+    # Its real consumer reads os.environ directly, NOT this field:
+    # migrations/versions/0003_app_role_rls_subject.py:49 runs under alembic,
+    # which does not construct Settings. Nothing in the request path reads it.
+    #
+    # Deliberately NOT validated as required on a real backend. Migration 0003
+    # is idempotent and its ALTER branch leaves an existing role's password
+    # alone, so a deployment against a database where skylize_app already exists
+    # is correct with this unset. Requiring it would fail those deployments for
+    # no reason. The case it guards is a FRESH database, where leaving it unset
+    # creates the role with no password at all and the DSN in
+    # SKYLIZE_DB_APP_URL then cannot authenticate.
+    #
+    # It must equal the password embedded in db_app_url. Nothing checks that.
+    app_db_password: str = ""
+
     @property
     def runtime_db_url(self) -> str:
-        """The DSN the application runtime uses (app role if set, else db_url)."""
+        """The DSN the application runtime uses.
+
+        The `or self.db_url` fallback is reachable ONLY under
+        SKYLIZE_BACKEND=memory: on every other backend `Settings` has already
+        refused to construct with an empty `db_app_url`
+        (`_require_distinct_app_dsn_on_a_real_backend`). Do not treat this as a
+        production default.
+        """
         return self.db_app_url or self.db_url
 
     # Governance signing key (PKCS8 PEM, ECDSA P-384). REQUIRED in production:

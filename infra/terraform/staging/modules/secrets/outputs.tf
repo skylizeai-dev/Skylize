@@ -6,6 +6,7 @@ output "langfuse_secret_key_arn" { value = aws_secretsmanager_secret.langfuse_se
 output "governance_signing_key_arn" { value = aws_secretsmanager_secret.governance_signing_key.arn }
 output "db_password_secret_arn" { value = aws_secretsmanager_secret.db_password.arn }
 output "jwt_secret_arn" { value = aws_secretsmanager_secret.jwt_secret.arn }
+output "app_db_password_arn" { value = aws_secretsmanager_secret.app_db_password.arn }
 
 # APPEND-ONLY LIST. modules/ecs/main.tf reads this POSITIONALLY
 # (var.secret_arns[0] .. [5]) to build the task definition's `secrets` block, so
@@ -25,5 +26,9 @@ output "secret_arns" {
     aws_secretsmanager_secret.governance_signing_key.arn,
     aws_secretsmanager_secret.db_password.arn,
     aws_secretsmanager_secret.jwt_secret.arn,
+    # APPENDED 2026-08-28 at index [8]. Present here so modules/iam grants
+    # GetSecretValue on it; the ECS task definition consumes it by NAME via
+    # var.app_db_password_arn, never by this index.
+    aws_secretsmanager_secret.app_db_password.arn,
   ]
 }

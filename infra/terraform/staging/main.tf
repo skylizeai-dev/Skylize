@@ -118,6 +118,7 @@ module "ecs" {
   task_role_arn           = module.iam.task_role_arn
   secret_arns             = module.secrets.secret_arns
   jwt_secret_arn          = module.secrets.jwt_secret_arn
+  app_db_password_arn     = module.secrets.app_db_password_arn
   db_host                 = module.rds.db_endpoint
   redis_host              = module.elasticache.redis_endpoint
 }
