@@ -206,7 +206,9 @@ check.
 
 ## 2.1 - Stripe
 
-> **Section status: `[OWNER-DECISION-REQUIRED]` - BLOCKED additionally on 1.1.**
+> **Section status: `[OWNER-DECISION-REQUIRED]` - account model DECIDED (Q2.1e, Q2.1f,
+> 2026-08-28); remainder still open and BLOCKED additionally on 1.1.**
+> Full design: `docs/06_integrations/stripe_connector_design.md`.
 
 `[CODE-VERIFIED]` Existing doc position: Stripe is the "payment & subscription
 system of record", integrated by **reference IDs only, never card data**, with PCI
@@ -238,6 +240,42 @@ of it.
   derive the Stripe `Idempotency-Key` deterministically from the run's
   `correlation_id` plus the tool input, so a retry inside a run and a replay of the
   run both collapse to one refund. Owner must confirm the derivation and its scope.
+  **Note (2026-08-28):** Stripe prunes idempotency keys after **24 hours**
+  (https://docs.stripe.com/api/idempotent_requests), so this derivation protects
+  in-run retries but NOT a later replay. A durable local dedupe record is what makes
+  replay safe. Separately, the derivation is not implementable through
+  `ToolProxy.invoke` as it stands - `src/skylize/tools/proxy.py:322` hardcodes
+  `f"tool:{tool.tool_id}:{uuid4()}"` and `:314-321` states "Idempotent replay needs a
+  caller-supplied key, which this signature does not accept." Still open.
+- **Q2.1e `[DECIDED 2026-08-28]` Connect account model.** **Standard connected accounts
+  via the Connect OAuth flow, on the Accounts v1 API.** Deciding constraint: Q2.1f
+  requires linking a customer's pre-existing Stripe account; only OAuth does that, and
+  OAuth requires Accounts v1 - "You must use Accounts v1 in the following cases: Using
+  OAuth to authenticate connected accounts" (https://docs.stripe.com/connect/accounts-v2).
+  An Accounts v2 design was drafted and **withdrawn** on this basis; v2 could replicate
+  Standard's liability profile but not its reachability. Accepted cost: OAuth is
+  documented as "not recommended for new Connect platforms." See design doc 1.0.
+- **Q2.1f `[RESOLVED 2026-08-28 - moot]` Pre-existing vs newly provisioned account.**
+  Skylize must connect the customer's existing Stripe account. Under the Q2.1e decision
+  this is intrinsic to the flow rather than an open choice: Stripe's OAuth authorize step
+  lets a logged-in user "choose an account to connect to your platform directly"
+  (https://docs.stripe.com/connect/oauth-standard-accounts). No further decision needed.
+
+**Resolution status of the earlier questions under the Q2.1e decision:**
+
+- **Q2.1a** - answered in design doc 4.0.2, but **not** as originally proposed. Mode
+  becomes a first-class `livemode` boolean on a new `org_stripe_accounts` table, not a
+  value smuggled into the `label` column. Owner confirmation still required.
+- **Q2.1b** - **answered with evidence**: the webhook signing secret is **platform-level**.
+  A Connect endpoint is one endpoint with one signing secret covering all connected
+  accounts (`connect: true`), with the connected account named by a top-level `account`
+  field on the event (https://docs.stripe.com/connect/webhooks). The per-org
+  `org_credentials` option this question offered does not exist in Stripe's model.
+- **Q2.1c**, **Q2.1d** - unchanged and still open. Both are independent of Q2.1e.
+- **New questions raised by the decision** (design doc): **Q2.1h** platform-controlled
+  customer accounts cannot connect via OAuth `read_write` since June 2021 - product answer
+  required; **Q2.1i** confirm discarding the deprecated `access_token` / `refresh_token`
+  at the callback; **Q3.0b** the RLS circularity in `acct_ -> org_id` webhook resolution.
 
 ---
 
@@ -456,7 +494,8 @@ reads `[APPROVED]` **and** the preconditions in 4.0 are met.
 
 - 1.1 Spend ceiling on tool egress: ______________________  (owner, date)
 - 2.0 Provider classification: __________________________  (owner, date)
-- 2.1 Stripe: __________________________________________  (owner, date)
+- 2.1 Stripe (account model Q2.1e/Q2.1f decided 2026-08-28; Q2.1c, Q2.1d, Q2.1h,
+  Q2.1i still open - see `stripe_connector_design.md`): ___  (owner, date)
 - 2.2 AWS / GCP: _______________________________________  (owner, date)
 - 2.3 Slack: Approved as post-only HITL notifier (2.3 above)  2026-08-28  (owner)
 - 2.4 GitHub: __________________________________________  (owner, date)
