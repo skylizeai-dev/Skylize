@@ -26,6 +26,12 @@ from cryptography.hazmat.primitives.asymmetric.ec import EllipticCurvePublicKey
 from pydantic import ValidationError
 
 from ..app.audit.service import AuditService
+from ..app.credentials.oauth import (
+    GrantNotConnected,
+    GrantRevoked,
+    OAuthCredentialService,
+    RefreshUnavailable,
+)
 from ..app.principal.errors import CeilingExceeded, EnvelopeNotFound
 from ..app.principal.models import Reservation
 from ..app.principal.spend import SpendLedger
@@ -35,6 +41,9 @@ from .base import (
     ToolCallLimitExceeded,
     ToolContext,
     ToolConvergenceDenied,
+    ToolCredentialDenied,
+    ToolCredentialReconnectRequired,
+    ToolCredentialUnavailable,
     ToolDefinition,
     ToolExecutionError,
     ToolInputError,
@@ -89,6 +98,7 @@ class ToolProxy:
         live_state_for: LiveStateFor,
         record_action: RecordAction | None = None,
         spend_ledger: SpendLedger | None = None,
+        oauth_credentials: OAuthCredentialService | None = None,
     ) -> None:
         self._registry = registry
         self._audit = audit
@@ -101,6 +111,11 @@ class ToolProxy:
         # running ungoverned — an unenforced ceiling is worse than no ceiling,
         # because it reads as enforced.
         self._spend_ledger = spend_ledger
+        # None where no OAuth infrastructure is wired (memory backend, most unit
+        # harnesses). A tool declaring an `oauth` profile then FAILS CLOSED in
+        # `_ensure_oauth_credential` rather than dispatching against a grant
+        # nobody checked — same reasoning as the spend ledger above.
+        self._oauth_credentials = oauth_credentials
 
     @property
     def registry(self) -> ToolRegistry:
@@ -200,6 +215,25 @@ class ToolProxy:
             )
             raise ToolInputError(str(exc)) from exc
 
+        # Credential state (OAuthCredentialService). Only for tools declaring an
+        # `oauth` profile, and placed HERE — after every local check, but BEFORE
+        # the spend reservation below — deliberately.
+        #
+        # The comment on the spend block is the reason: a hold "must be placed as
+        # late as possible, after every cheaper denial has had its chance". A dead
+        # or unrefreshable credential IS such a denial. Ordered the other way, a
+        # revoked Google grant would first reserve budget against the customer's
+        # ceiling and only then discover the call could never run, leaving a hold
+        # to unwind — the exact waste the spend block was written to avoid.
+        #
+        # It sits after input validation because refreshing may cost a network
+        # round trip, and the cheapest denials must always run first.
+        if tool.oauth is not None:
+            await self._ensure_oauth_credential(
+                tool=tool, contract=contract, org_id=org_id,
+                correlation_id=correlation_id, governance_token=governance_token,
+            )
+
         # Spend ceiling (spend.SpendLedger). LAST gate before dispatch, and only
         # for spend-capable tools: the ceiling is a shared mutable resource, so a
         # hold must be placed as late as possible — after every cheaper denial has
@@ -254,6 +288,60 @@ class ToolProxy:
             )
 
         return ToolResult(tool_id=tool_id, output=output)
+
+    async def _ensure_oauth_credential(
+        self,
+        *,
+        tool: ToolDefinition,
+        contract: AgentContract,
+        org_id: str,
+        correlation_id: UUID,
+        governance_token: GovernanceToken,
+    ) -> None:
+        """Guarantee a live OAuth grant, or deny. Every exit that is not a return
+        denies, and every denial is audited before it is raised — the same
+        discipline `_reserve_spend` follows.
+
+        This method never returns the token. Its job is to establish that a
+        usable grant EXISTS (refreshing on demand if needed); the connector then
+        resolves the token itself per call, as the HubSpot precedent does
+        (tools/builtin/hubspot_tools.py:3-6). Keeping the secret off the call
+        path means it never lands on `ToolContext`, which is handed to every
+        handler and is trivially logged.
+        """
+        profile = tool.oauth
+        assert profile is not None  # caller checks; narrows for the type checker
+
+        async def deny(exc: ToolCredentialDenied) -> ToolCredentialDenied:
+            await self._audit_call(
+                tool_id=tool.tool_id, contract=contract, org_id=org_id,
+                correlation_id=correlation_id, governance_token=governance_token,
+                result="denied", reason=f"credential: {exc}",
+            )
+            return exc
+
+        if self._oauth_credentials is None:
+            raise await deny(ToolCredentialUnavailable(
+                f"tool {tool.tool_id!r} requires a {profile.provider!r} OAuth grant "
+                f"but no OAuth credential service is wired in this process; "
+                f"failing closed"
+            ))
+
+        try:
+            await self._oauth_credentials.ensure_fresh(
+                org_id=org_id,
+                provider=profile.provider,
+                label=profile.label,
+                correlation_id=correlation_id,
+            )
+        except (GrantNotConnected, GrantRevoked) as exc:
+            # Terminal for this call: a human must reconnect upstream. No retry
+            # and no in-Skylize approval can clear it.
+            raise await deny(ToolCredentialReconnectRequired(str(exc))) from exc
+        except RefreshUnavailable as exc:
+            # We could not CHECK. Fail closed, but do not claim the customer
+            # disconnected us — nothing about their grant is known to be wrong.
+            raise await deny(ToolCredentialUnavailable(str(exc))) from exc
 
     async def _reserve_spend(
         self,

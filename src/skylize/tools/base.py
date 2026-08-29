@@ -59,6 +59,26 @@ class ToolSpendProfile(BaseModel):
     amount_field: str = Field(min_length=1)
 
 
+class ToolOAuthProfile(BaseModel):
+    """Declares a tool DEPENDENT ON A LIVE OAUTH GRANT for `provider`.
+
+    Opt-in and explicit, exactly like `ToolSpendProfile`: a tool without this
+    profile keeps precisely the behaviour it had before the OAuth infrastructure
+    existed — no grant lookup, no refresh, no round trip. Provider-agnostic by
+    construction; `provider` is a registry key ('google_drive', 'notion', ...),
+    never a hardcoded provider inside the proxy.
+
+    `label` selects WHICH connection when an org has more than one for the same
+    provider; '' is the default connection, matching the `label` semantics
+    org_credentials already uses (migration 0007:41).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    provider: str = Field(min_length=1)
+    label: str = ""
+
+
 class ToolDefinition(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", arbitrary_types_allowed=True)
 
@@ -72,6 +92,9 @@ class ToolDefinition(BaseModel):
     #: Non-None marks this tool spend-capable; see `ToolSpendProfile`. Defaults to
     #: None so every tool registered before this field existed is unaffected.
     spend: ToolSpendProfile | None = None
+    #: Non-None marks this tool dependent on a live OAuth grant; see
+    #: `ToolOAuthProfile`. Defaults to None for the same reason `spend` does.
+    oauth: ToolOAuthProfile | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,6 +208,54 @@ class ToolSpendUnavailable(ToolSpendDenied):
 
     def __init__(self, reason: str) -> None:
         super().__init__(reason, defer_to_human=False)
+
+
+class ToolCredentialDenied(ToolPermissionDenied):
+    """A tool requiring a live OAuth grant was refused on CREDENTIAL STATE.
+
+    Its own branch of the hierarchy with `failed_stage="credential"`, deliberately
+    NOT reusing the `ToolSpendDenied` types. A dead Google grant and an exhausted
+    budget are unrelated conditions with unrelated remedies — one needs the
+    customer to reconnect an integration, the other needs a ceiling raised or a
+    human approval — and collapsing them would make both unactionable in the
+    audit trail. `failed_stage` is likewise its own value rather than being
+    shoehorned into `scope` or `budget`, mirroring how `ToolConvergenceDenied`
+    and `ToolCallLimitExceeded` each took their own.
+
+    Never raised directly — always one of the two subclasses below, so a caller
+    can branch on the TYPE rather than parsing a reason string.
+    """
+
+    def __init__(self, reason: str, *, reconnect_required: bool) -> None:
+        super().__init__(reason, failed_stage="credential")
+        self.reconnect_required = reconnect_required
+
+
+class ToolCredentialReconnectRequired(ToolCredentialDenied):
+    """The grant is dead: absent, expired beyond repair, or revoked upstream.
+
+    A human must complete an out-of-band OAuth consent flow; no retry and no
+    approval inside Skylize can clear it. `reconnect_required=True` is what a
+    future dashboard surface reads to decide whether to prompt.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason, reconnect_required=True)
+
+
+class ToolCredentialUnavailable(ToolCredentialDenied):
+    """The grant could not be EVALUATED, so the call FAILS CLOSED.
+
+    Raised when no OAuth service is wired, the provider is unregistered, or the
+    token endpoint was unreachable. Its own type for the same reason
+    `ToolSpendUnavailable` has one: "we could not check" must never be collapsed
+    into "the customer disconnected us". This one is an operational fault worth
+    alerting on, and it must NOT drive a reconnect prompt — nothing about the
+    customer's connection is known to be wrong.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason, reconnect_required=False)
 
 
 class ToolInputError(ToolError):

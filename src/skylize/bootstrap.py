@@ -32,6 +32,7 @@ from .app.audit.service import AuditService
 from .app.auth.service import ApiKeyService
 from .app.auth.user_service import UserAuthService
 from .app.credentials.encryption import FernetEncryptor
+from .app.credentials.oauth import OAuthCredentialService
 from .app.credentials.vault import CredentialVault
 from .app.decision_engine import DecisionEngine
 from .app.deliverables.service import DeliverableService
@@ -314,6 +315,7 @@ async def build_container(settings: Settings | None = None) -> Container:
     if settings.backend == "memory":
         from .app.governance.broadcast import InMemoryGovernanceBroadcast
         from .dal.credentials import InMemoryCredentialRepository
+        from .dal.oauth_credentials import InMemoryOAuthCredentialRepository
         from .app.principal.provider import InMemoryPrincipalRepository
         from .dal.memory import (
             InMemoryApiKeyRepository,
@@ -335,6 +337,7 @@ async def build_container(settings: Settings | None = None) -> Container:
         user_repo = InMemoryUserRepository()
         deliverable_repo = InMemoryDeliverableRepository()
         credential_repo = InMemoryCredentialRepository()
+        oauth_credential_repo = InMemoryOAuthCredentialRepository()
         broadcast = InMemoryGovernanceBroadcast()
         hitl_repo = InMemoryHitlQueueRepository()
         journal_repo = InMemoryJournalRepository()
@@ -342,6 +345,7 @@ async def build_container(settings: Settings | None = None) -> Container:
     else:
         from .dal.connection import Database
         from .dal.credentials import PgCredentialRepository
+        from .dal.oauth_credentials import PgOAuthCredentialRepository
         from .dal.decision_stores import PgCapitalRepository, PgProcessedEventStore
         from .dal.deliverables import PgDeliverableRepository
         from .dal.hitl import PgHitlQueueRepository
@@ -374,6 +378,7 @@ async def build_container(settings: Settings | None = None) -> Container:
         user_repo = PgUserRepository(db)
         deliverable_repo = PgDeliverableRepository(db)
         credential_repo = PgCredentialRepository(db)
+        oauth_credential_repo = PgOAuthCredentialRepository(db)
         capital_repo = PgCapitalRepository(db)
         processed_store = PgProcessedEventStore(db)
         hitl_repo = PgHitlQueueRepository(db)
@@ -428,6 +433,18 @@ async def build_container(settings: Settings | None = None) -> Container:
     # boot, so there is no `or generate_key()` fallback to reach here.
     encryptor = FernetEncryptor(credential_encryption_key)
     credential_vault = CredentialVault(encryptor, credential_repo, audit)
+
+    # Provider-agnostic OAuth grant service, sharing the vault's encryptor and key
+    # (no second encryption scheme). The provider registry is EMPTY here: a
+    # provider is registered by its own connector pass, which supplies the token
+    # endpoint and the platform client credentials from Settings. Until then a
+    # tool declaring an `oauth` profile fails closed in ToolProxy rather than
+    # dispatching against a grant nobody could refresh.
+    oauth_credentials = OAuthCredentialService(
+        encryptor=encryptor,
+        repo=oauth_credential_repo,
+        audit=audit,
+    )
 
     # Compiles a human's effective authority from their grants. Passed to BOTH
     # consumers below because they ask different questions of it: mint gates the
@@ -593,6 +610,7 @@ async def build_container(settings: Settings | None = None) -> Container:
         public_key=authority.public_key,
         live_state_for=authority.live_state_checker,
         spend_ledger=spend_ledger,
+        oauth_credentials=oauth_credentials,
     )
     # AgentExecutionService also carries the synchronous decision gate (owner
     # decisions D1/D3/D4/D5): the SAME pure evaluator the async engine uses
