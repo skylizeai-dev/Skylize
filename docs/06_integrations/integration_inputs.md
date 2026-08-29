@@ -431,6 +431,128 @@ code.
 
 ---
 
+## 2.5 - Google Drive
+
+> **Section status: `[DRAFT]` - awaiting owner sign-off. NOT `[APPROVED]`. Depends
+> additionally on 4.0 (Section 1.1 must be resolved and Q3.0a's schema question is
+> now answered by this section's own infrastructure, below).**
+
+`[CODE-VERIFIED]` Drive is `[OWNER-DECISION-REQUIRED -> ANSWERED]` as **org-level**:
+each customer connects their own Google Drive, distinct from Slack's platform-level
+answer (2.3, Q2.3a). This follows the classification table in 2.0 and drives every
+answer below, exactly as the platform-level answer drove every one of Slack's.
+
+Unlike Slack and GitHub, the OAuth broker infrastructure this integration needs is no
+longer purely aspirational: `oauth_credentials` (migration
+`migrations/versions/0021_oauth_credentials.py`) and the on-demand refresh primitive
+(`src/skylize/app/credentials/oauth.py`) shipped provider-agnostically ahead of any
+connector, per `docs/06_integrations/oauth_provider_infrastructure_design.md`. Drive
+is the first provider intended to use it; no Drive-specific code exists yet -
+`grep -rniE "google|drive|gdrive" src/skylize` (excluding the OAuth infrastructure's
+own "not Drive-specific" disclaimers) returns nothing.
+
+- **Q2.5a `[OWNER-DECISION-REQUIRED]` OAuth scope - RESEARCH POSITION.**
+  `[RESEARCH-SUGGESTED]` **`drive.file`**, not the full `drive` scope. `drive.file`
+  grants access only to files the app creates or that a user explicitly opens with
+  the app - the narrowest scope that covers "Skylize creates and manages the
+  deliverables it produces for a client," which is this integration's entire stated
+  purpose (see Q2.5c). This is also a cost-avoidance lever: Google's OAuth API
+  Verification requires a CASA (Cloud Application Security Assessment) at
+  **Tier 2** for "restricted" scopes, which carries a recurring assessment cost
+  (industry reporting on CASA Tier 2 places it in the low-to-mid five figures
+  annually, materially more at Tier 3), whereas `drive.file` is one of the scopes
+  Google classifies as **non-sensitive / recommended**, avoiding that tier
+  entirely. **This is asserted with the same confidence discipline 2.3 used for
+  `chat:write`: it is standard, current, widely-documented Google OAuth guidance,
+  but it is UNVERIFIED against Google's live scope-verification reference in this
+  pass** (no live doc fetch was performed) and must be confirmed against
+  `https://developers.google.com/identity/protocols/oauth2/scopes#drive` and
+  Google's current OAuth verification FAQ before the consent screen is configured -
+  Google has changed CASA tiering and scope classifications before, and a stale
+  assumption here is a direct cost exposure, not just a correctness one. Do not
+  request the full `drive` scope (or `drive.readonly` beyond what `drive.file`
+  already covers) without a planned action `drive.file` cannot satisfy, per the
+  attenuation-only principle in this file's Global combining principle.
+- **Q2.5b `[OWNER-DECISION-REQUIRED]` Which write actions are gated.** Mirroring
+  2.4's per-verb treatment for GitHub. Two verbs are in scope for this pass:
+  - **File creation / upload.** `[RESEARCH-SUGGESTED]` the routine case: an agent
+    producing a client deliverable (see Q2.5c) writes it into the client's Drive.
+    Lower blast radius than sharing below - the file stays inside the customer's
+    own Drive, under their own retention and access controls.
+  - **`permissions.create` (sharing).** `[RESEARCH-SUGGESTED]` the higher-risk
+    verb, and this section's `chief_security_officer`-relevant flag: sharing is the
+    action where data leaves Skylize's custody to an **arbitrary external party**
+    the agent chooses at run time - a link grant, or an add-a-collaborator call,
+    can hand a document to anyone with an email address or "anyone with the link."
+    This is a materially different risk shape from file creation, which stays
+    inside a boundary the customer already controls. `[RESEARCH-SUGGESTED]`
+    `permissions.create` should defer to a human by default, at least until a
+    tighter rule (e.g. an owner-approved allowlist of recipient domains) is
+    defined; a hard default-deny is the fallback position if no such rule is
+    approved this pass.
+  - File deletion, permission *revocation*, and Shared Drive (Team Drive)
+    membership changes are explicitly **not addressed** by this section - see
+    Q2.5e for the full out-of-scope list.
+- **Q2.5c `[OWNER-DECISION-REQUIRED]` Governance narrative - RESEARCH POSITION.**
+  `[RESEARCH-SUGGESTED]` Drive's role in the platform is **deliverable teslimi**
+  (agency client-operations delivery): an agent produces a work product for a
+  client engagement and places it in the client's own Drive, optionally sharing it
+  with named stakeholders. This framing is what makes `drive.file` sufficient
+  (Q2.5a) and what makes file-creation the routine, low-risk verb and sharing the
+  exceptional, high-risk one (Q2.5b) - the narrative and the two technical answers
+  are load-bearing on each other, and changing one without revisiting the others
+  is not safe.
+- **Q2.5d `[OWNER-DECISION-REQUIRED]` Decision Engine hook for `permissions.create` -
+  GENUINELY UNRESOLVED, NOT SILENTLY ANSWERED.** `docs/audits/audit_gdrive_readiness.md`
+  section C.6 already flagged this gap and it is **unchanged at this commit**:
+  `[CODE-VERIFIED]` the synchronous Decision Engine gate
+  (`src/skylize/app/agents/execution.py:283-294`, docstring `:283-293`) runs **once
+  per `/agents/execute` request**, before the token mint, evaluating one
+  `DecisionProposal` for the whole request - not once per tool call an agent makes
+  during execution. `ToolProxy` still holds no `DecisionEvaluator`
+  (`grep -rn "DecisionEvaluator|evaluator" src/skylize/tools/` returns nothing,
+  re-confirmed at this commit). So as things stand, an agent that is approved once
+  at request entry could call `drive.permissions_create` an arbitrary number of
+  times within that one execution with **no additional per-action verdict** -
+  contract `allowed_tools`, token scope, `max_calls_per_run`
+  (`tools/proxy.py:152-166`), and the convergence breaker still apply, but none of
+  those is a *decision*, only a *ceiling*. Two structurally different answers exist
+  and this file does not choose between them:
+  1. **Ride the existing per-request gate**, accepting that "approved to run" and
+     "approved to share with anyone the agent picks, arbitrarily many times" are
+     the same approval. Cheapest to ship; weakest guarantee for the
+     highest-blast-radius verb this section identifies.
+  2. **Add a new pre-dispatch hook**, structurally mirroring how `ToolSpendProfile`
+     (`tools/base.py:38-59`) and now `ToolOAuthProfile`
+     (`src/skylize/app/credentials/oauth.py`, wired at `tools/proxy.py:203-220`)
+     each added one opt-in gate to `ToolProxy.invoke` without touching any
+     unrelated tool. A `permissions.create`-specific gate (call it, provisionally,
+     a `ToolActionApprovalProfile`) would be the third such gate and would give
+     sharing a real per-call verdict distinct from the once-per-request one.
+  `[RESEARCH-SUGGESTED]` option 2, precisely because Q2.5b already singled sharing
+  out as the verb whose blast radius differs in kind, not degree, from file
+  creation - but this is a design recommendation, not a decision this file is
+  authorized to make, and no such profile is designed or implemented in this pass.
+- **Q2.5e `[OWNER-DECISION-REQUIRED]` Explicitly out of scope for this section.**
+  Recorded so a future session does not assume these are covered by omission:
+  - **Shared Drives (Team Drives).** Different permission model, different API
+    surface (`drive.teamdrives.*`), not addressed here.
+  - **Real-time change notifications (push webhooks).** `drive.changes.watch` /
+    `drive.files.watch` introduce an INBOUND surface (Google calling Skylize) this
+    section does not analyze; Stripe's inbound-webhook signature-verification
+    precedent (`stripe.md:21-22`, cited in 2.1) would be the nearest pattern if
+    this is taken up later.
+  - **Full-text search over a customer's Drive contents.** A materially broader
+    read surface than `drive.file` grants and than the deliverable-teslimi
+    narrative (Q2.5c) requires; would need its own scope and its own owner
+    decision if ever proposed.
+  - **File deletion and permission revocation.** Named in Q2.5b as un-addressed;
+    repeated here for visibility since both are destructive verbs a future
+    connector author might otherwise assume are "the opposite of creation/sharing"
+    and therefore lower-risk, which does not follow.
+
+---
+
 ## 3.0 - `org_credentials` schema gaps for OAuth (no migration this pass)
 
 > **Section status: `[OWNER-DECISION-REQUIRED]` - recorded, deliberately not implemented.**
@@ -499,4 +621,7 @@ reads `[APPROVED]` **and** the preconditions in 4.0 are met.
 - 2.2 AWS / GCP: _______________________________________  (owner, date)
 - 2.3 Slack: Approved as post-only HITL notifier (2.3 above)  2026-08-28  (owner)
 - 2.4 GitHub: __________________________________________  (owner, date)
+- 2.5 Google Drive (scope Q2.5a, gated verbs Q2.5b, governance narrative Q2.5c,
+  Decision Engine hook Q2.5d, out-of-scope Q2.5e - all still open): __________
+  (owner, date)
 - 3.0 Credential schema: _______________________________  (owner, date)
