@@ -32,7 +32,9 @@ from .app.audit.service import AuditService
 from .app.auth.service import ApiKeyService
 from .app.auth.user_service import UserAuthService
 from .app.credentials.encryption import FernetEncryptor
+from .app.credentials.google_provider import build_google_drive_provider_config
 from .app.credentials.oauth import OAuthCredentialService
+from .app.permissions.gate import PermissionGate
 from .app.credentials.vault import CredentialVault
 from .app.decision_engine import DecisionEngine
 from .app.deliverables.service import DeliverableService
@@ -176,6 +178,39 @@ def resolve_slack_notifier_config(settings: Settings) -> tuple[str, str] | None:
     return token, channel
 
 
+def resolve_google_drive_config(settings: Settings) -> tuple[str, str] | None:
+    """Return `(client_id, client_secret)` for the Drive connector, or None when
+    the integration is off.
+
+    Platform-level secrets, same shape and same reasoning as
+    `resolve_slack_notifier_config`: Skylize registers ONE Google OAuth
+    application and customers authorize into it, so these are a `SKYLIZE_*` pair
+    on `Settings` resolved once at composition time — never per-tenant rows in
+    `oauth_credentials`, which holds the per-org GRANTS obtained through them.
+
+    OPT-IN, like Slack: both empty means the Drive provider is never registered,
+    and any Drive tool call then fails closed in the ToolProxy OAuth stage
+    (`RefreshUnavailable` -> `ToolCredentialUnavailable`) rather than reaching
+    Google. Setting exactly one is REFUSED here: a client id with no secret
+    cannot complete a token exchange, and discovering that at a customer's first
+    Drive delivery rather than at boot is the failure mode this check exists to
+    prevent.
+    """
+    client_id = settings.google_oauth_client_id.strip()
+    client_secret = settings.google_oauth_client_secret.strip()
+    if not client_id and not client_secret:
+        return None
+    if not client_id or not client_secret:
+        missing = "GOOGLE_OAUTH_CLIENT_ID" if not client_id else "GOOGLE_OAUTH_CLIENT_SECRET"
+        present = "GOOGLE_OAUTH_CLIENT_SECRET" if not client_id else "GOOGLE_OAUTH_CLIENT_ID"
+        raise ConfigurationError(
+            f"SKYLIZE_{present} is set but SKYLIZE_{missing} is not. Both are "
+            "required together to enable the Google Drive connector, or neither "
+            "to leave it disabled."
+        )
+    return client_id, client_secret
+
+
 async def verify_app_role_is_rls_subject(db: "Database") -> None:
     """Refuse to start when the runtime database role can bypass RLS.
 
@@ -316,6 +351,7 @@ async def build_container(settings: Settings | None = None) -> Container:
         from .app.governance.broadcast import InMemoryGovernanceBroadcast
         from .dal.credentials import InMemoryCredentialRepository
         from .dal.oauth_credentials import InMemoryOAuthCredentialRepository
+        from .dal.permission_grants import InMemoryPermissionGrantRepository
         from .app.principal.provider import InMemoryPrincipalRepository
         from .dal.memory import (
             InMemoryApiKeyRepository,
@@ -338,6 +374,7 @@ async def build_container(settings: Settings | None = None) -> Container:
         deliverable_repo = InMemoryDeliverableRepository()
         credential_repo = InMemoryCredentialRepository()
         oauth_credential_repo = InMemoryOAuthCredentialRepository()
+        permission_grant_repo = InMemoryPermissionGrantRepository()
         broadcast = InMemoryGovernanceBroadcast()
         hitl_repo = InMemoryHitlQueueRepository()
         journal_repo = InMemoryJournalRepository()
@@ -346,6 +383,7 @@ async def build_container(settings: Settings | None = None) -> Container:
         from .dal.connection import Database
         from .dal.credentials import PgCredentialRepository
         from .dal.oauth_credentials import PgOAuthCredentialRepository
+        from .dal.permission_grants import PgPermissionGrantRepository
         from .dal.decision_stores import PgCapitalRepository, PgProcessedEventStore
         from .dal.deliverables import PgDeliverableRepository
         from .dal.hitl import PgHitlQueueRepository
@@ -379,6 +417,7 @@ async def build_container(settings: Settings | None = None) -> Container:
         deliverable_repo = PgDeliverableRepository(db)
         credential_repo = PgCredentialRepository(db)
         oauth_credential_repo = PgOAuthCredentialRepository(db)
+        permission_grant_repo = PgPermissionGrantRepository(db)
         capital_repo = PgCapitalRepository(db)
         processed_store = PgProcessedEventStore(db)
         hitl_repo = PgHitlQueueRepository(db)
@@ -445,6 +484,22 @@ async def build_container(settings: Settings | None = None) -> Container:
         repo=oauth_credential_repo,
         audit=audit,
     )
+    # Google Drive (integration_inputs.md 2.5). Registered ONLY when both platform
+    # client credentials are present; otherwise the provider stays unregistered and
+    # any Drive tool call fails closed in the ToolProxy OAuth stage rather than
+    # reaching Google with a half-configured client.
+    google_drive_config = resolve_google_drive_config(settings)
+    if google_drive_config is not None:
+        client_id, client_secret = google_drive_config
+        oauth_credentials.register_provider(
+            build_google_drive_provider_config(
+                client_id=client_id, client_secret=client_secret
+            )
+        )
+
+    # The elevated-action gate (integration_inputs.md 2.5, Q2.5d). Reads the org's
+    # pre-authorization rows; an org with none can share with nobody.
+    permission_gate = PermissionGate(permission_grant_repo)
 
     # Compiles a human's effective authority from their grants. Passed to BOTH
     # consumers below because they ask different questions of it: mint gates the
@@ -605,12 +660,15 @@ async def build_container(settings: Settings | None = None) -> Container:
         SpendLedger(PostgresSpendRepository(db.pool)) if db is not None else None
     )
     tool_proxy = ToolProxy(
-        registry=default_tool_registry(credential_vault=credential_vault),
+        registry=default_tool_registry(
+            credential_vault=credential_vault, oauth_credentials=oauth_credentials
+        ),
         audit=audit,
         public_key=authority.public_key,
         live_state_for=authority.live_state_checker,
         spend_ledger=spend_ledger,
         oauth_credentials=oauth_credentials,
+        permission_gate=permission_gate,
     )
     # AgentExecutionService also carries the synchronous decision gate (owner
     # decisions D1/D3/D4/D5): the SAME pure evaluator the async engine uses

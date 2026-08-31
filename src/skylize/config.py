@@ -130,6 +130,16 @@ class Settings(BaseSettings):
     slack_bot_token: str = ""
     slack_approval_channel_id: str = ""
 
+    # Google Drive connector (integration_inputs.md 2.5). PLATFORM-level OAuth
+    # client credentials: Skylize registers ONE OAuth application and each
+    # customer authorizes into it, so these do not vary per tenant and never
+    # belong in oauth_credentials (which holds the per-org GRANTS obtained
+    # through them). Both empty = the Drive provider is not registered and any
+    # Drive tool call fails closed in the ToolProxy OAuth stage. Setting only one
+    # is refused at boot, mirroring the Slack pair above.
+    google_oauth_client_id: str = ""
+    google_oauth_client_secret: str = ""
+
     # Rate limiting (per org, per window).
     rate_limit_per_minute: int = 120
     # Tighter dedicated budget for the sensitive GET /credentials/resolve path.

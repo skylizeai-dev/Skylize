@@ -32,12 +32,18 @@ from ..app.credentials.oauth import (
     OAuthCredentialService,
     RefreshUnavailable,
 )
+from ..app.permissions.gate import (
+    PermissionDeniedError,
+    PermissionGate,
+    PermissionUnavailableError,
+)
 from ..app.principal.errors import CeilingExceeded, EnvelopeNotFound
 from ..app.principal.models import Reservation
 from ..app.principal.spend import SpendLedger
 from ..contracts.base import AgentContract, GovernanceToken
 from ..contracts.token import LiveStateChecker, validate_tool_call
 from .base import (
+    PermissionGrant,
     ToolCallLimitExceeded,
     ToolContext,
     ToolConvergenceDenied,
@@ -49,6 +55,8 @@ from .base import (
     ToolInputError,
     ToolNotRegistered,
     ToolPermissionDenied,
+    ToolPermissionTierDenied,
+    ToolPermissionUnavailable,
     ToolResult,
     ToolSpendDeferredToHuman,
     ToolSpendHardDenied,
@@ -99,6 +107,7 @@ class ToolProxy:
         record_action: RecordAction | None = None,
         spend_ledger: SpendLedger | None = None,
         oauth_credentials: OAuthCredentialService | None = None,
+        permission_gate: PermissionGate | None = None,
     ) -> None:
         self._registry = registry
         self._audit = audit
@@ -116,6 +125,10 @@ class ToolProxy:
         # `_ensure_oauth_credential` rather than dispatching against a grant
         # nobody checked — same reasoning as the spend ledger above.
         self._oauth_credentials = oauth_credentials
+        # None where no permission infrastructure is wired. A tool declaring a
+        # `permission` profile then FAILS CLOSED in `_authorize_permission`
+        # rather than performing an elevated action nobody authorized.
+        self._permission_gate = permission_gate
 
     @property
     def registry(self) -> ToolRegistry:
@@ -234,6 +247,29 @@ class ToolProxy:
                 correlation_id=correlation_id, governance_token=governance_token,
             )
 
+        # Elevated-action pre-authorization (PermissionGate). Only for tools
+        # declaring a `permission` profile. AFTER the OAuth stage above: there is
+        # nothing to authorize on a call that has no usable credential, and
+        # evaluating the recipient of a share that could never be sent would leak
+        # "this share would have been allowed" for a disconnected integration.
+        #
+        # BEFORE the spend reservation below, for the same reason the OAuth stage
+        # is: this is a tenant-scoped DB read, cheaper than a hold on the shared
+        # mutable ceiling, and the hold must be placed last.
+        #
+        # `permission_grant` is threaded onto the ToolContext handed to the
+        # handler. That is load-bearing, not informational: an elevated handler
+        # REQUIRES it (see `PermissionGrant`), so a sharing tool that forgot to
+        # declare a profile reaches its handler with None here and fails closed
+        # instead of dispatching ungated.
+        permission_grant: PermissionGrant | None = None
+        if tool.permission is not None:
+            permission_grant = await self._authorize_permission(
+                tool=tool, validated_input=validated_input, contract=contract,
+                org_id=org_id, correlation_id=correlation_id,
+                governance_token=governance_token,
+            )
+
         # Spend ceiling (spend.SpendLedger). LAST gate before dispatch, and only
         # for spend-capable tools: the ceiling is a shared mutable resource, so a
         # hold must be placed as late as possible — after every cheaper denial has
@@ -247,9 +283,27 @@ class ToolProxy:
                 governance_token=governance_token,
             )
 
-        context = ToolContext(org_id=org_id, agent_id=contract.agent_id, correlation_id=correlation_id)
+        context = ToolContext(
+            org_id=org_id, agent_id=contract.agent_id, correlation_id=correlation_id,
+            permission_grant=permission_grant,
+        )
         try:
             output = await tool.handler(validated_input, context)
+        except ToolPermissionDenied as exc:
+            # A GOVERNANCE DENIAL raised from inside a handler stays a governance
+            # denial. The deny-by-default backstop lives here: a handler that
+            # performs an elevated action refuses when it was dispatched without
+            # a PermissionGrant (see `PermissionGrant`). Flattening that into
+            # ToolExecutionError below would audit a refused share as a generic
+            # "handler error" and hide it from any caller branching on the denial
+            # type — the type IS the signal that a gate was missing.
+            await self._release_spend(reservation, org_id=org_id)
+            await self._audit_call(
+                tool_id=tool_id, contract=contract, org_id=org_id,
+                correlation_id=correlation_id, governance_token=governance_token,
+                result="denied", reason=f"handler denied: {exc}",
+            )
+            raise
         except Exception as exc:  # noqa: BLE001 — normalized into one tool error type
             # The hold MUST NOT outlive the call it was placed for. Without this
             # a failing tool leaks budget until `sweep_expired` reclaims it at
@@ -342,6 +396,83 @@ class ToolProxy:
             # We could not CHECK. Fail closed, but do not claim the customer
             # disconnected us — nothing about their grant is known to be wrong.
             raise await deny(ToolCredentialUnavailable(str(exc))) from exc
+
+    async def _authorize_permission(
+        self,
+        *,
+        tool: ToolDefinition,
+        validated_input: Any,
+        contract: AgentContract,
+        org_id: str,
+        correlation_id: UUID,
+        governance_token: GovernanceToken,
+    ) -> PermissionGrant:
+        """Authorize one elevated action, or deny. Every exit that is not a
+        `PermissionGrant` denies, and every denial is audited before it is raised —
+        the same discipline `_reserve_spend` and `_ensure_oauth_credential` follow.
+
+        Reads the grantee and role off the VALIDATED input, never the raw dict, so
+        both have already passed the tool's own type validation.
+        """
+        profile = tool.permission
+        assert profile is not None  # caller checks; narrows for the type checker
+
+        async def deny(exc: ToolPermissionTierDenied) -> ToolPermissionTierDenied:
+            await self._audit_call(
+                tool_id=tool.tool_id, contract=contract, org_id=org_id,
+                correlation_id=correlation_id, governance_token=governance_token,
+                result="denied", reason=f"permission: {exc}",
+            )
+            return exc
+
+        if self._permission_gate is None:
+            raise await deny(ToolPermissionUnavailable(
+                f"tool {tool.tool_id!r} declares an elevated action "
+                f"({profile.action_class!r}) but no permission gate is wired in "
+                f"this process; failing closed"
+            ))
+
+        grantee = getattr(validated_input, profile.grantee_field, None)
+        role = getattr(validated_input, profile.role_field, None)
+        if not isinstance(grantee, str) or not grantee:
+            raise await deny(ToolPermissionUnavailable(
+                f"tool {tool.tool_id!r} declares grantee field "
+                f"{profile.grantee_field!r} but the validated input carries "
+                f"{grantee!r}, which is not a non-empty string"
+            ))
+        if not isinstance(role, str) or not role:
+            raise await deny(ToolPermissionUnavailable(
+                f"tool {tool.tool_id!r} declares role field {profile.role_field!r} "
+                f"but the validated input carries {role!r}, which is not a "
+                f"non-empty string"
+            ))
+
+        try:
+            grant = await self._permission_gate.authorize(
+                org_id=org_id,
+                action_class=profile.action_class,
+                grantee=grantee,
+                role=role,
+                link_sharing_sentinel=profile.link_sharing_sentinel,
+            )
+        except PermissionDeniedError as exc:
+            # The operator has not pre-authorized this. A human COULD, so the
+            # caller may route it to HITL at the request boundary — but this gate
+            # never enqueues mid-call (see ToolPermissionTierDenied).
+            raise await deny(ToolPermissionTierDenied(str(exc))) from exc
+        except PermissionUnavailableError as exc:
+            raise await deny(ToolPermissionUnavailable(str(exc))) from exc
+
+        await self._audit_call(
+            tool_id=tool.tool_id, contract=contract, org_id=org_id,
+            correlation_id=correlation_id, governance_token=governance_token,
+            result="success",
+            reason=(
+                f"permission authorized: {profile.action_class} -> "
+                f"{grant.grantee} as {grant.role} (matched {grant.matched_pattern!r})"
+            ),
+        )
+        return grant
 
     async def _reserve_spend(
         self,

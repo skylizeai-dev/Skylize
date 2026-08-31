@@ -24,12 +24,39 @@ ToolCategory = Literal["memory", "search", "integration", "compute"]
 
 
 @dataclass(frozen=True, slots=True)
+class PermissionGrant:
+    """Proof that the permission gate ran and AUTHORIZED this specific call.
+
+    Produced ONLY by `ToolProxy._authorize_permission`. A handler that performs an
+    elevated action (sharing a customer's file, say) must require one, because the
+    gate is opt-in per tool and an opt-in check that a tool simply forgot to
+    declare would otherwise dispatch ungated.
+
+    That is the whole point: `ToolContext.permission_grant` is `None` unless the
+    gate produced it, so an elevated handler reached WITHOUT a declared
+    `ToolPermissionProfile` finds nothing here and refuses. Deny-by-default is
+    therefore a data dependency the handler cannot satisfy on its own, not a
+    convention a future author has to remember.
+    """
+
+    action_class: str
+    grantee: str          # the address, or 'anyone' for a link grant
+    role: str             # the role actually authorized (<= the org's max_role)
+    matched_pattern: str  # which allow-list row authorized it, for the audit trail
+
+
+@dataclass(frozen=True, slots=True)
 class ToolContext:
     """Per-call context handed to a tool's handler alongside its validated input."""
 
     org_id: str
     agent_id: str
     correlation_id: UUID
+    #: Present ONLY when the permission gate authorized this call. Handlers that
+    #: perform an elevated action MUST check it; see `PermissionGrant`. Defaults to
+    #: None so every handler written before this field existed is unaffected —
+    #: and so an elevated handler that is somehow reached ungated finds nothing.
+    permission_grant: PermissionGrant | None = None
 
 
 ToolHandler = Callable[[BaseModel, ToolContext], Awaitable[BaseModel]]
@@ -57,6 +84,41 @@ class ToolSpendProfile(BaseModel):
 
     currency: str = Field(min_length=3, max_length=3)
     amount_field: str = Field(min_length=1)
+
+
+class ToolPermissionProfile(BaseModel):
+    """Declares a tool as performing an ELEVATED ACTION requiring pre-authorization.
+
+    The third opt-in gate on `ToolProxy.invoke`, alongside `ToolSpendProfile` and
+    `ToolOAuthProfile` (integration_inputs.md 2.5, Q2.5d). The first two gate a
+    tool on a RESOURCE it consumes — a live OAuth grant, a spend ceiling. This one
+    gates it on the SHAPE OF THE ACTION: who the agent is about to hand a
+    customer's data to.
+
+    `action_class` keys the org's allow-list rows in `org_permission_grants`
+    (migration 0022). An org with no rows for that class can perform the action
+    with nobody: absence is denial.
+
+    `grantee_field` and `role_field` name fields on the tool's VALIDATED input —
+    read off the parsed `input_schema` instance, not the raw dict, so they have
+    already passed the tool's own type validation. Same discipline as
+    `ToolSpendProfile.amount_field`.
+
+    Deliberately NOT a callable predicate: what an agent is about to grant, and to
+    whom, has to be inspectable and auditable BEFORE dispatch, and a lambda in a
+    registry entry is neither.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    action_class: str = Field(min_length=1)
+    grantee_field: str = Field(min_length=1)
+    role_field: str = Field(min_length=1)
+    #: Value of `grantee_field` meaning "anyone with the link" — a grant that names
+    #: no recipient at all. Gated by the allow-list's separate `allow_link_sharing`
+    #: flag rather than by any address pattern, because it is a different risk
+    #: class, not a broader pattern.
+    link_sharing_sentinel: str = "anyone"
 
 
 class ToolOAuthProfile(BaseModel):
@@ -95,6 +157,12 @@ class ToolDefinition(BaseModel):
     #: Non-None marks this tool dependent on a live OAuth grant; see
     #: `ToolOAuthProfile`. Defaults to None for the same reason `spend` does.
     oauth: ToolOAuthProfile | None = None
+    #: Non-None marks this tool as performing an elevated action requiring org
+    #: pre-authorization; see `ToolPermissionProfile`. Defaults to None like the
+    #: two above — but note the backstop: a handler performing an elevated action
+    #: must ALSO require `ToolContext.permission_grant`, so forgetting this field
+    #: fails closed at dispatch rather than silently skipping the gate.
+    permission: ToolPermissionProfile | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -256,6 +324,51 @@ class ToolCredentialUnavailable(ToolCredentialDenied):
 
     def __init__(self, reason: str) -> None:
         super().__init__(reason, reconnect_required=False)
+
+
+class ToolPermissionTierDenied(ToolPermissionDenied):
+    """An ELEVATED ACTION was refused by the org's pre-authorization allow-list.
+
+    Its own branch with `failed_stage="permission_tier"`, deliberately distinct
+    from BOTH `ToolCredentialDenied` and `ToolSpendDenied`. Three unrelated
+    conditions with three unrelated remedies: a dead grant needs the customer to
+    reconnect, an exhausted budget needs a ceiling raised, and this needs an
+    operator to pre-authorize a recipient. Collapsing any two would make both
+    unactionable in the audit trail — the same reasoning that gave
+    `ToolConvergenceDenied` and `ToolCallLimitExceeded` their own stages rather
+    than shoehorning them into `scope`.
+
+    `defer_to_human` mirrors `ToolSpendDenied`'s flag and carries the same
+    meaning: the tool did NOT run, but a human COULD authorize this. The gate
+    never enqueues a HITL row itself — routing happens at the request boundary,
+    where a replay is safe. Enqueuing mid-call would defer a single tool call into
+    a queue whose approve path replays the WHOLE agent execution
+    (`app/hitl/service.py:187`), creating the deliverable a second time.
+    """
+
+    def __init__(self, reason: str, *, defer_to_human: bool = True) -> None:
+        super().__init__(reason, failed_stage="permission_tier")
+        self.defer_to_human = defer_to_human
+
+
+class ToolPermissionUnavailable(ToolPermissionTierDenied):
+    """The elevated action could not be EVALUATED, so the call FAILS CLOSED.
+
+    Raised when no permission gate is wired, the tool declares a profile whose
+    named fields are absent or unreadable on the validated input, or — the
+    security-critical case — a handler performing an elevated action was reached
+    with no `PermissionGrant` in its `ToolContext`, meaning the tool never
+    declared a `ToolPermissionProfile` and the gate never ran.
+
+    Its own type for the reason `ToolSpendUnavailable` and
+    `ToolCredentialUnavailable` have theirs: "we could not check" must never be
+    collapsed into "the operator declined to authorize this". `defer_to_human` is
+    False — there is nothing coherent for a human to approve until the
+    misconfiguration is fixed.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason, defer_to_human=False)
 
 
 class ToolInputError(ToolError):

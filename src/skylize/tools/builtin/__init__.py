@@ -8,10 +8,12 @@ as already-constructed ports/vaults — this module only assembles the
 
 from __future__ import annotations
 
+from ...app.credentials.oauth import OAuthCredentialService
 from ...app.credentials.vault import CredentialVault
 from ..base import ToolDefinition
 from ..registry import ToolRegistry
 from .datetime_tool import CURRENT_DATETIME_TOOL
+from .drive_tools import build_drive_create_file_tool, build_drive_share_file_tool
 from .hubspot_tools import build_hubspot_create_contact_tool, build_hubspot_search_contacts_tool
 from .memory_recall import MemoryRecallPort, NullMemoryRecallPort, build_memory_recall_tool
 from .web_search import NullWebSearchPort, WebSearchPort, build_web_search_tool
@@ -21,6 +23,7 @@ def build_builtin_tools(
     memory_recall_port: MemoryRecallPort | None = None,
     web_search_port: WebSearchPort | None = None,
     credential_vault: CredentialVault | None = None,
+    oauth_credentials: OAuthCredentialService | None = None,
 ) -> list[ToolDefinition]:
     tools = [
         build_memory_recall_tool(memory_recall_port or NullMemoryRecallPort()),
@@ -30,6 +33,11 @@ def build_builtin_tools(
     if credential_vault is not None:
         tools.append(build_hubspot_create_contact_tool(credential_vault))
         tools.append(build_hubspot_search_contacts_tool(credential_vault))
+    # Drive tools need the OAuth service, not the vault: their credential is a
+    # refreshable org-level grant in `oauth_credentials`, not a static API key.
+    if oauth_credentials is not None:
+        tools.append(build_drive_create_file_tool(oauth_credentials))
+        tools.append(build_drive_share_file_tool(oauth_credentials))
     return tools
 
 
@@ -37,7 +45,12 @@ def default_tool_registry(
     memory_recall_port: MemoryRecallPort | None = None,
     web_search_port: WebSearchPort | None = None,
     credential_vault: CredentialVault | None = None,
+    oauth_credentials: OAuthCredentialService | None = None,
 ) -> ToolRegistry:
-    registry = ToolRegistry(build_builtin_tools(memory_recall_port, web_search_port, credential_vault))
+    registry = ToolRegistry(
+        build_builtin_tools(
+            memory_recall_port, web_search_port, credential_vault, oauth_credentials
+        )
+    )
     registry.validate_schemas()
     return registry
