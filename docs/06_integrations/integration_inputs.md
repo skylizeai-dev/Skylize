@@ -433,9 +433,11 @@ code.
 
 ## 2.5 - Google Drive
 
-> **Section status: `[DRAFT]` - awaiting owner sign-off. NOT `[APPROVED]`. Depends
-> additionally on 4.0 (Section 1.1 must be resolved and Q3.0a's schema question is
-> now answered by this section's own infrastructure, below).**
+> **Section status: `[APPROVED]` - 2026-08-31 (owner). Scope (Q2.5a) verified against
+> live Google docs; write actions (Q2.5b), governance narrative (Q2.5c), and the
+> Decision Engine hook (Q2.5d) decided below. Q2.5e's out-of-scope list stands as
+> recorded. Depends additionally on 4.0 (Section 1.1 must be resolved and Q3.0a's
+> schema question is now answered by this section's own infrastructure, below).**
 
 `[CODE-VERIFIED]` Drive is `[OWNER-DECISION-REQUIRED -> ANSWERED]` as **org-level**:
 each customer connects their own Google Drive, distinct from Slack's platform-level
@@ -451,28 +453,24 @@ is the first provider intended to use it; no Drive-specific code exists yet -
 `grep -rniE "google|drive|gdrive" src/skylize` (excluding the OAuth infrastructure's
 own "not Drive-specific" disclaimers) returns nothing.
 
-- **Q2.5a `[OWNER-DECISION-REQUIRED]` OAuth scope - RESEARCH POSITION.**
-  `[RESEARCH-SUGGESTED]` **`drive.file`**, not the full `drive` scope. `drive.file`
-  grants access only to files the app creates or that a user explicitly opens with
-  the app - the narrowest scope that covers "Skylize creates and manages the
-  deliverables it produces for a client," which is this integration's entire stated
-  purpose (see Q2.5c). This is also a cost-avoidance lever: Google's OAuth API
-  Verification requires a CASA (Cloud Application Security Assessment) at
-  **Tier 2** for "restricted" scopes, which carries a recurring assessment cost
-  (industry reporting on CASA Tier 2 places it in the low-to-mid five figures
-  annually, materially more at Tier 3), whereas `drive.file` is one of the scopes
-  Google classifies as **non-sensitive / recommended**, avoiding that tier
-  entirely. **This is asserted with the same confidence discipline 2.3 used for
-  `chat:write`: it is standard, current, widely-documented Google OAuth guidance,
-  but it is UNVERIFIED against Google's live scope-verification reference in this
-  pass** (no live doc fetch was performed) and must be confirmed against
-  `https://developers.google.com/identity/protocols/oauth2/scopes#drive` and
-  Google's current OAuth verification FAQ before the consent screen is configured -
-  Google has changed CASA tiering and scope classifications before, and a stale
-  assumption here is a direct cost exposure, not just a correctness one. Do not
-  request the full `drive` scope (or `drive.readonly` beyond what `drive.file`
-  already covers) without a planned action `drive.file` cannot satisfy, per the
-  attenuation-only principle in this file's Global combining principle.
+- **Q2.5a `[VERIFIED]` OAuth scope - DECIDED.**
+  **`drive.file`**, not the full `drive` scope. `drive.file` grants access only to
+  files the app creates or that a user explicitly opens with the app - the
+  narrowest scope that covers "Skylize creates and manages the deliverables it
+  produces for a client," which is this integration's entire stated purpose (see
+  Q2.5c). **Verified against Google's live API-specific-authorization guide**
+  (`https://developers.google.com/workspace/drive/api/guides/api-specific-auth`,
+  checked 2026-08-29): `drive.file` is listed **Non-sensitive / Recommended** and
+  requires only basic app verification, not a CASA assessment. Full `drive` and
+  `drive.readonly` are listed **Restricted** and require CASA (Cloud Application
+  Security Assessment) plus an annual re-assessment - a recurring cost this
+  narrower scope avoids entirely. This confirms the cost-avoidance lever raised in
+  prior research (the `compass_artifact` research doc) and resolves the confidence
+  caveat carried since the previous pass, which had flagged this UNVERIFIED
+  pending exactly this check. Do not request the full `drive` scope (or
+  `drive.readonly` beyond what `drive.file` already covers) without a planned
+  action `drive.file` cannot satisfy, per the attenuation-only principle in this
+  file's Global combining principle.
 - **Q2.5b `[OWNER-DECISION-REQUIRED]` Which write actions are gated.** Mirroring
   2.4's per-verb treatment for GitHub. Two verbs are in scope for this pass:
   - **File creation / upload.** `[RESEARCH-SUGGESTED]` the routine case: an agent
@@ -502,37 +500,40 @@ own "not Drive-specific" disclaimers) returns nothing.
   exceptional, high-risk one (Q2.5b) - the narrative and the two technical answers
   are load-bearing on each other, and changing one without revisiting the others
   is not safe.
-- **Q2.5d `[OWNER-DECISION-REQUIRED]` Decision Engine hook for `permissions.create` -
-  GENUINELY UNRESOLVED, NOT SILENTLY ANSWERED.** `docs/audits/audit_gdrive_readiness.md`
-  section C.6 already flagged this gap and it is **unchanged at this commit**:
+- **Q2.5d `[DECIDED]` Decision Engine hook for `permissions.create`.**
+  `docs/audits/audit_gdrive_readiness.md` section C.6 originally flagged this gap:
   `[CODE-VERIFIED]` the synchronous Decision Engine gate
   (`src/skylize/app/agents/execution.py:283-294`, docstring `:283-293`) runs **once
   per `/agents/execute` request**, before the token mint, evaluating one
   `DecisionProposal` for the whole request - not once per tool call an agent makes
   during execution. `ToolProxy` still holds no `DecisionEvaluator`
   (`grep -rn "DecisionEvaluator|evaluator" src/skylize/tools/` returns nothing,
-  re-confirmed at this commit). So as things stand, an agent that is approved once
+  re-confirmed at this commit). Without a per-action gate, an agent approved once
   at request entry could call `drive.permissions_create` an arbitrary number of
-  times within that one execution with **no additional per-action verdict** -
-  contract `allowed_tools`, token scope, `max_calls_per_run`
-  (`tools/proxy.py:152-166`), and the convergence breaker still apply, but none of
-  those is a *decision*, only a *ceiling*. Two structurally different answers exist
-  and this file does not choose between them:
-  1. **Ride the existing per-request gate**, accepting that "approved to run" and
-     "approved to share with anyone the agent picks, arbitrarily many times" are
-     the same approval. Cheapest to ship; weakest guarantee for the
-     highest-blast-radius verb this section identifies.
-  2. **Add a new pre-dispatch hook**, structurally mirroring how `ToolSpendProfile`
-     (`tools/base.py:38-59`) and now `ToolOAuthProfile`
-     (`src/skylize/app/credentials/oauth.py`, wired at `tools/proxy.py:203-220`)
-     each added one opt-in gate to `ToolProxy.invoke` without touching any
-     unrelated tool. A `permissions.create`-specific gate (call it, provisionally,
-     a `ToolActionApprovalProfile`) would be the third such gate and would give
-     sharing a real per-call verdict distinct from the once-per-request one.
-  `[RESEARCH-SUGGESTED]` option 2, precisely because Q2.5b already singled sharing
-  out as the verb whose blast radius differs in kind, not degree, from file
-  creation - but this is a design recommendation, not a decision this file is
-  authorized to make, and no such profile is designed or implemented in this pass.
+  times within that one execution with no additional verdict - contract
+  `allowed_tools`, token scope, `max_calls_per_run` (`tools/proxy.py:152-166`), and
+  the convergence breaker still apply, but none of those is a *decision*, only a
+  *ceiling*.
+
+  **Owner decision (2026-08-31): a third opt-in `ToolProxy` stage, not the
+  per-request gate.** `permissions.create` (sharing) gets its own pre-dispatch
+  check; routine file creation does not - matching Q2.5b's finding that sharing is
+  the verb whose blast radius differs in kind, not degree. The new stage
+  structurally mirrors the two opt-in stages already proven in `tools/proxy.py`:
+  `ToolSpendProfile` (`tools/base.py:38-59`, reservation at `proxy.py:237-248`)
+  and `ToolOAuthProfile` (`src/skylize/app/credentials/oauth.py`, gate at
+  `proxy.py:203-220`) - each adds one opt-in check to `ToolProxy.invoke` that fires
+  only for a tool declaring the matching profile, leaving every other tool's
+  behavior untouched. A `permissions.create`-scoped profile (provisional name:
+  `ToolPermissionProfile` or similar) follows the same shape.
+
+  **This is a DECISION, not an implementation.** No such profile is designed in
+  structural detail or built this pass - the Drive `permissions.create` tool that
+  would declare it does not exist yet either. The concrete profile shape, its
+  denial-type hierarchy (mirroring `ToolCredentialDenied` /
+  `ToolSpendDenied`), and its exact insertion point relative to the OAuth and
+  spend stages are a follow-up implementation pass, gated on this decision but not
+  completed by it.
 - **Q2.5e `[OWNER-DECISION-REQUIRED]` Explicitly out of scope for this section.**
   Recorded so a future session does not assume these are covered by omission:
   - **Shared Drives (Team Drives).** Different permission model, different API
@@ -621,7 +622,7 @@ reads `[APPROVED]` **and** the preconditions in 4.0 are met.
 - 2.2 AWS / GCP: _______________________________________  (owner, date)
 - 2.3 Slack: Approved as post-only HITL notifier (2.3 above)  2026-08-28  (owner)
 - 2.4 GitHub: __________________________________________  (owner, date)
-- 2.5 Google Drive (scope Q2.5a, gated verbs Q2.5b, governance narrative Q2.5c,
-  Decision Engine hook Q2.5d, out-of-scope Q2.5e - all still open): __________
-  (owner, date)
+- 2.5 Google Drive (scope Q2.5a verified, write actions Q2.5b, governance
+  narrative Q2.5c, and Decision Engine hook Q2.5d decided; Q2.5e out-of-scope list
+  stands as recorded): Approved  2026-08-31  (owner)
 - 3.0 Credential schema: _______________________________  (owner, date)
