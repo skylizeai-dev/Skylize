@@ -4,7 +4,6 @@
 skylize.agents
 skylize.app.runtime_adapters
 skylize.contracts.models
-skylize.contracts.mvp.safety
 skylize.memory.adapters
 skylize.schemas.agents.agency
 skylize.schemas.agents.brand

@@ -51,6 +51,8 @@ from .app.tenants.service import TenantService
 from .config import Settings, get_settings
 from .contracts.registry import MVP_REGISTRY
 from .dal.credentials import CredentialRepository
+from .dal.oauth_credentials import OAuthCredentialRepository
+from .dal.permission_grants import PermissionGrantRepository
 from .dal.ports import (
     ApiKeyRepository,
     AuditRepository,
@@ -378,6 +380,10 @@ async def build_container(settings: Settings | None = None) -> Container:
     # wiring it changes no current behaviour -- it removes a fail-closed refusal
     # that the per-employee shape would otherwise hit.
     principal_repo: PrincipalRepository
+    # OAuth grants (migration 0021) and elevated-action allow-list (migration
+    # 0022): in-memory on the memory backend, durable Pg stores on postgres.
+    oauth_credential_repo: OAuthCredentialRepository
+    permission_grant_repo: PermissionGrantRepository
 
     if settings.backend == "memory":
         from .app.governance.broadcast import InMemoryGovernanceBroadcast

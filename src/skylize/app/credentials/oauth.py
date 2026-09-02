@@ -355,9 +355,10 @@ class OAuthCredentialService:
                 token = await self._post_refresh(config, refresh_token)
             except GrantRevoked as exc:
                 revoked = (locked, str(exc))
-                token = None  # type: ignore[assignment]
+                token = None
 
             if revoked is None:
+                assert token is not None  # revoked is None iff _post_refresh succeeded
                 now = self._now()
                 new_expiry = now + timedelta(seconds=token.expires_in_seconds)
                 # A provider that does not rotate refresh tokens omits the field;

@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import json
 from typing import Any, Literal
+from uuid import UUID
 
 import httpx
 import structlog
@@ -234,7 +235,9 @@ class DriveClient:
         return response
 
 
-async def _resolve_token(oauth: OAuthCredentialService, org_id: str, correlation_id) -> str:
+async def _resolve_token(
+    oauth: OAuthCredentialService, org_id: str, correlation_id: UUID
+) -> str:
     """Guaranteed-fresh access token for this org's Drive grant.
 
     The ToolProxy OAuth stage has already ensured a live grant before dispatch;
