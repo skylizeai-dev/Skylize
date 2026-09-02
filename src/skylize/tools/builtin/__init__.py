@@ -12,6 +12,12 @@ from ...app.credentials.oauth import OAuthCredentialService
 from ...app.credentials.vault import CredentialVault
 from ..base import ToolDefinition
 from ..registry import ToolRegistry
+from .asana_tools import (
+    build_asana_add_project_member_tool,
+    build_asana_add_workspace_user_tool,
+    build_asana_create_project_tool,
+    build_asana_create_task_tool,
+)
 from .datetime_tool import CURRENT_DATETIME_TOOL
 from .drive_tools import build_drive_create_file_tool, build_drive_share_file_tool
 from .hubspot_tools import build_hubspot_create_contact_tool, build_hubspot_search_contacts_tool
@@ -38,6 +44,12 @@ def build_builtin_tools(
     if oauth_credentials is not None:
         tools.append(build_drive_create_file_tool(oauth_credentials))
         tools.append(build_drive_share_file_tool(oauth_credentials))
+        # Asana (integration_inputs.md 2.6) rides the same OAuth service for the
+        # same reason: an org-level refreshable grant, not a static API key.
+        tools.append(build_asana_create_task_tool(oauth_credentials))
+        tools.append(build_asana_create_project_tool(oauth_credentials))
+        tools.append(build_asana_add_project_member_tool(oauth_credentials))
+        tools.append(build_asana_add_workspace_user_tool(oauth_credentials))
     return tools
 
 

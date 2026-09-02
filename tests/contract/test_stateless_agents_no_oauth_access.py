@@ -1,8 +1,8 @@
-"""The stateless-agent invariant, asserted against the OAuth + Drive surfaces.
+"""The stateless-agent invariant, asserted against the OAuth + connector surfaces.
 
 Five agents are stateless by contract — `memory_read_access` and
 `memory_write_access` are both empty — and no pass may give any of them a path to
-`oauth_credentials`, `org_permission_grants`, or a Drive tool.
+`oauth_credentials`, `org_permission_grants`, or any connector tool (Drive, Asana).
 
 The invariant is enforced STRUCTURALLY rather than by convention. A contract can
 only reach those tables by invoking a tool that declares a `ToolOAuthProfile` or a
@@ -48,10 +48,21 @@ STATELESS_AGENT_IDS = {
 EXPECTED_OAUTH_TOOL_IDS = {
     "integration.drive_create_file",
     "integration.drive_share_file",
+    "integration.asana_create_task",
+    "integration.asana_create_project",
+    "integration.asana_add_project_member",
+    "integration.asana_add_workspace_user",
 }
 
 #: Tools performing an elevated action gated by the org allow-list.
-EXPECTED_PERMISSION_TOOL_IDS = {"integration.drive_share_file"}
+#: Drive sharing (2.5 Q2.5b) plus Asana's two membership verbs (2.6 Q2.6b) — every
+#: action that hands a customer's data or workspace to a party the agent picks at
+#: run time, and nothing else.
+EXPECTED_PERMISSION_TOOL_IDS = {
+    "integration.drive_share_file",
+    "integration.asana_add_project_member",
+    "integration.asana_add_workspace_user",
+}
 
 TEST_KEY = "c2t5bGl6ZS1pbnRlZ3JhdGlvbi10ZXN0LWtleSF4MzI="
 
@@ -131,18 +142,19 @@ def test_stateless_agents_hold_no_elevated_action_tool(contract) -> None:
 
 
 @pytest.mark.parametrize("contract", _stateless_contracts(), ids=lambda c: c.agent_id)
-def test_stateless_agents_hold_no_drive_tool(contract) -> None:
-    """Belt-and-braces: named Drive tools, independent of profile declarations.
+def test_stateless_agents_hold_no_connector_tool(contract) -> None:
+    """Belt-and-braces: named connector tools, independent of profile declarations.
 
     The two tests above key off the profile fields. This one keys off tool
-    identity, so a Drive tool that somehow lost its profile would still be caught.
+    identity, so a connector tool that somehow lost its profile would still be
+    caught. Covers Drive and Asana.
     """
     granted = {g.tool_id for g in contract.allowed_tools}
     granted |= set(contract.invocable_tools or [])
     overlap = granted & (EXPECTED_OAUTH_TOOL_IDS | EXPECTED_PERMISSION_TOOL_IDS)
     assert overlap == set(), (
-        f"{contract.agent_id} holds Drive tool(s) {sorted(overlap)} — stateless "
-        f"agents must have zero access to the Drive connector"
+        f"{contract.agent_id} holds connector tool(s) {sorted(overlap)} — stateless "
+        f"agents must have zero access to the Drive or Asana connectors"
     )
 
 
@@ -163,14 +175,54 @@ def test_oauth_capable_tools_are_exactly_the_expected_set() -> None:
 def test_permission_gated_tools_are_exactly_the_expected_set() -> None:
     """Pins which tools perform a gated elevated action.
 
-    Sharing is the only one (integration_inputs.md 2.5, Q2.5b); file creation is
-    deliberately NOT permission-gated because nothing leaves the customer's Drive.
+    Drive sharing (2.5 Q2.5b) and Asana's two membership verbs (2.6 Q2.6b). File,
+    task, and project CREATION are deliberately NOT permission-gated: nothing
+    leaves the customer's own account, so there is no recipient to pre-authorize.
     """
     registry = _full_registry()
     with_permission = {t.tool_id for t in registry.all() if t.permission is not None}
     assert with_permission == EXPECTED_PERMISSION_TOOL_IDS, (
         f"permission-gated tool set changed: {sorted(with_permission)}. Re-verify "
         "the stateless-agent invariant before updating this assertion."
+    )
+
+
+@pytest.mark.parametrize(
+    "tool_id",
+    [
+        "integration.drive_create_file",
+        "integration.asana_create_task",
+        "integration.asana_create_project",
+    ],
+)
+def test_routine_creation_verbs_are_not_permission_gated(tool_id: str) -> None:
+    """The severity split of 2.5 Q2.5b and 2.6 Q2.6b, asserted rather than assumed.
+
+    Creation stays inside the customer's own account; sharing and membership send
+    access to a party the agent picks. Only the latter carry the third gate.
+    """
+    registry = _full_registry()
+    tool = registry.resolve(tool_id)
+    assert tool.oauth is not None, f"{tool_id} still needs a live grant"
+    assert tool.permission is None, (
+        f"{tool_id} must not be permission-gated: nothing leaves the customer's "
+        "custody, so there is no recipient to pre-authorize"
+    )
+
+
+def test_asana_membership_verbs_use_distinct_action_classes() -> None:
+    """2.6 Q2.6d: project membership must not pre-authorize workspace invitation.
+
+    A shared action class would let one allow-list row authorize both verbs, and
+    workspace invitation grants at organization scope — an order of magnitude wider.
+    """
+    registry = _full_registry()
+    project = registry.resolve("integration.asana_add_project_member")
+    workspace = registry.resolve("integration.asana_add_workspace_user")
+    assert project.permission is not None and workspace.permission is not None
+    assert project.permission.action_class != workspace.permission.action_class, (
+        "Asana's two membership verbs share an action class: an org pre-authorizing "
+        "project membership would thereby authorize organization-wide invitation"
     )
 
 

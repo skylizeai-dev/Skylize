@@ -554,6 +554,237 @@ own "not Drive-specific" disclaimers) returns nothing.
 
 ---
 
+## 2.6 - Asana
+
+> **Section status: `[DRAFT]` - NOT APPROVED. Owner sign-off pending.**
+> Drafted 2026-09-02 against commit `a8e7328`. Predecessor:
+> `docs/audits/audit_notion_asana_readiness.md`. Depends additionally on 4.0
+> (Section 1.1 must be resolved).
+>
+> **Process note, stated plainly:** this file's own banner says "Connector
+> implementation is BLOCKED until the relevant section reads `[APPROVED]`", and
+> 2.5 followed draft -> approve -> implement across three commits (`ac679be`,
+> `a9e6547`, `2448819`). The Asana connector was implemented in the SAME commit
+> as this draft, on explicit owner instruction. The deviation is recorded here
+> rather than left for a future session to infer. Nothing below is approved.
+
+`[CODE-VERIFIED]` Asana is **org-level**: the action happens in the customer's own
+Asana workspace, against their own projects and their own people. Same test that
+made Drive org-level (2.5) and Slack platform-level (2.3, Q2.3a). A task created in
+a Skylize-owned Asana workspace is invisible to the customer, so platform-level is
+not merely wrong here - it is unimplementable.
+
+Asana required **zero changes to the OAuth primitive**. `[LIVE-VERIFIED]` 2026-09-02
+against `https://developers.asana.com/docs/oauth`: authorization-code flow, token
+endpoint `POST https://app.asana.com/-/oauth_token`, client credentials as
+form-encoded **body** parameters, and a response carrying `"expires_in": 3600`,
+`token_type: "bearer"`, and `refresh_token`. That is exactly the RFC 6749 §5.1 shape
+`_default_parse_token_response` implements (`app/credentials/oauth.py:104-127`), and
+exactly the request shape `_post_refresh` builds (`:423-429`). The provider config is
+therefore an endpoint, credentials, and scopes - nothing more, mirroring
+`google_provider.py`.
+
+- **Q2.6a `[OWNER-DECISION-REQUIRED]` OAuth scope - PARTLY BLOCKED, read carefully.**
+  Asana publishes **granular scopes** in `<resource>:<action>` form, space-delimited
+  (`[LIVE-VERIFIED]` 2026-09-02,
+  `https://developers.asana.com/docs/oauth-scopes`): `tasks:read`, `tasks:write`,
+  `tasks:delete`, `projects:read`, `projects:write`, `projects:delete`,
+  `stories:read`, `stories:write`, `users:read`, `workspaces:read`,
+  `attachments:read/write/delete`, `team_memberships:read`, `teams:read`, and others.
+  A **"Full permissions"** alternative exists: "If no scopes are specified, the
+  `default` OAuth scope will be used - provided the app was originally registered
+  with Full permissions", and an app registered that way **cannot** request specific
+  scopes. Full permissions grants access to all endpoints.
+
+  `[RESEARCH-SUGGESTED]` the granular set, not `default`. Granular scopes are what
+  make this file's attenuation-only principle enforceable and what keep
+  `oauth_credentials.scopes` (`0021:96`) meaningful rather than decorative. The
+  minimum covering the verbs in Q2.6b is **`tasks:write projects:write`**.
+
+  **THE BLOCKER, and it is not cosmetic.** `[LIVE-VERIFIED]` Asana's published scope
+  list contains **no `workspaces:write`** - only `workspaces:read` - and maps
+  **neither** membership endpoint (`addMembers`, `addUser`) to any granular scope.
+  Two consequences the owner must decide on before any scope string is registered:
+  1. `projects:write` is the *plausible* scope for `POST /projects/{gid}/addMembers`
+     (it mutates a project and returns a `ProjectResponse`), but this is
+     **`[UNVERIFIED]`** - Asana does not document the mapping.
+  2. `POST /workspaces/{gid}/addUser` has **no plausible granular scope at all**.
+     Enabling it appears to require registering the Skylize Asana app with **Full
+     permissions**, which grants every endpoint for every customer who connects -
+     a grant incomparably wider than Drive's `drive.file` and a direct conflict with
+     the Global combining principle.
+
+  **This section does NOT resolve that conflict.** Both tools are implemented and
+  both are permission-gated, so an org that has authorized nobody can perform
+  neither (Q2.6d). But `integration.asana_add_workspace_user` cannot be *exercised*
+  under the granular scope set recommended above, and requesting Full permissions to
+  enable one verb is a decision only the owner can make. See Q2.6g.
+
+- **Q2.6b `[OWNER-DECISION-REQUIRED]` Which write actions are gated.** Mirroring
+  2.5's Q2.5b severity split. Four verbs are in scope for this pass:
+  - **Task creation** (`POST /tasks`). `[RESEARCH-SUGGESTED]` **routine.** Creates
+    work inside a workspace the customer already controls, under their own retention
+    and access rules. Nothing leaves their custody. Not permission-gated - the same
+    reasoning that leaves Drive's `files.create` ungated.
+  - **Project creation** (`POST /projects`). `[RESEARCH-SUGGESTED]` **routine**, for
+    the identical reason. Structure, not access.
+  - **`POST /projects/{project_gid}/addMembers`.** `[RESEARCH-SUGGESTED]`
+    **HIGH-RISK.** `[LIVE-VERIFIED]` the `members` field is documented as "An array
+    of strings identifying users. These can either be the string `me`, **an email**,
+    or the gid of a user." An email address chosen by the agent at run time, granting
+    a named external party access to a customer's project, is structurally identical
+    to Drive's `permissions.create` - the verb 2.5 gave the third gate to. Documented
+    side effect worth recording: "a user being added as a member may also be added as
+    a *follower*", i.e. the grant is slightly wider than the verb's name suggests.
+  - **`POST /workspaces/{workspace_gid}/addUser`.** `[RESEARCH-SUGGESTED]`
+    **HIGH-RISK, and wider than anything in the Drive connector.** `[LIVE-VERIFIED]`
+    "Add a user to a workspace or organization. The user can be referenced by their
+    globally unique user ID or **their email address**", and the response is "the
+    full user record for the **invited** user" - so this endpoint invites, it does not
+    merely attach an existing member. It grants at **organization** scope rather than
+    per-object; Drive's narrowest-scope design deliberately kept every action to
+    app-created files. Subject to Q2.6a's scope blocker.
+
+- **Q2.6c `[OWNER-DECISION-REQUIRED]` Governance narrative - RESEARCH POSITION.**
+  `[RESEARCH-SUGGESTED]` Asana's role is **agency work-intake and delivery
+  tracking**: an agent turns an engagement into tracked work in the client's own
+  Asana - creating the project and the tasks that constitute a deliverable - and,
+  exceptionally, brings a named stakeholder into that project so they can follow it.
+  As with 2.5's deliverable-teslimi framing, this narrative and the two technical
+  answers are load-bearing on each other: it is what makes `tasks:write
+  projects:write` sufficient (Q2.6a) and what makes creation the routine verb and
+  membership the exceptional one (Q2.6b). Changing one without revisiting the others
+  is not safe.
+
+- **Q2.6d `[DECIDED - owner, 2026-09-02]` Decision Engine hook: REUSE the existing
+  gate, build nothing new.** The gap 2.5's Q2.5d identified is unchanged at this
+  commit: `[CODE-VERIFIED]` the synchronous Decision Engine gate runs once per
+  `/agents/execute` request, and `ToolProxy` holds no `DecisionEvaluator`
+  (`grep -rn "DecisionEvaluator" src/skylize/tools/` returns nothing, re-confirmed).
+  Asana's two membership verbs therefore need what Drive's sharing needed.
+
+  **They get it from the SAME mechanism, not a second one.** `ToolPermissionProfile`
+  (`tools/base.py:89-121`), the third opt-in `ToolProxy` stage shipped in `2448819`
+  (`proxy.py:266-270`, handler `:400-476`), is provider-agnostic by construction -
+  its docstring already states "Nothing here is Drive-specific: the gate knows about
+  an `action_class`, a grantee, and a role" (`app/permissions/gate.py:5-6`). Asana
+  supplies two new `action_class` values and reuses everything else: the
+  `org_permission_grants` allow-list (migration 0022), exact-address-or-bare-domain
+  matching, the deny-by-default asymmetry, and the audited denial path.
+
+  **No HITL deferral**, following the Q2.1d precedent 2.5 relied on: a HITL replay
+  would re-execute the original action a second time on approval. The allow-list is
+  the mechanism; a human pre-authorizes recipients, and the agent may then act only
+  within that pre-authorization.
+
+  Action classes: **`asana.project.add_members`** and
+  **`asana.workspace.add_user`**. Deliberately distinct, so an org can pre-authorize
+  project membership without thereby authorizing workspace invitations - the two
+  differ in blast radius by an order of magnitude (Q2.6b).
+
+- **Q2.6e `[DECIDED - owner, 2026-09-02]` Asana has no role axis: map to a FIXED
+  `writer` in application code, never in the schema.** `[CODE-VERIFIED]`
+  `org_permission_grants.max_role` is `CHECK (max_role IN ('reader', 'commenter',
+  'writer'))` (`0022:85-86`) with `ROLE_RANK = {"reader": 0, "commenter": 1,
+  "writer": 2}` (`dal/permission_grants.py:27`), and `ToolPermissionProfile`
+  requires a non-empty `role_field` (`tools/base.py:116`). `[LIVE-VERIFIED]` Asana's
+  `addMembers` and `addUser` accept **no role or access-level parameter at all** - a
+  project member is a project member.
+
+  **The CHECK constraint is NOT relaxed.** A nullable or free-text role would be a
+  role-less escape hatch that any future provider could use to bypass the rank
+  comparison entirely, and the constraint is one of the few places the gate's
+  ordering is enforced by the database rather than by code. Instead, both Asana
+  membership tools carry `role: Literal["writer"] = "writer"` on their input schema.
+  The field exists because the gate reads it off the validated input
+  (`proxy.py:435`); it is pinned by the type so an agent cannot vary it, and
+  `extra="forbid"` prevents smuggling another value. `writer` is the correct rank:
+  Asana membership confers full participation, so mapping it to anything lower would
+  understate what is being granted and let an org authorize less than it is actually
+  giving away.
+
+  Consequence an operator must understand: an `org_permission_grants` row for an
+  Asana action class with `max_role` of `reader` or `commenter` authorizes
+  **nothing**, because every Asana membership request arrives as `writer` and the
+  gate ANDs grantee-match with rank. That is the intended, fail-closed behaviour.
+
+- **Q2.6f `[DECIDED - owner, 2026-09-02, ON A CORRECTED PREMISE]` Revocation
+  detection.** The audit (`audit_notion_asana_readiness.md` §B.2.3) flagged that
+  Asana's error envelope is `{"errors":[{"message": ...}]}` rather than RFC 6749, and
+  that `_default_is_revocation` (`oauth.py:130-138`) would therefore never mark a dead
+  Asana grant `revoked` - silent degradation, the customer never prompted to
+  reconnect. **Live verification this pass CORRECTS that premise, and the correction
+  matters.**
+
+  `[CODE-VERIFIED]` `is_revocation_error` is called from exactly one place -
+  `_classify_failure` (`oauth.py:469`), reached only from `_post_refresh`
+  (`oauth.py:445`). It therefore only ever sees a response from the **token
+  endpoint** (`app.asana.com/-/oauth_token`), never from the REST API
+  (`app.asana.com/api/1.0/*`).
+
+  `[LIVE-VERIFIED]` those are two different error formats. The REST API does use
+  `{"errors":[{"message": "Not Authorized"}]}`
+  (`https://developers.asana.com/docs/errors`, 2026-09-02) - the audit was right
+  about that surface. But Asana's **token endpoint** returns RFC 6749:
+  `HTTP 400 {"error": "invalid_grant", "error_uri": "...", "error_description":
+  "The \`refresh_token\` provided was invalid."}`, evidenced verbatim in two
+  independent Asana developer-forum threads (`forum.asana.com/t/...615160`,
+  `.../738321`, both read 2026-09-02). **The default predicate would have worked.**
+
+  **An Asana-specific override ships anyway, as defence in depth**, because Asana
+  does not *document* its token-endpoint error contract and forum posts are not a
+  specification. It is a strict SUPERSET of the default: identical behaviour on the
+  RFC 6749 shape, plus it can read the `errors` envelope should the token endpoint
+  ever return one. It never widens into ambiguity - a bare "Not Authorized" is NOT
+  treated as revocation, because at the token endpoint that is equally consistent
+  with a wrong platform client secret, which is a Skylize misconfiguration and must
+  never be reported to a customer as their revocation. Being provider-scoped
+  (`OAuthProviderConfig.is_revocation_error`), it cannot affect Drive's, Slack's, or
+  Stripe's detection.
+
+  **Open for the owner:** now that the premise is corrected, the override may be
+  judged unnecessary complexity and dropped in favour of the default. Recorded as a
+  live question rather than settled by me.
+
+- **Q2.6g `[OWNER-DECISION-REQUIRED]` Explicitly out of scope for this section.**
+  Recorded so a future session does not assume these are covered by omission:
+  - **Webhooks.** `POST /webhooks` is an INBOUND surface (Asana calling Skylize)
+    with its own signature-handshake model. Not analyzed here; Stripe's
+    inbound-webhook precedent (2.1) is the nearest pattern if taken up later.
+  - **Custom fields.** `custom_fields` on task and project payloads are a per-workspace
+    schema this connector neither reads nor writes. A customer's custom fields can
+    carry sensitive structured data and deserve their own scope decision.
+  - **Portfolios, goals, time-tracking, task templates, project templates.** Each has
+    its own scope pair in Asana's granular list and none is required by Q2.6c's
+    narrative.
+  - **Deletion of anything** - `tasks:delete`, `projects:delete`. 2.5 set the
+    precedent of OMITTING the destructive verb rather than gating it
+    (`drive_tools.py:17-18`); this section follows it. A future author must not
+    assume deletion is "the opposite of creation" and therefore equally routine.
+  - **Attachments.** `attachments:write` would let an agent push file content into a
+    customer's Asana; that is a data-egress question closer to Drive's than to task
+    creation's and is not analyzed here.
+  - **Removing members** (`removeMembers`, `removeUser`). Revocation is destructive
+    and is deliberately un-addressed, exactly as Drive's permission revocation was.
+  - **Reading a customer's existing Asana content.** No `*:read` scope is requested
+    and no read tool is built. The connector is write-only by construction.
+
+- **Q2.6h `[CODE-VERIFIED]` Rate limits, recorded for the retry design.**
+  `[LIVE-VERIFIED]` 2026-09-02, `https://developers.asana.com/docs/rate-limits`:
+  **150** requests/minute on free domains, **1,500** on paid; **50** concurrent
+  reads and **15** concurrent writes, evaluated independently; a separate **60**
+  requests/minute cap on the search API; **5** concurrent duplication/export jobs.
+  On exceed: **HTTP 429** with the standard `Retry-After` header, and the docs advise
+  using the returned value rather than assuming a fixed wait. Cost-based accounting
+  also applies - "the cost of a request is calculated after the response is built and
+  is deducted from a per-minute quota" - so heavy requests can throttle at low volume.
+  **Limits are allocated per authorization token**, which under this section's
+  org-level answer means per customer org: one org's burst cannot throttle another's.
+  That is a materially better isolation property than Notion's per-workspace model
+  and is worth preserving if a shared client is ever proposed.
+
+---
+
 ## 3.0 - `org_credentials` schema gaps for OAuth (no migration this pass)
 
 > **Section status: `[OWNER-DECISION-REQUIRED]` - recorded, deliberately not implemented.**
@@ -625,4 +856,8 @@ reads `[APPROVED]` **and** the preconditions in 4.0 are met.
 - 2.5 Google Drive (scope Q2.5a verified, write actions Q2.5b, governance
   narrative Q2.5c, and Decision Engine hook Q2.5d decided; Q2.5e out-of-scope list
   stands as recorded): Approved  2026-08-31  (owner)
+- 2.6 Asana (DRAFT - scope Q2.6a BLOCKED on the Full-permissions question for
+  `addUser`; write actions Q2.6b, narrative Q2.6c, gate reuse Q2.6d, fixed-`writer`
+  mapping Q2.6e, and revocation override Q2.6f drafted; Q2.6g out-of-scope list
+  stands as recorded): ___________________________________  (owner, date)
 - 3.0 Credential schema: _______________________________  (owner, date)

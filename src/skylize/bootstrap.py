@@ -32,6 +32,7 @@ from .app.audit.service import AuditService
 from .app.auth.service import ApiKeyService
 from .app.auth.user_service import UserAuthService
 from .app.credentials.encryption import FernetEncryptor
+from .app.credentials.asana_provider import build_asana_provider_config
 from .app.credentials.google_provider import build_google_drive_provider_config
 from .app.credentials.oauth import OAuthCredentialService
 from .app.permissions.gate import PermissionGate
@@ -207,6 +208,37 @@ def resolve_google_drive_config(settings: Settings) -> tuple[str, str] | None:
             f"SKYLIZE_{present} is set but SKYLIZE_{missing} is not. Both are "
             "required together to enable the Google Drive connector, or neither "
             "to leave it disabled."
+        )
+    return client_id, client_secret
+
+
+def resolve_asana_config(settings: Settings) -> tuple[str, str] | None:
+    """Return `(client_id, client_secret)` for the Asana connector, or None when
+    the integration is off.
+
+    Platform-level secrets, identical shape and identical reasoning to
+    `resolve_google_drive_config` (integration_inputs.md 2.6): Skylize registers ONE
+    Asana OAuth application and customers authorize into it.
+
+    OPT-IN: both empty means the Asana provider is never registered, and any Asana
+    tool call then fails closed in the ToolProxy OAuth stage (`RefreshUnavailable`
+    -> `ToolCredentialUnavailable`) rather than reaching Asana. Setting exactly one
+    is REFUSED here, for the same reason it is refused for Drive and Slack: a client
+    id with no secret cannot complete a token exchange, and discovering that at a
+    customer's first Asana call rather than at boot is the failure mode this check
+    exists to prevent.
+    """
+    client_id = settings.asana_oauth_client_id.strip()
+    client_secret = settings.asana_oauth_client_secret.strip()
+    if not client_id and not client_secret:
+        return None
+    if not client_id or not client_secret:
+        missing = "ASANA_OAUTH_CLIENT_ID" if not client_id else "ASANA_OAUTH_CLIENT_SECRET"
+        present = "ASANA_OAUTH_CLIENT_SECRET" if not client_id else "ASANA_OAUTH_CLIENT_ID"
+        raise ConfigurationError(
+            f"SKYLIZE_{present} is set but SKYLIZE_{missing} is not. Both are "
+            "required together to enable the Asana connector, or neither to leave "
+            "it disabled."
         )
     return client_id, client_secret
 
@@ -494,6 +526,16 @@ async def build_container(settings: Settings | None = None) -> Container:
         oauth_credentials.register_provider(
             build_google_drive_provider_config(
                 client_id=client_id, client_secret=client_secret
+            )
+        )
+
+    # Asana (integration_inputs.md 2.6). Same opt-in discipline as Drive above.
+    asana_config = resolve_asana_config(settings)
+    if asana_config is not None:
+        asana_client_id, asana_client_secret = asana_config
+        oauth_credentials.register_provider(
+            build_asana_provider_config(
+                client_id=asana_client_id, client_secret=asana_client_secret
             )
         )
 

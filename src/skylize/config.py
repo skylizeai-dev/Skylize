@@ -140,6 +140,15 @@ class Settings(BaseSettings):
     google_oauth_client_id: str = ""
     google_oauth_client_secret: str = ""
 
+    # Asana connector (integration_inputs.md 2.6). Same PLATFORM-level shape and
+    # same reasoning as the Google pair above: one registered OAuth application,
+    # customers authorize into it, the per-org GRANTS live in oauth_credentials.
+    # Both empty = the Asana provider is not registered and any Asana tool call
+    # fails closed in the ToolProxy OAuth stage. Setting only one is refused at
+    # boot (bootstrap.py `resolve_asana_config`).
+    asana_oauth_client_id: str = ""
+    asana_oauth_client_secret: str = ""
+
     # Rate limiting (per org, per window).
     rate_limit_per_minute: int = 120
     # Tighter dedicated budget for the sensitive GET /credentials/resolve path.
