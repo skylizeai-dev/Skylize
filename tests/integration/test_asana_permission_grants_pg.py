@@ -1,20 +1,25 @@
-"""Asana's action classes against REAL Postgres, proven as the app role.
+"""Asana's action class against REAL Postgres, proven as the app role.
 
 The Asana connector adds NO table and NO migration — it reuses
 `org_permission_grants` (0022) and `oauth_credentials` (0021), both already covered
 by their own suites. What is NOT covered by those suites, and is what this file
 exists for, is that Asana's *particular* reuse is safe:
 
-  * Asana's two action classes are tenant-isolated by the same RLS policy, proven
-    as a role that is neither superuser nor table owner (either would bypass RLS
-    and make the assertion vacuous);
-  * the two Asana classes do not cross-authorize each other at the DAL level —
-    project membership must never pre-authorize organization-wide invitation
-    (2.6 Q2.6d), asserted against real rows rather than against in-memory stubs;
+  * Asana's action class is tenant-isolated by the same RLS policy, proven as a
+    role that is neither superuser nor table owner (either would bypass RLS and
+    make the assertion vacuous);
+  * Asana pre-authorization does not leak into another connector's action class
+    at the DAL level, asserted against real rows rather than against in-memory
+    stubs;
   * the `max_role` CHECK constraint is STILL the three-value Drive vocabulary.
     2.6 Q2.6e maps Asana's role-less membership to a fixed `writer` in application
     code precisely so this constraint need not be relaxed; a test that the
     constraint still rejects everything else is what keeps that decision honest.
+
+Only `addMembers` (project-level, `projects:write`) ships. Workspace-level
+`addUser` was removed (2.6 Q2.6a, owner decision): no published Asana granular
+scope covers it, and enabling it would require Full permissions — every endpoint,
+for every connected customer.
 
 Skipped unless SKYLIZE_TEST_DB_URL (+ SKYLIZE_TEST_APP_DB_URL) are set.
 """
@@ -33,17 +38,13 @@ from skylize.dal.permission_grants import (
     PermissionGrantRow,
     PgPermissionGrantRepository,
 )
-from skylize.tools.builtin.asana_tools import (
-    ASANA_ADD_PROJECT_MEMBER_ACTION_CLASS,
-    ASANA_ADD_WORKSPACE_USER_ACTION_CLASS,
-)
+from skylize.tools.builtin.asana_tools import ASANA_ADD_PROJECT_MEMBER_ACTION_CLASS
 
 from .conftest import APP_DB_URL, requires_app_role, requires_pg
 
 pytestmark = pytest.mark.integration
 
 PROJECT_ACTION = ASANA_ADD_PROJECT_MEMBER_ACTION_CLASS
-WORKSPACE_ACTION = ASANA_ADD_WORKSPACE_USER_ACTION_CLASS
 
 
 def _orgs() -> tuple[str, str]:
@@ -190,40 +191,8 @@ async def test_org_a_asana_rows_never_authorize_org_b(app_db, admin_conn) -> Non
 
 
 # ---------------------------------------------------------------------------
-# The two Asana classes do not cross-authorize (2.6 Q2.6d), against real rows
+# Asana rows do not leak into other action classes, against real rows
 # ---------------------------------------------------------------------------
-
-@requires_app_role
-async def test_project_rows_do_not_authorize_workspace_invitation(
-    app_db, admin_conn
-) -> None:
-    """The separation that makes two action classes worth having.
-
-    An org that pre-authorized alice for project membership has NOT authorized
-    inviting alice into the whole organization — a materially wider grant.
-    """
-    org_a, _ = _orgs()
-    repo = PgPermissionGrantRepository(app_db)
-    try:
-        await _seed_tenant(admin_conn, org_a)
-        await repo.insert(_row(org_a, PROJECT_ACTION, "alice@example.com"))
-        gate = PermissionGate(repo)
-
-        # Authorized for the narrow verb...
-        await gate.authorize(
-            org_id=org_a, action_class=PROJECT_ACTION, grantee="alice@example.com",
-            role="writer", link_sharing_sentinel="anyone",
-        )
-        # ...and denied for the wide one.
-        with pytest.raises(PermissionDeniedError, match="pre-authorized no recipient"):
-            await gate.authorize(
-                org_id=org_a, action_class=WORKSPACE_ACTION,
-                grantee="alice@example.com", role="writer",
-                link_sharing_sentinel="anyone",
-            )
-    finally:
-        await _cleanup(admin_conn, [org_a])
-
 
 @requires_app_role
 async def test_asana_rows_do_not_authorize_drive_sharing(app_db, admin_conn) -> None:

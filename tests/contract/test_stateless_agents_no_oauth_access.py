@@ -51,17 +51,17 @@ EXPECTED_OAUTH_TOOL_IDS = {
     "integration.asana_create_task",
     "integration.asana_create_project",
     "integration.asana_add_project_member",
-    "integration.asana_add_workspace_user",
 }
 
 #: Tools performing an elevated action gated by the org allow-list.
-#: Drive sharing (2.5 Q2.5b) plus Asana's two membership verbs (2.6 Q2.6b) — every
-#: action that hands a customer's data or workspace to a party the agent picks at
-#: run time, and nothing else.
+#: Drive sharing (2.5 Q2.5b) plus Asana's project membership verb (2.6 Q2.6b) —
+#: every action that hands a customer's data or workspace to a party the agent
+#: picks at run time, and nothing else. Asana's workspace-level `addUser` was
+#: deliberately not built (2.6 Q2.6a: no granular scope covers it; would require
+#: Full permissions, disproportionate to this platform's minimal-scope philosophy).
 EXPECTED_PERMISSION_TOOL_IDS = {
     "integration.drive_share_file",
     "integration.asana_add_project_member",
-    "integration.asana_add_workspace_user",
 }
 
 TEST_KEY = "c2t5bGl6ZS1pbnRlZ3JhdGlvbi10ZXN0LWtleSF4MzI="
@@ -175,7 +175,7 @@ def test_oauth_capable_tools_are_exactly_the_expected_set() -> None:
 def test_permission_gated_tools_are_exactly_the_expected_set() -> None:
     """Pins which tools perform a gated elevated action.
 
-    Drive sharing (2.5 Q2.5b) and Asana's two membership verbs (2.6 Q2.6b). File,
+    Drive sharing (2.5 Q2.5b) and Asana's project membership verb (2.6 Q2.6b). File,
     task, and project CREATION are deliberately NOT permission-gated: nothing
     leaves the customer's own account, so there is no recipient to pre-authorize.
     """
@@ -207,22 +207,6 @@ def test_routine_creation_verbs_are_not_permission_gated(tool_id: str) -> None:
     assert tool.permission is None, (
         f"{tool_id} must not be permission-gated: nothing leaves the customer's "
         "custody, so there is no recipient to pre-authorize"
-    )
-
-
-def test_asana_membership_verbs_use_distinct_action_classes() -> None:
-    """2.6 Q2.6d: project membership must not pre-authorize workspace invitation.
-
-    A shared action class would let one allow-list row authorize both verbs, and
-    workspace invitation grants at organization scope — an order of magnitude wider.
-    """
-    registry = _full_registry()
-    project = registry.resolve("integration.asana_add_project_member")
-    workspace = registry.resolve("integration.asana_add_workspace_user")
-    assert project.permission is not None and workspace.permission is not None
-    assert project.permission.action_class != workspace.permission.action_class, (
-        "Asana's two membership verbs share an action class: an org pre-authorizing "
-        "project membership would thereby authorize organization-wide invitation"
     )
 
 

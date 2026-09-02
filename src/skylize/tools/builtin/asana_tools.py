@@ -1,10 +1,19 @@
-"""The Asana connector — task/project creation plus governed membership.
+"""The Asana connector — task/project creation plus governed project membership.
 
-Four tools (integration_inputs.md 2.6, `[DRAFT]` 2026-09-02):
+Three tools (integration_inputs.md 2.6, `[DRAFT]` 2026-09-02):
   * `integration.asana_create_task`         — routine (Q2.6b)
   * `integration.asana_create_project`      — routine (Q2.6b)
   * `integration.asana_add_project_member`  — HIGH-RISK, permission-gated (Q2.6b/d)
-  * `integration.asana_add_workspace_user`  — HIGH-RISK, permission-gated (Q2.6b/d)
+
+WORKSPACE-LEVEL INVITATION (`addUser`) IS DELIBERATELY NOT BUILT. Live
+verification found no published Asana granular scope maps to
+`POST /workspaces/{gid}/addUser` — there is no `workspaces:write`, and the
+endpoint appears reachable only under "Full permissions" (every endpoint, for
+every connected customer). That is disproportionate to the minimal-scope
+philosophy this platform follows (Drive's `drive.file`, this connector's
+`tasks:write projects:write`). Owner decision, 2.6 Q2.6a: out of scope. An
+earlier pass built and gated the tool anyway to make the blocked state visible;
+it is removed here rather than left half-shipped.
 
 Org-level: every call resolves the calling org's own OAuth grant through the
 provider-agnostic infrastructure from f6360b4. This module contains NO OAuth logic
@@ -20,7 +29,7 @@ auth handling would bypass the RLS-scoped, audited, `connection_state`-tracking
 refresh primitive in `app/credentials/oauth.py`. Two HTTP client libraries over one
 credential store is precisely the duplication 2.6 forbids.
 
-THE TWO MEMBERSHIP HANDLERS REFUSE WITHOUT AN AUTHORIZATION, and send what the gate
+THE MEMBERSHIP HANDLER REFUSES WITHOUT AN AUTHORIZATION, and sends what the gate
 approved rather than what the input asked for. That is the `2448819` chokepoint
 pattern, reused verbatim rather than reinvented: `ToolPermissionProfile` is opt-in
 per tool, so a membership tool registered without the profile would otherwise reach
@@ -37,8 +46,8 @@ constructed at the wire boundary from the single AUTHORIZED grantee.
 
 NO ROLE AXIS (Q2.6e). Asana membership carries no access level. Rather than relax
 `org_permission_grants`' `max_role` CHECK — which would create a role-less escape
-hatch any future provider could use to skip the rank comparison — both membership
-schemas pin `role: Literal["writer"] = "writer"`. The gate reads the field off the
+hatch any future provider could use to skip the rank comparison — the membership
+schema pins `role: Literal["writer"] = "writer"`. The gate reads the field off the
 validated input (`proxy.py:435`); the type makes it unforgeable and `extra="forbid"`
 prevents smuggling an alternative. `writer` is the honest rank for a grant that
 confers full participation.
@@ -66,12 +75,8 @@ from ..base import (
 
 log = structlog.get_logger()
 
-#: The action classes keying this connector's rows in `org_permission_grants`.
-#: Deliberately DISTINCT (2.6 Q2.6d): pre-authorizing someone for a project must not
-#: silently pre-authorize inviting them into the whole organization. The two differ
-#: in blast radius by an order of magnitude.
+#: The action class keying this connector's rows in `org_permission_grants`.
 ASANA_ADD_PROJECT_MEMBER_ACTION_CLASS = "asana.project.add_members"
-ASANA_ADD_WORKSPACE_USER_ACTION_CLASS = "asana.workspace.add_user"
 
 _API_BASE = "https://app.asana.com/api/1.0"
 
@@ -204,43 +209,12 @@ class AsanaAddProjectMemberOut(BaseModel):
     role: str
 
 
-class AsanaAddWorkspaceUserIn(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    workspace_gid: str = Field(
-        min_length=1, description="Workspace or organization to add the user to."
-    )
-    grantee: str = Field(
-        min_length=1,
-        description=(
-            "Email address or user gid of the ONE person to invite into the "
-            "workspace. Must be pre-authorized by the organization."
-        ),
-    )
-    role: Literal["writer"] = Field(
-        default="writer",
-        description=(
-            "Always 'writer'. Asana workspace membership has no access-level "
-            "parameter; this is fixed, not selectable."
-        ),
-    )
-
-
-class AsanaAddWorkspaceUserOut(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    workspace_gid: str
-    grantee: str
-    role: str
-    user_gid: str | None = None
-
-
 # ---------------------------------------------------------------------------
 # Client
 # ---------------------------------------------------------------------------
 
 class AsanaClient:
-    """Thin async wrapper over the four Asana endpoints this connector needs.
+    """Thin async wrapper over the three Asana endpoints this connector needs.
 
     One client per call, built from the token resolved for that call's org, so a
     credential can never leak across orgs through a shared/cached client — the
@@ -312,13 +286,6 @@ class AsanaClient:
         """One grantee, wrapped into Asana's array at the wire boundary only."""
         return await self._post(
             f"/projects/{project_gid}/addMembers", {"members": [grantee]}
-        )
-
-    async def add_workspace_user(
-        self, *, workspace_gid: str, grantee: str
-    ) -> httpx.Response:
-        return await self._post(
-            f"/workspaces/{workspace_gid}/addUser", {"user": grantee}
         )
 
 
@@ -407,15 +374,13 @@ def _data(response: httpx.Response) -> dict[str, Any]:
 def _require_grant(
     ctx: ToolContext, tool_id: str, action_class: str
 ) -> PermissionGrant:
-    """The deny-by-default backstop, shared by both membership handlers.
+    """The deny-by-default backstop for the membership handler.
 
     Mirrors `drive_tools.py:338-356` exactly. Two refusals, both fail-closed:
       * no grant at all  -> the tool was registered without a `ToolPermissionProfile`
                             and the gate never ran. A misconfiguration, not a denial.
       * wrong action class -> a grant for a DIFFERENT elevated action must never
-                            authorize this one. Without this check, an org's
-                            project-membership pre-authorization could be replayed
-                            against workspace invitation, which is the wider verb.
+                            authorize this one.
     """
     grant = ctx.permission_grant
     if grant is None:
@@ -558,7 +523,7 @@ def build_asana_create_project_tool(oauth: OAuthCredentialService) -> ToolDefini
 
 
 # ---------------------------------------------------------------------------
-# Tool builders — HIGH-RISK verbs, permission-gated
+# Tool builder — HIGH-RISK verb, permission-gated
 # ---------------------------------------------------------------------------
 
 def build_asana_add_project_member_tool(
@@ -621,84 +586,6 @@ def build_asana_add_project_member_tool(
         oauth={"provider": ASANA_PROVIDER},
         permission={
             "action_class": ASANA_ADD_PROJECT_MEMBER_ACTION_CLASS,
-            "grantee_field": "grantee",
-            "role_field": "role",
-        },
-    )
-
-
-def build_asana_add_workspace_user_tool(
-    oauth: OAuthCredentialService,
-) -> ToolDefinition:
-    """Workspace invitation — the WIDEST verb in this connector (Q2.6b), gated.
-
-    Wider than anything in the Drive connector: it grants at ORGANIZATION scope
-    rather than per-object, and Asana's own docs describe the response as "the full
-    user record for the invited user", so it invites rather than merely attaching an
-    existing member.
-
-    Its own action class, never shared with project membership (Q2.6d), so an org
-    that pre-authorized someone for one project has not thereby authorized inviting
-    them into the whole organization.
-
-    NOTE (2.6 Q2.6a): no published Asana granular scope maps to this endpoint —
-    there is no `workspaces:write` — so under the recommended granular scope set
-    this tool will be refused by Asana with a 403. That is a deliberate, documented
-    state: the tool is registered and gated, but exercising it is blocked on an
-    owner decision about requesting Full permissions.
-    """
-
-    async def handler(inp: BaseModel, ctx: ToolContext) -> BaseModel:
-        assert isinstance(inp, AsanaAddWorkspaceUserIn)
-        grant = _require_grant(
-            ctx,
-            "integration.asana_add_workspace_user",
-            ASANA_ADD_WORKSPACE_USER_ACTION_CLASS,
-        )
-
-        token = await _resolve_token(oauth, ctx.org_id, ctx.correlation_id)
-        client = AsanaClient(token)
-        try:
-            response = await client.add_workspace_user(
-                workspace_gid=inp.workspace_gid, grantee=grant.grantee
-            )
-        except httpx.HTTPStatusError as exc:
-            raise _exhausted(exc, "workspace user addition") from exc
-        finally:
-            await client.aclose()
-
-        if response.status_code not in (200, 201):
-            raise _asana_error(response, "workspace user addition")
-        body = _data(response)
-        user_gid = body.get("gid")
-        log.info(
-            "asana.workspace_user_added",
-            org_id=ctx.org_id, agent_id=ctx.agent_id,
-            workspace_gid=inp.workspace_gid, grantee=grant.grantee,
-            role=grant.role, matched_pattern=grant.matched_pattern,
-        )
-        return AsanaAddWorkspaceUserOut(
-            workspace_gid=inp.workspace_gid,
-            grantee=grant.grantee,
-            role=grant.role,
-            user_gid=user_gid if isinstance(user_gid, str) else None,
-        )
-
-    return ToolDefinition(
-        tool_id="integration.asana_add_workspace_user",
-        name="Add a user to an Asana workspace",
-        description=(
-            "Invite one named person into the organization's Asana workspace. This "
-            "grants organization-wide access and is the widest action this "
-            "connector can take; the recipient must be pre-authorized."
-        ),
-        input_schema=AsanaAddWorkspaceUserIn,
-        output_schema=AsanaAddWorkspaceUserOut,
-        category="integration",
-        handler=handler,
-        oauth={"provider": ASANA_PROVIDER},
-        permission={
-            "action_class": ASANA_ADD_WORKSPACE_USER_ACTION_CLASS,
             "grantee_field": "grantee",
             "role_field": "role",
         },

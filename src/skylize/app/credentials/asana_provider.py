@@ -65,7 +65,7 @@ ASANA_TOKEN_URL = "https://app.asana.com/-/oauth_token"
 #: and the `ToolOAuthProfile.provider` the Asana tools declare.
 ASANA_PROVIDER = "asana"
 
-#: The narrowest granular scope set covering the four verbs in 2.6 Q2.6b.
+#: The narrowest granular scope set covering the three verbs in 2.6 Q2.6b.
 #:
 #: `[LIVE-VERIFIED]` 2026-09-02 against
 #: `https://developers.asana.com/docs/oauth-scopes`: Asana publishes granular
@@ -74,16 +74,19 @@ ASANA_PROVIDER = "asana"
 #: is chosen so the attenuation-only principle stays enforceable and
 #: `oauth_credentials.scopes` stays meaningful.
 #:
-#: TWO CAVEATS A FUTURE AUTHOR MUST NOT SILENTLY RESOLVE (2.6 Q2.6a):
-#:   1. Asana does not document which scope covers
-#:      `POST /projects/{gid}/addMembers`. `projects:write` is the plausible
-#:      mapping — it mutates a project and returns a `ProjectResponse` — but the
-#:      mapping is UNVERIFIED.
-#:   2. There is NO `workspaces:write` scope, and no granular scope maps to
-#:      `POST /workspaces/{gid}/addUser` at all. That verb appears to require Full
-#:      permissions, which would grant every endpoint for every connected customer.
-#:      Widening this tuple to `default` is a compliance and blast-radius decision,
-#:      NOT a code change — see 2.6 Q2.6a before touching it.
+#: ONE CAVEAT A FUTURE AUTHOR MUST NOT SILENTLY RESOLVE (2.6 Q2.6a): Asana does not
+#: document which scope covers `POST /projects/{gid}/addMembers`. `projects:write`
+#: is the plausible mapping — it mutates a project and returns a `ProjectResponse`
+#: — but the mapping is UNVERIFIED.
+#:
+#: `workspaces:write` DOES NOT EXIST, and no granular scope maps to
+#: `POST /workspaces/{gid}/addUser` at all — that verb appears reachable only under
+#: Full permissions, which would grant every endpoint for every connected customer.
+#: This is WHY the connector has no workspace-level tool: 2.6 Q2.6a decided (owner)
+#: that requesting Full permissions to enable one verb is disproportionate, so
+#: `addUser` was removed rather than shipped unusable. Widening this tuple to
+#: `default` to revisit that is a compliance and blast-radius decision, not a code
+#: change — see 2.6 Q2.6a before touching it.
 ASANA_SCOPES: tuple[str, ...] = ("tasks:write", "projects:write")
 
 #: Token-endpoint messages that unambiguously name the GRANT as the dead thing.

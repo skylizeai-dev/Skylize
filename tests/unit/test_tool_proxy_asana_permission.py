@@ -1,6 +1,6 @@
-"""Asana's two membership verbs through the REAL `ToolProxy` permission stage.
+"""Asana's project-membership verb through the REAL `ToolProxy` permission stage.
 
-`test_asana_tools.py` calls the handlers directly, which proves the handler-level
+`test_asana_tools.py` calls the handler directly, which proves the handler-level
 backstop. This file proves the other half: the actual registered Asana tools, driven
 through `ToolProxy.invoke` with a real `PermissionGate` over real
 `org_permission_grants` rows, deny by default and never reach Asana when refused.
@@ -13,6 +13,11 @@ this combination covers the path a production call actually takes.
 Every assertion that matters is made on OBSERVED HTTP CALLS, not on which exception
 surfaced: a test that only checked the exception type would pass even if the
 membership change had already been sent to Asana.
+
+Workspace-level `addUser` was removed (2.6 Q2.6a, owner decision): no published
+Asana granular scope covers it, and enabling it would require Full permissions —
+every endpoint, for every connected customer. Only `addMembers` (project-level)
+ships, so this file covers `MEMBER_TOOL` and `TASK_TOOL` only.
 """
 
 from __future__ import annotations
@@ -51,10 +56,8 @@ from skylize.events.memory_bus import InMemoryEventBus
 from skylize.tools.base import ToolPermissionTierDenied
 from skylize.tools.builtin.asana_tools import (
     ASANA_ADD_PROJECT_MEMBER_ACTION_CLASS,
-    ASANA_ADD_WORKSPACE_USER_ACTION_CLASS,
     ASANA_PROVIDER,
     build_asana_add_project_member_tool,
-    build_asana_add_workspace_user_tool,
     build_asana_create_task_tool,
 )
 from skylize.tools.proxy import ToolProxy
@@ -66,7 +69,6 @@ AGENT = "asana_proxy_agent"
 TEST_KEY = "c2t5bGl6ZS1pbnRlZ3JhdGlvbi10ZXN0LWtleSF4MzI="
 
 MEMBER_TOOL = "integration.asana_add_project_member"
-WORKSPACE_TOOL = "integration.asana_add_workspace_user"
 TASK_TOOL = "integration.asana_create_task"
 
 
@@ -136,7 +138,6 @@ def _contract() -> AgentContract:
         output_schema="skylize.runtime.agent_runner.AgentRunResult",
         allowed_tools=[
             ToolGrant(tool_id=MEMBER_TOOL, purpose="test"),
-            ToolGrant(tool_id=WORKSPACE_TOOL, purpose="test"),
             ToolGrant(tool_id=TASK_TOOL, purpose="test"),
         ],
         max_token_budget=8_000, max_execution_time_seconds=60,
@@ -153,7 +154,7 @@ def _authority():
         Principal(principal_id=PRINCIPAL, org_id=ORG, display_name="Devon",
                   authority_level="manager")
     )
-    for scope in (MEMBER_TOOL, WORKSPACE_TOOL, TASK_TOOL):
+    for scope in (MEMBER_TOOL, TASK_TOOL):
         repo.add_grant(
             org_id=ORG, principal_id=PRINCIPAL,
             grant=Grant(scope=scope, source=GrantSource.POSITION,
@@ -173,7 +174,6 @@ async def _invoke(gate, tool_id: str, **input_data):
     oauth = await _oauth()
     registry = ToolRegistry([
         build_asana_add_project_member_tool(oauth),
-        build_asana_add_workspace_user_tool(oauth),
         build_asana_create_task_tool(oauth),
     ])
     proxy = ToolProxy(
@@ -195,7 +195,7 @@ async def _invoke(gate, tool_id: str, **input_data):
 
 
 # ---------------------------------------------------------------------------
-# HARD GATE: deny by default, both membership verbs
+# HARD GATE: deny by default
 # ---------------------------------------------------------------------------
 
 async def test_project_member_denied_when_org_authorized_nobody(monkeypatch) -> None:
@@ -207,14 +207,6 @@ async def test_project_member_denied_when_org_authorized_nobody(monkeypatch) -> 
     assert calls == [], "denied membership change must never reach Asana"
 
 
-async def test_workspace_user_denied_when_org_authorized_nobody(monkeypatch) -> None:
-    calls = _patch_http(monkeypatch)
-    gate = await _gate()
-    with pytest.raises(ToolPermissionTierDenied, match="pre-authorized no recipient"):
-        await _invoke(gate, WORKSPACE_TOOL, workspace_gid="w1", grantee="alice@example.com")
-    assert calls == []
-
-
 async def test_unmatched_recipient_is_denied(monkeypatch) -> None:
     calls = _patch_http(monkeypatch)
     gate = await _gate(_row(ASANA_ADD_PROJECT_MEMBER_ACTION_CLASS, "example.com"))
@@ -223,20 +215,13 @@ async def test_unmatched_recipient_is_denied(monkeypatch) -> None:
     assert calls == []
 
 
-async def test_project_authorization_does_not_authorize_workspace_invitation(
-    monkeypatch,
-) -> None:
-    """Q2.6d, end to end through the proxy.
-
-    The org pre-authorized alice for PROJECT membership only. The same alice must
-    not thereby be invitable into the whole organization — the wider verb has its
-    own action class and its own (here empty) allow-list.
-    """
+async def test_grant_for_a_different_action_class_is_denied(monkeypatch) -> None:
+    """A pre-authorization for a different elevated action must not carry over."""
     calls = _patch_http(monkeypatch)
-    gate = await _gate(_row(ASANA_ADD_PROJECT_MEMBER_ACTION_CLASS, "alice@example.com"))
+    gate = await _gate(_row("drive.permissions.create", "alice@example.com"))
     with pytest.raises(ToolPermissionTierDenied, match="pre-authorized no recipient"):
-        await _invoke(gate, WORKSPACE_TOOL, workspace_gid="w1", grantee="alice@example.com")
-    assert calls == [], "a project-scoped authorization must not reach the org verb"
+        await _invoke(gate, MEMBER_TOOL, project_gid="p1", grantee="alice@example.com")
+    assert calls == [], "an unrelated action class must not authorize Asana membership"
 
 
 async def test_reader_max_role_authorizes_nothing_for_asana(monkeypatch) -> None:
@@ -266,7 +251,7 @@ async def test_commenter_max_role_also_authorizes_nothing(monkeypatch) -> None:
 
 
 # ---------------------------------------------------------------------------
-# The authorized paths
+# The authorized path
 # ---------------------------------------------------------------------------
 
 async def test_authorized_project_membership_reaches_asana(monkeypatch) -> None:
@@ -282,19 +267,6 @@ async def test_authorized_project_membership_reaches_asana(monkeypatch) -> None:
     assert str(calls[0].url).endswith("/projects/p1/addMembers")
     assert result.output.grantee == "alice@example.com"
     assert result.output.role == "writer"
-
-
-async def test_authorized_workspace_invitation_reaches_asana(monkeypatch) -> None:
-    calls = _patch_http(monkeypatch)
-    gate = await _gate(
-        _row(ASANA_ADD_WORKSPACE_USER_ACTION_CLASS, "alice@example.com", role="writer")
-    )
-    result = await _invoke(
-        gate, WORKSPACE_TOOL, workspace_gid="w1", grantee="alice@example.com"
-    )
-    assert len(calls) == 1
-    assert str(calls[0].url).endswith("/workspaces/w1/addUser")
-    assert result.output.grantee == "alice@example.com"
 
 
 async def test_routine_task_creation_needs_no_permission_row(monkeypatch) -> None:

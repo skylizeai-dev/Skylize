@@ -1,10 +1,15 @@
 """The Asana connector (integration_inputs.md 2.6).
 
-Covers the four verbs, their profile declarations (the Q2.6b severity split), the
-deny-by-default backstop in both membership handlers, the fixed-`writer` role
+Covers the three verbs, their profile declarations (the Q2.6b severity split), the
+deny-by-default backstop in the membership handler, the fixed-`writer` role
 mapping (Q2.6e), the one-grantee-per-call invariant, and error normalization
 against Asana's `errors` envelope. Asana's API is faked with `httpx.MockTransport`
 — no network, no live Asana account. Same harness as `test_drive_tools.py`.
+
+Workspace-level `addUser` was removed (2.6 Q2.6a, owner decision): no published
+Asana granular scope covers it, and enabling it would require Full permissions —
+every endpoint, for every connected customer. Only `addMembers` (project-level,
+`projects:write`) ships.
 """
 
 from __future__ import annotations
@@ -33,13 +38,10 @@ from skylize.tools.base import (
 )
 from skylize.tools.builtin.asana_tools import (
     ASANA_ADD_PROJECT_MEMBER_ACTION_CLASS,
-    ASANA_ADD_WORKSPACE_USER_ACTION_CLASS,
     AsanaAddProjectMemberIn,
-    AsanaAddWorkspaceUserIn,
     AsanaCreateProjectIn,
     AsanaCreateTaskIn,
     build_asana_add_project_member_tool,
-    build_asana_add_workspace_user_tool,
     build_asana_create_project_tool,
     build_asana_create_task_tool,
 )
@@ -143,20 +145,6 @@ async def test_add_project_member_declares_both_profiles() -> None:
     assert tool.permission.role_field == "role"
 
 
-async def test_add_workspace_user_declares_both_profiles() -> None:
-    tool = build_asana_add_workspace_user_tool(await _oauth_service())
-    assert tool.oauth is not None
-    assert tool.permission is not None
-    assert tool.permission.action_class == ASANA_ADD_WORKSPACE_USER_ACTION_CLASS
-
-
-async def test_membership_verbs_have_distinct_action_classes() -> None:
-    """Q2.6d: project membership must never pre-authorize workspace invitation."""
-    project = build_asana_add_project_member_tool(await _oauth_service())
-    workspace = build_asana_add_workspace_user_tool(await _oauth_service())
-    assert project.permission.action_class != workspace.permission.action_class
-
-
 # ---------------------------------------------------------------------------
 # Q2.6e — the fixed 'writer' role mapping
 # ---------------------------------------------------------------------------
@@ -164,12 +152,9 @@ async def test_membership_verbs_have_distinct_action_classes() -> None:
 class TestFixedWriterRole:
     """Asana has no role axis; the schema pins 'writer' so an agent cannot vary it."""
 
-    def test_role_defaults_to_writer_on_both_membership_schemas(self) -> None:
+    def test_role_defaults_to_writer(self) -> None:
         assert AsanaAddProjectMemberIn(
             project_gid="p1", grantee="a@example.com"
-        ).role == "writer"
-        assert AsanaAddWorkspaceUserIn(
-            workspace_gid="w1", grantee="a@example.com"
         ).role == "writer"
 
     @pytest.mark.parametrize("bad_role", ["reader", "commenter", "owner", "admin", ""])
@@ -178,10 +163,6 @@ class TestFixedWriterRole:
         with pytest.raises(Exception):
             AsanaAddProjectMemberIn(
                 project_gid="p1", grantee="a@example.com", role=bad_role
-            )
-        with pytest.raises(Exception):
-            AsanaAddWorkspaceUserIn(
-                workspace_gid="w1", grantee="a@example.com", role=bad_role
             )
 
     def test_writer_is_a_value_the_schema_check_constraint_permits(self) -> None:
@@ -206,7 +187,7 @@ class TestFixedWriterRole:
 # ---------------------------------------------------------------------------
 
 class TestDenyByDefault:
-    """Both membership handlers refuse without a PermissionGrant.
+    """The membership handler refuses without a PermissionGrant.
 
     This is the backstop for the opt-in profile: a tool registered WITHOUT a
     `ToolPermissionProfile` never runs the gate, arrives with
@@ -223,42 +204,16 @@ class TestDenyByDefault:
             )
         assert calls == [], "refused call must never reach Asana"
 
-    async def test_workspace_user_refuses_without_grant(self, monkeypatch) -> None:
-        calls = _patch_http(monkeypatch, lambda r: _ok({"gid": "1"}))
-        tool = build_asana_add_workspace_user_tool(await _oauth_service())
-        with pytest.raises(ToolPermissionUnavailable, match="without a PermissionGrant"):
-            await tool.handler(
-                AsanaAddWorkspaceUserIn(workspace_gid="w1", grantee="a@example.com"),
-                _ctx(grant=None),
-            )
-        assert calls == []
-
-    async def test_project_grant_cannot_authorize_workspace_invitation(
+    async def test_grant_for_a_different_action_class_is_refused(
         self, monkeypatch
     ) -> None:
-        """The cross-verb replay guard, and the reason Q2.6d split the classes.
-
-        Without it, an org that pre-authorized someone for one project would have
-        authorized inviting them into the entire organization.
-        """
-        calls = _patch_http(monkeypatch, lambda r: _ok({"gid": "1"}))
-        tool = build_asana_add_workspace_user_tool(await _oauth_service())
-        with pytest.raises(ToolPermissionUnavailable, match="not 'asana.workspace.add_user'"):
-            await tool.handler(
-                AsanaAddWorkspaceUserIn(workspace_gid="w1", grantee="a@example.com"),
-                _ctx(_grant(action_class=ASANA_ADD_PROJECT_MEMBER_ACTION_CLASS)),
-            )
-        assert calls == []
-
-    async def test_workspace_grant_cannot_authorize_project_membership(
-        self, monkeypatch
-    ) -> None:
+        """A grant authorized for a DIFFERENT elevated action must never be reused."""
         calls = _patch_http(monkeypatch, lambda r: _ok({"gid": "1"}))
         tool = build_asana_add_project_member_tool(await _oauth_service())
         with pytest.raises(ToolPermissionUnavailable, match="not 'asana.project.add_members'"):
             await tool.handler(
                 AsanaAddProjectMemberIn(project_gid="p1", grantee="a@example.com"),
-                _ctx(_grant(action_class=ASANA_ADD_WORKSPACE_USER_ACTION_CLASS)),
+                _ctx(_grant(action_class="drive.permissions.create")),
             )
         assert calls == []
 
@@ -406,25 +361,6 @@ class TestMembershipHappyPath:
         assert str(seen[0].url).endswith("/projects/p1/addMembers")
         assert out.role == "writer"
 
-    async def test_add_workspace_user_targets_the_right_path(self, monkeypatch) -> None:
-        import json
-
-        bodies: list[dict] = []
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            bodies.append(json.loads(request.content))
-            return _ok({"gid": "u9", "name": "Alice"})
-
-        seen = _patch_http(monkeypatch, handler)
-        tool = build_asana_add_workspace_user_tool(await _oauth_service())
-        out = await tool.handler(
-            AsanaAddWorkspaceUserIn(workspace_gid="w1", grantee="alice@example.com"),
-            _ctx(_grant(action_class=ASANA_ADD_WORKSPACE_USER_ACTION_CLASS)),
-        )
-        assert str(seen[0].url).endswith("/workspaces/w1/addUser")
-        assert bodies[0]["data"] == {"user": "alice@example.com"}
-        assert out.user_gid == "u9"
-
 
 # ---------------------------------------------------------------------------
 # Error handling — Asana's `errors` envelope, not Drive's and not RFC 6749's
@@ -448,23 +384,6 @@ class TestErrorNormalization:
         tool = build_asana_create_task_tool(await _oauth_service())
         with pytest.raises(ToolExecutionError, match="403"):
             await tool.handler(AsanaCreateTaskIn(name="t", workspace_gid="w1"), _ctx())
-
-    async def test_403_on_workspace_add_user_is_a_clean_tool_error(
-        self, monkeypatch
-    ) -> None:
-        """2.6 Q2.6a: the expected outcome under the granular scope set.
-
-        There is no `workspaces:write` scope, so this verb is expected to be refused
-        by Asana until the Full-permissions question is decided. It must surface as
-        a clean tool error, never a 500.
-        """
-        _patch_http(monkeypatch, lambda r: _err(403, "Forbidden"))
-        tool = build_asana_add_workspace_user_tool(await _oauth_service())
-        with pytest.raises(ToolExecutionError, match="403"):
-            await tool.handler(
-                AsanaAddWorkspaceUserIn(workspace_gid="w1", grantee="alice@example.com"),
-                _ctx(_grant(action_class=ASANA_ADD_WORKSPACE_USER_ACTION_CLASS)),
-            )
 
     async def test_exhausted_retries_degrade_to_a_tool_error(self, monkeypatch) -> None:
         """A persistent 429 must not escape as a raw httpx.HTTPStatusError.
