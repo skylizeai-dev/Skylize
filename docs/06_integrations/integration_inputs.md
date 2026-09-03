@@ -556,17 +556,23 @@ own "not Drive-specific" disclaimers) returns nothing.
 
 ## 2.6 - Asana
 
-> **Section status: `[DRAFT]` - NOT APPROVED. Owner sign-off pending.**
-> Drafted 2026-09-02 against commit `a8e7328`. Predecessor:
-> `docs/audits/audit_notion_asana_readiness.md`. Depends additionally on 4.0
-> (Section 1.1 must be resolved).
+> **Section status: `[APPROVED]` - 2026-09-03 (owner). Scope Q2.6a (granular,
+> `addUser` excluded), write actions Q2.6b (task/project create, `addMembers`),
+> governance narrative Q2.6c, Decision Engine hook Q2.6d, fixed-`writer` role
+> mapping Q2.6e, and revocation override Q2.6f (kept as defence-in-depth) all
+> decided below. Q2.6g's out-of-scope list, `addUser` included, stands as
+> recorded.**
+> Drafted 2026-09-02 against commit `a8e7328`; `addUser` removed at `273ff61`.
+> Predecessor: `docs/audits/audit_notion_asana_readiness.md`. Depends
+> additionally on 4.0 (Section 1.1 must be resolved).
 >
 > **Process note, stated plainly:** this file's own banner says "Connector
 > implementation is BLOCKED until the relevant section reads `[APPROVED]`", and
 > 2.5 followed draft -> approve -> implement across three commits (`ac679be`,
 > `a9e6547`, `2448819`). The Asana connector was implemented in the SAME commit
-> as this draft, on explicit owner instruction. The deviation is recorded here
-> rather than left for a future session to infer. Nothing below is approved.
+> as its draft (`a8e7328`), on explicit owner instruction, before this section
+> reached `[APPROVED]`. The deviation is recorded here rather than left for a
+> future session to infer.
 
 `[CODE-VERIFIED]` Asana is **org-level**: the action happens in the customer's own
 Asana workspace, against their own projects and their own people. Same test that
@@ -640,7 +646,7 @@ therefore an endpoint, credentials, and scopes - nothing more, mirroring
     side effect worth recording: "a user being added as a member may also be added as
     a *follower*", i.e. the grant is slightly wider than the verb's name suggests.
 
-- **Q2.6c `[OWNER-DECISION-REQUIRED]` Governance narrative - RESEARCH POSITION.**
+- **Q2.6c `[DECIDED - owner, 2026-09-03]` Governance narrative.**
   `[RESEARCH-SUGGESTED]` Asana's role is **agency work-intake and delivery
   tracking**: an agent turns an engagement into tracked work in the client's own
   Asana - creating the project and the tasks that constitute a deliverable - and,
@@ -739,9 +745,11 @@ therefore an endpoint, credentials, and scopes - nothing more, mirroring
   (`OAuthProviderConfig.is_revocation_error`), it cannot affect Drive's, Slack's, or
   Stripe's detection.
 
-  **Open for the owner:** now that the premise is corrected, the override may be
-  judged unnecessary complexity and dropped in favour of the default. Recorded as a
-  live question rather than settled by me.
+  **Owner decision, 2026-09-03: the override STAYS**, even though the corrected
+  premise means the shared default would also have worked. It is accepted as
+  harmless defence-in-depth rather than dropped in favour of the default -
+  Asana's token-endpoint error contract is not documented, so the override
+  covers a real (if presently unobserved) gap. Not revisited by this decision.
 
 - **Q2.6g `[DECIDED - owner, 2026-09-02]` Explicitly out of scope for this section.**
   Recorded so a future session does not assume these are covered by omission:
@@ -861,9 +869,9 @@ reads `[APPROVED]` **and** the preconditions in 4.0 are met.
 - 2.5 Google Drive (scope Q2.5a verified, write actions Q2.5b, governance
   narrative Q2.5c, and Decision Engine hook Q2.5d decided; Q2.5e out-of-scope list
   stands as recorded): Approved  2026-08-31  (owner)
-- 2.6 Asana (DRAFT - scope Q2.6a decided (granular, `addUser` excluded); write
-  actions Q2.6b decided (task/project create, `addMembers`); narrative Q2.6c,
-  gate reuse Q2.6d, fixed-`writer` mapping Q2.6e, and revocation override Q2.6f
-  decided; Q2.6g out-of-scope list decided, `addUser` added to it): __________
-  ___________________________________________________________  (owner, date)
+- 2.6 Asana (scope Q2.6a decided - granular, `addUser` excluded; write actions
+  Q2.6b decided - task/project create, `addMembers`; narrative Q2.6c, gate
+  reuse Q2.6d, fixed-`writer` mapping Q2.6e, and revocation override Q2.6f
+  (kept) decided; Q2.6g out-of-scope list decided, `addUser` included):
+  Approved  2026-09-03  (owner)
 - 3.0 Credential schema: _______________________________  (owner, date)
