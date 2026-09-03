@@ -35,7 +35,10 @@ class OAuthCredentialRow:
     key_id: str                         # which encryption key produced the ciphertext
     encrypted_access_token: str
     encrypted_refresh_token: str | None  # None when the provider issues no refresh token
-    expires_at: datetime
+    #: NULL = this grant does not expire by time (migration 0023). NOT "unknown"
+    #: and NOT "expired": such a grant is never stale by clock, and its liveness
+    #: is carried entirely by `connection_state`.
+    expires_at: datetime | None
     scopes: tuple[str, ...]
     connection_state: ConnectionState
     state_reason: str | None
@@ -63,7 +66,7 @@ class OAuthCredentialRepository(Protocol):
         org_id: str,
         encrypted_access_token: str,
         encrypted_refresh_token: str | None,
-        expires_at: datetime,
+        expires_at: datetime | None,
         key_id: str,
         refreshed_at: datetime,
     ) -> bool: ...
@@ -182,7 +185,7 @@ class PgOAuthCredentialRepository:
         org_id: str,
         encrypted_access_token: str,
         encrypted_refresh_token: str | None,
-        expires_at: datetime,
+        expires_at: datetime | None,
         key_id: str,
         refreshed_at: datetime,
     ) -> bool:
@@ -288,7 +291,7 @@ class InMemoryOAuthCredentialRepository:
         org_id: str,
         encrypted_access_token: str,
         encrypted_refresh_token: str | None,
-        expires_at: datetime,
+        expires_at: datetime | None,
         key_id: str,
         refreshed_at: datetime,
     ) -> bool:

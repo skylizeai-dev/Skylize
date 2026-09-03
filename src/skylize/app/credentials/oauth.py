@@ -2,8 +2,18 @@
 
 Design: docs/06_integrations/oauth_provider_infrastructure_design.md §2, §4, §5.
 Nothing here is Drive-specific. A provider contributes an ``OAuthProviderConfig``
-— endpoint, client credentials, and two small parsing hooks — and this module
-owns storage, encryption, freshness, concurrency, revocation state, and audit.
+— endpoint, client credentials, two small parsing hooks, and how its credentials
+are presented (``auth_style``) — and this module owns storage, encryption,
+freshness, concurrency, revocation state, and audit.
+
+NON-EXPIRING GRANTS (migration 0023). ``expires_at`` may be NULL, meaning "this
+grant does not expire by time" — not "unknown" and not "expired". Such a grant is
+never stale by clock, so ``evaluate_grant`` never asks for a refresh and the
+refresh-failure revocation path below is UNREACHABLE for it. Its death can only
+be observed on a live API call, which is what
+``OAuthCredentialService.mark_revoked_by_provider`` exists to record. A connector
+using a non-expiring provider that never calls it will keep a dead grant marked
+'valid' forever.
 
 WHY ON-DEMAND AND NOT A BACKGROUND SWEEP (design §2.2). A refresh is a WRITE.
 Migration 0002 granted the cross-tenant carve-out for READS only and says so
@@ -28,10 +38,11 @@ untouched. See ``_classify_failure``.
 
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 from uuid import UUID, uuid4
 
 import httpx
@@ -141,7 +152,13 @@ def _default_is_revocation(status_code: int, payload: dict[str, Any]) -> bool:
 @dataclass(frozen=True, slots=True)
 class TokenResponse:
     access_token: str
-    expires_in_seconds: int
+    #: None ONLY for a provider whose token response carries no expiry at all
+    #: (Notion). It means "this grant does not expire by time", never "unknown" —
+    #: see migration 0023. `_default_parse_token_response` never produces None: it
+    #: still hard-requires a numeric `expires_in`, so a malformed response from an
+    #: RFC-6749 provider stays an error rather than silently becoming a permanent
+    #: credential. Only a provider-specific parser may return None, deliberately.
+    expires_in_seconds: int | None
     refresh_token: str | None
     scopes: tuple[str, ...] = ()
 
@@ -163,13 +180,84 @@ class OAuthProviderConfig:
     client_secret: str
     scopes: tuple[str, ...] = ()
     #: Provider response shapes differ (absolute vs relative expiry, scope
-    #: encoding). These two hooks are the ONLY places that variation may leak in.
+    #: encoding). These two hooks are the ONLY places that RESPONSE variation may
+    #: leak in; `auth_style` below is the only place REQUEST variation may.
     parse_token_response: Callable[[dict[str, Any]], TokenResponse] = (
         _default_parse_token_response
     )
     is_revocation_error: Callable[[int, dict[str, Any]], bool] = _default_is_revocation
+    #: How the PLATFORM client credentials are presented at the token endpoint.
+    #:
+    #:   'body'   — `client_id`/`client_secret` as form fields (RFC 6749 §2.3.1's
+    #:              alternative form). The DEFAULT, and what Drive and Asana use.
+    #:   'header' — HTTP Basic, `Authorization: Basic base64(id:secret)`, with the
+    #:              credentials OMITTED from the body. Required by Notion, whose
+    #:              docs state the request "is authorized using HTTP Basic
+    #:              Authentication" (live-verified 2026-09-02).
+    #:
+    #: A DECLARATIVE two-value field rather than a `build_headers` callable, on
+    #: purpose. This value decides how a platform secret is transmitted, so it has
+    #: to be inspectable in a registry entry and impossible to get subtly wrong; a
+    #: lambda is neither, and a custom header builder is a place a client secret
+    #: could be logged or mis-encoded. Same reasoning `ToolSpendProfile` and
+    #: `ToolPermissionProfile` give for refusing callable predicates
+    #: (`tools/base.py:78-81`, `:107-110`).
+    #:
+    #: Defaulting to 'body' is what makes this change additive: every existing
+    #: config that does not mention `auth_style` builds byte-identical requests to
+    #: the ones it built before this field existed.
+    auth_style: Literal["body", "header"] = "body"
     timeout_seconds: float = 10.0
     extra_token_params: dict[str, str] = field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# Pure request construction
+# ---------------------------------------------------------------------------
+
+def _build_token_request(
+    config: OAuthProviderConfig, refresh_token: str
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Build the refresh request's `(form_body, headers)` for either auth style.
+
+    Pure and separate from the round trip so the wire shape is unit-testable
+    without a network or a mock transport — the thing most worth pinning here is
+    that 'body' mode produces EXACTLY what it produced before `auth_style`
+    existed, because Drive and Asana depend on that byte-for-byte.
+
+    In 'header' mode the client credentials are deliberately OMITTED from the
+    body rather than sent in both places. Duplicating them is not harmless: RFC
+    6749 §2.3.1 says a server MUST NOT accept more than one authentication
+    method per request, and some providers reject the request outright.
+    """
+    data = {
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+    }
+    headers: dict[str, str] = {}
+
+    if config.auth_style == "header":
+        # Plain HTTP Basic (RFC 7617): base64 of a colon-joined "id:secret".
+        #
+        # NOT the strict RFC 6749 §2.3.1 reading, which additionally form-
+        # urlencodes each component before joining. That distinction is a no-op
+        # for every realistic client credential (OAuth ids and secrets are
+        # alphanumeric with '-'/'_'), plain Basic is what HTTP clients and
+        # provider docs actually describe, and url-encoding here would BREAK any
+        # provider that does not expect it. Recorded rather than silently chosen:
+        # a credential containing ':' or a non-ASCII character would need the
+        # §2.3.1 form, and no current or planned provider issues one.
+        raw = f"{config.client_id}:{config.client_secret}".encode("utf-8")
+        headers["Authorization"] = f"Basic {base64.b64encode(raw).decode('ascii')}"
+    else:
+        data["client_id"] = config.client_id
+        data["client_secret"] = config.client_secret
+
+    # Applied last and to the BODY only, in both styles — extra_token_params has
+    # always been a body-parameter escape hatch and stays one. It must never be
+    # able to overwrite the Authorization header.
+    data.update(config.extra_token_params)
+    return data, headers
 
 
 # ---------------------------------------------------------------------------
@@ -184,12 +272,23 @@ def evaluate_grant(
 ) -> GrantStatus:
     """Classify a stored grant. Pure: no I/O, no mutation, fully unit-testable.
 
-    Ordering matters. A terminal stored state wins over the timestamp: a revoked
-    grant whose ``expires_at`` is still in the future is DEAD, not VALID — the
-    provider's verdict outranks our cached clock.
+    Ordering matters, and it matters MORE now that `expires_at` can be NULL. A
+    terminal stored state wins over the timestamp: a revoked grant whose
+    ``expires_at`` is still in the future is DEAD, not VALID — the provider's
+    verdict outranks our cached clock. For a NON-EXPIRING grant that ordering is
+    the ONLY thing that can ever make it dead, because no clock comparison will,
+    so the terminal check must stay first and must stay ahead of the NULL branch.
+
+    ``expires_at IS NULL`` means "does not expire by time" (migration 0023), NOT
+    "unknown" and NOT "expired". Such a grant is never stale by clock, so it is
+    VALID until the provider says otherwise via ``connection_state`` — which for
+    a non-expiring grant only a live API failure can trigger; see
+    ``OAuthCredentialService.mark_revoked_by_provider``.
     """
     if row.connection_state in ("revoked", "expired"):
         return GrantStatus.DEAD
+    if row.expires_at is None:
+        return GrantStatus.VALID
     if row.expires_at > now + skew:
         return GrantStatus.VALID
     # Past the skew window. Repairable only if we hold a refresh token.
@@ -297,6 +396,73 @@ class OAuthCredentialService:
         )
         return self._enc.decrypt(row.encrypted_access_token)
 
+    async def mark_revoked_by_provider(
+        self,
+        *,
+        org_id: str,
+        provider: str,
+        label: str = "",
+        reason: str,
+        correlation_id: UUID | None = None,
+    ) -> bool:
+        """Record that a LIVE API CALL proved this grant dead. Returns True if a
+        row was transitioned, False if there was nothing to mark.
+
+        WHY THIS EXISTS — a real gap, not a convenience. Revocation is normally
+        discovered on the refresh path: `_post_refresh` -> `_classify_failure` ->
+        `is_revocation_error` -> `GrantRevoked`. That path is only ever reached
+        when a refresh is ATTEMPTED, and a refresh is only attempted when
+        `evaluate_grant` returns NEEDS_REFRESH — which requires a clock
+        comparison against `expires_at`.
+
+        A NON-EXPIRING grant (`expires_at IS NULL`, migration 0023) therefore
+        never refreshes, so that entire detection path is unreachable for it.
+        Without this method a customer who revokes such a connection would keep a
+        row marked 'valid' forever: every call would fail at the provider, the
+        ToolProxy credential gate would keep passing it, and nothing would ever
+        tell them to reconnect. That is precisely the silent degradation the
+        module's revocation handling exists to prevent, arriving through a door
+        the refresh path does not cover.
+
+        WHO CALLS IT. A connector, from its own error handling, when it observes
+        an UNAMBIGUOUS revocation signal on a real API response — not merely any
+        401. The same asymmetry `_classify_failure` enforces applies here and is
+        the caller's responsibility: a 401 that could equally mean a wrong
+        platform client secret, an expired-but-refreshable token, or a transient
+        auth blip must NOT be reported through this method, because marking a
+        grant revoked is destructive to the customer (it demands a reconnect).
+        When in doubt, let the call fail as a `ToolExecutionError` and leave the
+        stored state alone.
+
+        WHAT IT DELIBERATELY DOES NOT DO. It does not touch `ToolProxy`. The
+        credential-state gate (`tools/proxy.py` `_ensure_oauth_credential`) is
+        unchanged by this pass, so the deny-by-default chokepoint proven in
+        `2448819` keeps exactly the shape its tests pin. The effect here is
+        one-directional and eventual: this call writes terminal state, and the
+        NEXT `ensure_fresh` — i.e. the next gated tool call — reads it and denies
+        with `ToolCredentialReconnectRequired`. The call that discovered the
+        revocation still fails as whatever error the connector raised.
+
+        Idempotent: a grant already 'revoked' or 'expired' is left untouched and
+        False is returned, so a connector retrying a dead call cannot spam the
+        audit log with duplicate state transitions.
+        """
+        row = await self._repo.get(org_id, provider, label)
+        if row is None:
+            return False
+        if row.connection_state != "valid":
+            return False
+
+        await self._repo.set_connection_state(
+            cred_id=row.cred_id, org_id=row.org_id, state="revoked", reason=reason,
+        )
+        await self._audit_state(row, "revoked", reason, correlation_id, conn_bound=False)
+        log.warning(
+            "oauth.grant_revoked_by_api_call",
+            org_id=org_id, provider=provider, label=label,
+        )
+        return True
+
     # -- refresh ------------------------------------------------------------
 
     async def _refresh(
@@ -360,7 +526,14 @@ class OAuthCredentialService:
             if revoked is None:
                 assert token is not None  # revoked is None iff _post_refresh succeeded
                 now = self._now()
-                new_expiry = now + timedelta(seconds=token.expires_in_seconds)
+                # None = the provider issues no expiry, so the refreshed grant is
+                # non-expiring too. Persisting NULL rather than inventing a
+                # timestamp is the whole point of migration 0023.
+                new_expiry = (
+                    now + timedelta(seconds=token.expires_in_seconds)
+                    if token.expires_in_seconds is not None
+                    else None
+                )
                 # A provider that does not rotate refresh tokens omits the field;
                 # keep the existing one rather than nulling out our only way back.
                 new_refresh_ct = (
@@ -421,13 +594,7 @@ class OAuthCredentialService:
         (tools/builtin/hubspot_tools.py:76-83), so no credential can leak across
         orgs through a shared client.
         """
-        data = {
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-            "client_id": config.client_id,
-            "client_secret": config.client_secret,
-            **config.extra_token_params,
-        }
+        data, headers = _build_token_request(config, refresh_token)
         client = (
             self._http_client_factory()
             if self._http_client_factory is not None
@@ -435,7 +602,9 @@ class OAuthCredentialService:
         )
         try:
             try:
-                response = await client.post(config.token_url, data=data)
+                response = await client.post(
+                    config.token_url, data=data, headers=headers
+                )
             except httpx.HTTPError as exc:
                 # Network-level failure. Transient by assumption — NEVER a
                 # revocation. Assuming otherwise would let one flaky DNS lookup
