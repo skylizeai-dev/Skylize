@@ -798,6 +798,246 @@ therefore an endpoint, credentials, and scopes - nothing more, mirroring
 
 ---
 
+## 2.7 - Notion
+
+> **Section status: `[DRAFT]` - NOT APPROVED. Owner sign-off pending.**
+> Drafted 2026-09-03 against commit `8f147d4`. Predecessor:
+> `docs/audits/audit_notion_asana_readiness.md`. Depends additionally on 4.0
+> (Section 1.1 must be resolved).
+>
+> **Process note:** as with 2.6, the connector was implemented in the SAME
+> commit as this draft on explicit owner instruction, ahead of `[APPROVED]`.
+> Recorded rather than left for a future session to infer.
+
+`[CODE-VERIFIED]` Notion is **org-level**: a page created for a customer must
+exist in **their own** workspace, where their team reads it. Same test that made
+Drive (2.5) and Asana (2.6) org-level and Slack platform-level (2.3). Notion's
+own model makes platform-level unimplementable rather than merely wrong: a grant
+is scoped to one `workspace_id` returned in the token response, and a connection
+can only reach pages a human in that workspace has already shared with it.
+
+Notion is the provider that **required** both OAuth-primitive extensions shipped
+in `8f147d4`, and it is the only provider that uses all three config hooks. The
+audit's two incompatibility findings were re-verified live on 2026-09-03 and both
+**still hold**:
+
+- **HTTP Basic client auth.** `[LIVE-VERIFIED]`
+  `https://developers.notion.com/reference/create-a-token`: the endpoint declares
+  `"security": [{"basicAuth": []}]` with `"basicAuth": {"type": "http", "scheme":
+  "basic"}`, and the refresh request body carries only `grant_type` and
+  `refresh_token`. Handled by `auth_style="header"`.
+- **No `expires_in`.** `[LIVE-VERIFIED]` same source; the full 200 response is
+  `access_token`, `token_type`, `refresh_token`, `bot_id`, `workspace_icon`,
+  `workspace_name`, `workspace_id`, `owner`, `duplicated_template_id`,
+  `request_id`. Handled by a Notion-specific parser returning
+  `expires_in_seconds=None`, persisted as `expires_at IS NULL` (migration 0023).
+
+**A THIRD finding this pass, which the audit did not have.** `[LIVE-VERIFIED]`
+Notion's token endpoint does **not** use RFC 6749's error shape either. It
+returns its own envelope, `{"object": "error", "code": "invalid_grant",
+"message": ..., "status": 400}`, so the shared `_default_is_revocation` - which
+reads a top-level `"error"` key - would find `None` and **never** detect a dead
+grant. Notion therefore needs an `is_revocation_error` override that reads
+`code`. **This is materially different from Asana's situation** (2.6 Q2.6f),
+where the REST API used a custom envelope but the token endpoint turned out to be
+RFC 6749-conformant, making Asana's override defence-in-depth. Notion's override
+is load-bearing.
+
+- **Q2.7a `[OWNER-DECISION-REQUIRED]` Least privilege: capabilities, not scopes.**
+  `[LIVE-VERIFIED]` `https://developers.notion.com/reference/capabilities`:
+  Notion has **no OAuth `scope` parameter at all**. An integration's capabilities
+  are fixed when it is REGISTERED in Notion's developer portal: *Read content*,
+  *Update content*, *Insert content*, *Read comments*, *Insert comments*, and a
+  three-way user-information setting (*No user information* / *without email
+  addresses* / *with email addresses*).
+
+  Two consequences, and the first is a genuine governance regression:
+  1. **The attenuation invariant is not checkable for Notion.** The token
+     response carries no `scope` field, so `oauth_credentials.scopes` (`0021:96`)
+     stays empty for every Notion grant. Drive records `drive.file` and Asana
+     records `tasks:write projects:write`; Notion records nothing, because there
+     is nothing to record. **No code change can recover this** - it is a property
+     of Notion's API, and it is recorded here rather than papered over.
+  2. The least-privilege decision is therefore *which capabilities to register
+     with*, made once in a portal and not per-authorization.
+
+  `[RESEARCH-SUGGESTED]` the minimum for Q2.7c's narrative is **Insert content**
+  and **Update content**; *Read content* is needed only if a future read tool is
+  built (none is, see Q2.7f). **User information should be set to *No user
+  information***: nothing in this connector needs a Notion user's identity, and
+  *with email addresses* would pull customer PII into a surface that has no use
+  for it. **Owner must confirm the registration choice**, since it cannot be
+  changed per-customer afterwards.
+
+- **Q2.7b `[DECIDED - owner, 2026-09-03]` Write actions and severity: ALL ROUTINE.**
+  Three verbs ship, and **none is permission-gated**:
+  - **Page creation** (`POST /v1/pages`). Routine. Lands inside a workspace
+    location a human already shared with the integration.
+  - **Database creation** (`POST /v1/databases`). Routine. Structure, not access.
+  - **Content append** (`PATCH /v1/blocks/{id}/children`). Routine. Changes what
+    a page says, never who can read it.
+
+  **THE FINDING: Notion has no elevated action to gate, and this is confirmed
+  rather than assumed.** `[LIVE-VERIFIED]` 2026-09-03 against the capabilities
+  reference: there is **no sharing, permission-changing, or external-invitation
+  capability in Notion's API**. The capability list above is exhaustive. A
+  connection's reach is bounded by what a human shared with it in Notion's UI,
+  and the API cannot widen that boundary.
+
+  So Notion has **no analogue of Drive's `permissions.create` or Asana's
+  `addMembers`** - no action hands data to a party the agent picks at run time.
+  **No `ToolPermissionProfile` is declared, and a future author must not add one
+  to make Notion look symmetrical with the other two connectors**; there would be
+  nothing for it to authorize. A contract test asserts the Notion tool set
+  carries zero permission profiles, so the absence is pinned rather than
+  incidental.
+
+  The nearest genuine concerns are different in kind and lower in severity, and
+  are recorded so they are not mistaken for gaps: *Insert comments* (not
+  requested, Q2.7f) could push agent-authored text in front of whoever already
+  watches a page - a notification-surface concern, not a data-custody transfer -
+  and *user information with email addresses* is a **read**-side privacy choice
+  (Q2.7a), not a write action.
+
+- **Q2.7c `[OWNER-DECISION-REQUIRED]` Governance narrative - RESEARCH POSITION.**
+  `[RESEARCH-SUGGESTED]` Notion's role is **deliverable drafting in the client's
+  own workspace**: an agent produces a written work product - a brief, a research
+  summary, a structured tracker - as a page or database inside the customer's
+  Notion, and appends to it as the work develops. This is the same
+  deliverable-teslimi framing 2.5 established for Drive, in the medium the
+  customer's team actually reads. It is what makes *Insert*/*Update content*
+  sufficient (Q2.7a) and what makes every verb routine (Q2.7b): the connector
+  writes content into a boundary the customer already controls, and Notion gives
+  it no way to widen that boundary.
+
+- **Q2.7d `[DECIDED - owner, 2026-09-03]` `Notion-Version` is pinned, not tracked.**
+  Notion requires a `Notion-Version` header on every request and rejects requests
+  without one. `[LIVE-VERIFIED]` 2026-09-02 the latest documented version is
+  **`2026-03-11`**, and it is pinned as a module constant. Notion's versioning has
+  no analogue in Drive or Asana. A version bump can change response shapes, so
+  moving the constant is a reviewed change with a re-read of the affected
+  endpoints, never a silent bump to "latest". A unit test pins the value so a
+  casual edit fails loudly.
+
+- **Q2.7e `[DECIDED - owner, 2026-09-03]` Revocation detection: THE critical
+  wiring, and the reason this section matters beyond its three verbs.**
+
+  A Notion grant never expires (see this section's preamble), and that has a
+  consequence that is easy to miss and severe if missed. `[CODE-VERIFIED]`
+  `evaluate_grant` never returns `NEEDS_REFRESH` for a NULL-expiry grant, so no
+  refresh is ever attempted, so the **entire refresh-failure revocation path**
+  (`_post_refresh` -> `_classify_failure` -> `is_revocation_error` ->
+  `GrantRevoked`) **is unreachable**. Nothing about the passage of time can ever
+  mark a Notion grant dead. Left unhandled, a customer who disconnects Skylize in
+  Notion would keep a row marked `'valid'` **forever**: every call would 401, the
+  ToolProxy credential gate would keep passing the grant as healthy, and nobody
+  would ever be told to reconnect.
+
+  `OAuthCredentialService.mark_revoked_by_provider` shipped in `8f147d4` **with no
+  production caller**. **This connector is that caller.** Every Notion call funnels
+  through one response check, so the wiring is structural: a verb added later
+  inherits it rather than having to remember it.
+
+  **Only 401 `unauthorized` counts, and the narrowness is the security decision.**
+  `[LIVE-VERIFIED]` `https://developers.notion.com/reference/status-codes`:
+
+  | Response | Notion's documented meaning | Revocation? |
+  |---|---|---|
+  | 401 `unauthorized` | "The bearer token is not valid." | **YES** - unambiguous |
+  | 403 `restricted_resource` | "The token lacks permission, or the request exceeds a workspace block limit." | **NO** - our own capability misconfiguration (Q2.7a) or a customer quota |
+  | 404 `object_not_found` | "the resource has not been shared with owner of the bearer token" | **NO** - a sharing gap in Notion's UI |
+
+  **This narrows the owner's brief, which said "401/403".** 403 is documented as a
+  capability-or-quota condition, not a token-validity one. Marking a customer
+  revoked because *we* registered the integration without *Insert content* would
+  demand a reconnect that fixes nothing and would hide the real fault behind a
+  per-tenant symptom - exactly the asymmetry `app/credentials/oauth.py` exists to
+  enforce. **403 is therefore deliberately NOT treated as revocation**, and a
+  parametrized test asserts it leaves `connection_state` untouched.
+
+  The effect is one-directional and eventual, by design: the call that discovers
+  the 401 still fails, and it is the **next** gated tool call that reads the
+  terminal state through the unchanged ToolProxy gate and denies with
+  `ToolCredentialReconnectRequired`. **Nothing in ToolProxy's dispatch flow is
+  touched**, so `2448819`'s deny-by-default chokepoint keeps exactly the shape its
+  tests pin. Tests assert the full loop (401 -> durable state -> next call
+  denied), including through real Postgres, rather than merely that a function was
+  called.
+
+- **Q2.7f `[DECIDED - owner, 2026-09-03]` Explicitly out of scope.**
+  Recorded so a future session does not assume these are covered by omission:
+  - **Comments** (*Insert comments* / *Read comments*). Not requested and no tool
+    built. *Insert comments* would let an agent push text into a discussion and
+    notify its watchers - a different surface from page content, deserving its own
+    decision.
+  - **Reading a customer's Notion content.** No read tool is built and *Read
+    content* is not required by Q2.7c. The connector is write-only by construction.
+  - **Search across a workspace.** A materially broader read surface than the
+    narrative needs; would need its own owner decision.
+  - **Deletion / archiving** of pages, blocks or databases. 2.5 and 2.6 both set
+    the precedent of OMITTING the destructive verb rather than gating it; this
+    section follows it.
+  - **Rich block types** - headings, lists, code, callouts, nested children,
+    file/image blocks. The connector writes **plain paragraphs only**. A
+    half-built markdown-to-blocks translator is the kind of thing that silently
+    mangles a customer's deliverable, so richer structure is deferred rather than
+    approximated.
+  - **Database property schemas beyond text.** Database creation makes one title
+    column plus optional rich-text columns. Selects, relations, rollups and
+    formulas are a per-workspace schema question, not a connector default.
+  - **User-identity lookups.** Tied to Q2.7a's *No user information*
+    recommendation.
+  - **Webhooks / inbound events.** An INBOUND surface (Notion calling Skylize),
+    unanalyzed here; Stripe's signature-verification precedent (2.1) is the
+    nearest pattern if taken up later.
+
+- **Q2.7g `[OWNER-DECISION-REQUIRED]` Rate limits, and a real open question about
+  a SHARED budget.**
+  `[LIVE-VERIFIED]` 2026-09-03, `https://developers.notion.com/reference/request-limits`:
+  - **Per connection:** "an average of three requests per second, with some bursts
+    beyond the average allowed."
+  - **Per workspace:** a **separate** limit, "shared across all of the workspace's
+    connections and scaled to the workspace's plan" - the change that landed
+    2026-06-16.
+  - **On exceed:** HTTP **429** code `rate_limited`, with
+    `additional_data.rate_limit_reason` naming which limit broke, and a
+    `Retry-After` header in seconds. HTTP **529** `service_overload` gets the same
+    treatment.
+  - **Notion's own retry guidance:** retry 429 and 529; retry 500/502/503/504
+    **"only for idempotent requests (GET, DELETE)"**; exponential backoff with
+    jitter capped at 30 seconds; respect `Retry-After`; cap attempts (6
+    recommended).
+  - **Size limits:** 1000 block elements and 500KB per request; rich text and URLs
+    2000 characters; arrays 100 elements.
+
+  **Two design consequences, both implemented:**
+  1. **5xx is NOT retried on these writes**, diverging from Drive and Asana, on
+     Notion's own written instruction. Every verb here is a non-idempotent
+     POST/PATCH, so a timeout-then-success retry would create a **second page**.
+     Drive and Asana do retry 5xx - a real duplication hazard (the unresolved
+     idempotency gap 2.5's audit logged as D.5) that this connector declines to
+     inherit. Only 429/529 are retried, honouring `Retry-After`, jittered, capped.
+  2. **Size limits are enforced client-side** so an oversized append is refused
+     with a clear message rather than a 400 from Notion.
+
+  **THE OPEN QUESTION `[OWNER-DECISION-REQUIRED]`.** The per-workspace budget is
+  shared with **every other integration the customer runs on that workspace**, not
+  a Skylize-dedicated allowance. Two things follow that this pass does **not**
+  resolve:
+  - A Skylize connector can be throttled by a customer's unrelated tools, and
+    conversely **Skylize's own burst can throttle the customer's other
+    integrations** - a way for this platform to degrade software it does not own.
+    That is a product-behaviour question, not only an engineering one.
+  - Purely **reactive** backoff (implemented) does not prevent that; only
+    **proactive client-side pacing** would. A real limiter would need a shared
+    token bucket keyed by `workspace_id` across processes - i.e. Redis and a
+    cross-instance coordination design. **Deliberately NOT built here**, because
+    inventing a distributed rate limiter inside a connector pass would be scope
+    creep with real failure modes of its own. Flagged as the one substantive
+    engineering question 2.7 leaves open.
+
+---
+
 ## 3.0 - `org_credentials` schema gaps for OAuth (no migration this pass)
 
 > **Section status: `[OWNER-DECISION-REQUIRED]` - recorded, deliberately not implemented.**
@@ -874,4 +1114,8 @@ reads `[APPROVED]` **and** the preconditions in 4.0 are met.
   reuse Q2.6d, fixed-`writer` mapping Q2.6e, and revocation override Q2.6f
   (kept) decided; Q2.6g out-of-scope list decided, `addUser` included):
   Approved  2026-09-03  (owner)
+- 2.7 Notion (DRAFT - capabilities Q2.7a and rate-limit pacing Q2.7g open; write
+  actions Q2.7b (all routine, no permission gate - Notion has no sharing API),
+  narrative Q2.7c, version pinning Q2.7d, and revocation wiring Q2.7e decided;
+  Q2.7f out-of-scope list stands as recorded): _______________  (owner, date)
 - 3.0 Credential schema: _______________________________  (owner, date)

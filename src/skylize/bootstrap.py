@@ -33,6 +33,7 @@ from .app.auth.service import ApiKeyService
 from .app.auth.user_service import UserAuthService
 from .app.credentials.encryption import FernetEncryptor
 from .app.credentials.asana_provider import build_asana_provider_config
+from .app.credentials.notion_provider import build_notion_provider_config
 from .app.credentials.google_provider import build_google_drive_provider_config
 from .app.credentials.oauth import OAuthCredentialService
 from .app.permissions.gate import PermissionGate
@@ -241,6 +242,38 @@ def resolve_asana_config(settings: Settings) -> tuple[str, str] | None:
             f"SKYLIZE_{present} is set but SKYLIZE_{missing} is not. Both are "
             "required together to enable the Asana connector, or neither to leave "
             "it disabled."
+        )
+    return client_id, client_secret
+
+
+def resolve_notion_config(settings: Settings) -> tuple[str, str] | None:
+    """Return `(client_id, client_secret)` for the Notion connector, or None when
+    the integration is off.
+
+    Platform-level secrets, identical shape and identical reasoning to
+    `resolve_google_drive_config` and `resolve_asana_config`
+    (integration_inputs.md 2.7): Skylize registers ONE Notion integration and
+    customers authorize into it.
+
+    OPT-IN: both empty means the Notion provider is never registered, and any
+    Notion tool call then fails closed in the ToolProxy OAuth stage rather than
+    reaching Notion. Setting exactly one is REFUSED here for the same reason it is
+    refused for Drive, Asana and Slack: a client id with no secret cannot complete
+    a token exchange, and Notion authenticates the client with HTTP Basic, so a
+    missing secret produces a 401 that is indistinguishable at a glance from a
+    customer revocation.
+    """
+    client_id = settings.notion_oauth_client_id.strip()
+    client_secret = settings.notion_oauth_client_secret.strip()
+    if not client_id and not client_secret:
+        return None
+    if not client_id or not client_secret:
+        missing = "NOTION_OAUTH_CLIENT_ID" if not client_id else "NOTION_OAUTH_CLIENT_SECRET"
+        present = "NOTION_OAUTH_CLIENT_SECRET" if not client_id else "NOTION_OAUTH_CLIENT_ID"
+        raise ConfigurationError(
+            f"SKYLIZE_{present} is set but SKYLIZE_{missing} is not. Both are "
+            "required together to enable the Notion connector, or neither to "
+            "leave it disabled."
         )
     return client_id, client_secret
 
@@ -542,6 +575,16 @@ async def build_container(settings: Settings | None = None) -> Container:
         oauth_credentials.register_provider(
             build_asana_provider_config(
                 client_id=asana_client_id, client_secret=asana_client_secret
+            )
+        )
+
+    # Notion (integration_inputs.md 2.7). Same opt-in discipline again.
+    notion_config = resolve_notion_config(settings)
+    if notion_config is not None:
+        notion_client_id, notion_client_secret = notion_config
+        oauth_credentials.register_provider(
+            build_notion_provider_config(
+                client_id=notion_client_id, client_secret=notion_client_secret
             )
         )
 

@@ -149,6 +149,14 @@ class Settings(BaseSettings):
     asana_oauth_client_id: str = ""
     asana_oauth_client_secret: str = ""
 
+    # Notion connector (integration_inputs.md 2.7). Same PLATFORM-level shape and
+    # same reasoning as the Google and Asana pairs above. Both empty = the Notion
+    # provider is not registered and any Notion tool call fails closed in the
+    # ToolProxy OAuth stage. Setting only one is refused at boot
+    # (bootstrap.py `resolve_notion_config`).
+    notion_oauth_client_id: str = ""
+    notion_oauth_client_secret: str = ""
+
     # Rate limiting (per org, per window).
     rate_limit_per_minute: int = 120
     # Tighter dedicated budget for the sensitive GET /credentials/resolve path.

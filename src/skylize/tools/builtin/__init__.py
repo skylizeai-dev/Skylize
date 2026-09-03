@@ -20,6 +20,11 @@ from .asana_tools import (
 from .datetime_tool import CURRENT_DATETIME_TOOL
 from .drive_tools import build_drive_create_file_tool, build_drive_share_file_tool
 from .hubspot_tools import build_hubspot_create_contact_tool, build_hubspot_search_contacts_tool
+from .notion_tools import (
+    build_notion_append_blocks_tool,
+    build_notion_create_database_tool,
+    build_notion_create_page_tool,
+)
 from .memory_recall import MemoryRecallPort, NullMemoryRecallPort, build_memory_recall_tool
 from .web_search import NullWebSearchPort, WebSearchPort, build_web_search_tool
 
@@ -48,6 +53,10 @@ def build_builtin_tools(
         tools.append(build_asana_create_task_tool(oauth_credentials))
         tools.append(build_asana_create_project_tool(oauth_credentials))
         tools.append(build_asana_add_project_member_tool(oauth_credentials))
+        # Notion (integration_inputs.md 2.7). Same org-level refreshable grant.
+        tools.append(build_notion_create_page_tool(oauth_credentials))
+        tools.append(build_notion_create_database_tool(oauth_credentials))
+        tools.append(build_notion_append_blocks_tool(oauth_credentials))
     return tools
 
 

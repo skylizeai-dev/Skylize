@@ -51,6 +51,9 @@ EXPECTED_OAUTH_TOOL_IDS = {
     "integration.asana_create_task",
     "integration.asana_create_project",
     "integration.asana_add_project_member",
+    "integration.notion_create_page",
+    "integration.notion_create_database",
+    "integration.notion_append_blocks",
 }
 
 #: Tools performing an elevated action gated by the org allow-list.
@@ -59,6 +62,9 @@ EXPECTED_OAUTH_TOOL_IDS = {
 #: picks at run time, and nothing else. Asana's workspace-level `addUser` was
 #: deliberately not built (2.6 Q2.6a: no granular scope covers it; would require
 #: Full permissions, disproportionate to this platform's minimal-scope philosophy).
+#: Notion contributes NOTHING here on purpose: its API exposes no sharing or
+#: permission-granting endpoint at all (2.7 Q2.7b), so there is no elevated
+#: action to gate — an absence that is a finding, not an omission.
 EXPECTED_PERMISSION_TOOL_IDS = {
     "integration.drive_share_file",
     "integration.asana_add_project_member",
@@ -193,6 +199,9 @@ def test_permission_gated_tools_are_exactly_the_expected_set() -> None:
         "integration.drive_create_file",
         "integration.asana_create_task",
         "integration.asana_create_project",
+        "integration.notion_create_page",
+        "integration.notion_create_database",
+        "integration.notion_append_blocks",
     ],
 )
 def test_routine_creation_verbs_are_not_permission_gated(tool_id: str) -> None:
@@ -208,6 +217,25 @@ def test_routine_creation_verbs_are_not_permission_gated(tool_id: str) -> None:
         f"{tool_id} must not be permission-gated: nothing leaves the customer's "
         "custody, so there is no recipient to pre-authorize"
     )
+
+
+def test_notion_declares_no_permission_gated_tool_at_all() -> None:
+    """2.7 Q2.7b, asserted rather than left to the absence of a line of code.
+
+    Notion's API has no sharing, permission-changing, or invitation endpoint
+    (live-verified against developers.notion.com/reference/capabilities), so no
+    Notion tool may ever carry the third gate. If one appears here, either Notion
+    grew such an endpoint — in which case 2.7 needs revisiting — or somebody added
+    a gate to make Notion look symmetrical with Drive and Asana, which would be
+    gating an action that does not exist.
+    """
+    registry = _full_registry()
+    notion = [t for t in registry.all() if t.tool_id.startswith("integration.notion_")]
+    assert notion, "the Notion connector is not registered"
+    assert all(t.oauth is not None for t in notion), (
+        "every Notion tool still needs a live grant"
+    )
+    assert [t.tool_id for t in notion if t.permission is not None] == []
 
 
 def test_drive_create_file_is_not_permission_gated() -> None:
