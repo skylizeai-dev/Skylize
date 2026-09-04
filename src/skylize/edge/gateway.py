@@ -35,6 +35,7 @@ from .routes import (
     knowledge,
     spend,
     tenants,
+    wif_oidc,
     workflows,
 )
 
@@ -88,6 +89,10 @@ def create_app() -> FastAPI:
     app.include_router(hitl.router)
     app.include_router(workflows.router)
     app.include_router(kill_switch.router)
+    # PUBLIC and UNAUTHENTICATED, unlike every router above it. Google
+    # fetches these two documents with no credentials; see
+    # edge/routes/wif_oidc.py for why that is safe and what must stay true.
+    app.include_router(wif_oidc.router)
     app.include_router(knowledge.router)
     app.include_router(audit.router)
     app.include_router(spend.router)

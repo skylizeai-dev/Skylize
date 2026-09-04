@@ -251,3 +251,62 @@ def test_drive_create_file_is_not_permission_gated() -> None:
         "file creation must not be permission-gated: nothing leaves the "
         "customer's custody, so there is no recipient to pre-authorize"
     )
+
+
+# ---------------------------------------------------------------------------
+# GCP Workload Identity Federation (migration 0024, app/gcp/*)
+# ---------------------------------------------------------------------------
+
+def test_no_registered_tool_reaches_gcp_wif_this_pass() -> None:
+    """The WIF foundation ships with NO tool attached to it, and that is asserted
+    rather than assumed.
+
+    The foundation pass deliberately builds the issuer surface, the trust-state
+    table, the signing key, and the health probe, but NO Compute verb: nothing in
+    the registry can stop a machine, because no such tool exists yet. This test
+    is the tripwire that keeps that true until a later pass adds the verb
+    consciously — at which point this test must be updated in the same commit
+    that registers it, exactly as `EXPECTED_OAUTH_TOOL_IDS` forces for a new
+    OAuth connector.
+
+    It is deliberately registry-wide, not restricted to the stateless agents:
+    while the verb does not exist, NO agent may hold one, and the strongest
+    version of that statement is the one worth pinning.
+    """
+    registry = _full_registry()
+    gcp_tools = [
+        t.tool_id
+        for t in registry.all()
+        if "gcp" in t.tool_id.lower() or "compute" in t.tool_id.lower()
+    ]
+    assert gcp_tools == [], (
+        f"a GCP/Compute tool is registered ({gcp_tools}) but this pass ships no "
+        "trigger path for one. If a Compute verb is being added, update this test "
+        "and the stateless allow-lists above in the same commit."
+    )
+
+
+@pytest.mark.parametrize("contract", _stateless_contracts(), ids=lambda c: c.agent_id)
+def test_stateless_agents_cannot_reach_the_wif_signing_key_or_table(contract) -> None:
+    """The stateless invariant, extended to the two things this pass introduces.
+
+    A stateless agent acts only through tools resolved from the registry, so the
+    reachability question reduces to: does any tool it may invoke touch the WIF
+    signing key or the `gcp_wif_connections` table? While no GCP tool is
+    registered at all (asserted directly above), the answer is structurally no —
+    but pinning it per-contract means the day a Compute verb IS registered, every
+    stateless contract is re-checked against it automatically rather than relying
+    on someone remembering this constraint.
+    """
+    registry = _full_registry()
+    granted = {g.tool_id for g in contract.allowed_tools}
+    granted |= set(contract.invocable_tools or [])
+
+    for tool_id in granted:
+        if not registry.has(tool_id):
+            continue
+        assert "gcp" not in tool_id.lower(), (
+            f"{contract.agent_id} may invoke {tool_id!r}, which reaches GCP "
+            "Workload Identity Federation — this breaks the stateless-agent "
+            "invariant for the gcp_wif_connections table and the WIF signing key"
+        )

@@ -53,6 +53,8 @@ from .config import Settings, get_settings
 from .contracts.registry import MVP_REGISTRY
 from .dal.credentials import CredentialRepository
 from .dal.oauth_credentials import OAuthCredentialRepository
+from .dal.gcp_wif import GcpWifRepository
+from .app.gcp.keys import WifSigningKey, load_wif_signing_key
 from .dal.permission_grants import PermissionGrantRepository
 from .dal.ports import (
     ApiKeyRepository,
@@ -361,6 +363,13 @@ class Container:
     # the audited OrgSpendCeilingDAL.set_ceiling seam — no route writes it.
     cost_ledger: "CostLedgerDAL | None" = None
     spend_ceiling_dal: "OrgSpendCeilingDAL | None" = None
+    # GCP Workload Identity Federation issuer key, or None when the feature is
+    # off (no SKYLIZE_WIF_ISSUER_BASE_URL). DELIBERATELY NOT REACHABLE FROM
+    # `authority`: the governance signing key and this key serve different trust
+    # domains, so they are separate fields resolved by separate loaders with no
+    # import edge between them. Nothing that holds one can obtain the other.
+    wif_signing_key: "WifSigningKey | None" = None
+    wif_repo: "GcpWifRepository | None" = None
 
     async def aclose(self) -> None:
         # LIFO, like ExitStack: consumers/subscribers are registered after the
@@ -381,6 +390,14 @@ async def build_container(settings: Settings | None = None) -> Container:
     # Same reasoning: fail before any pool opens rather than on the first HITL
     # escalation after a bad deploy.
     slack_notifier_config = resolve_slack_notifier_config(settings)
+    # And again for the WIF issuer key. Resolved HERE, beside the other two
+    # platform keys, for the same reason they are: a deployment that has turned
+    # the issuer surface on but cannot sign must fail while it is still doing
+    # nothing. The alternative — discovering it on the first federation — means
+    # discovering it during whatever incident made someone reach for the
+    # connection. Returns None when the feature is simply off; raises when it is
+    # half-configured (see app/gcp/keys.py).
+    wif_signing_key = load_wif_signing_key(settings)
     registry = MVP_REGISTRY
     closers: list[Callable[[], Awaitable[None]]] = []
 
@@ -445,6 +462,8 @@ async def build_container(settings: Settings | None = None) -> Container:
         deliverable_repo = InMemoryDeliverableRepository()
         credential_repo = InMemoryCredentialRepository()
         oauth_credential_repo = InMemoryOAuthCredentialRepository()
+        from .dal.gcp_wif import InMemoryGcpWifRepository
+        wif_repo: GcpWifRepository = InMemoryGcpWifRepository()
         permission_grant_repo = InMemoryPermissionGrantRepository()
         broadcast = InMemoryGovernanceBroadcast()
         hitl_repo = InMemoryHitlQueueRepository()
@@ -488,6 +507,8 @@ async def build_container(settings: Settings | None = None) -> Container:
         deliverable_repo = PgDeliverableRepository(db)
         credential_repo = PgCredentialRepository(db)
         oauth_credential_repo = PgOAuthCredentialRepository(db)
+        from .dal.gcp_wif import PgGcpWifRepository
+        wif_repo = PgGcpWifRepository(db)
         permission_grant_repo = PgPermissionGrantRepository(db)
         capital_repo = PgCapitalRepository(db)
         processed_store = PgProcessedEventStore(db)
@@ -799,4 +820,5 @@ async def build_container(settings: Settings | None = None) -> Container:
         knowledge_ingestion=knowledge_ingestion, decision_engine=decision_engine,
         llm=llm, work_journal=work_journal, _closers=closers, db=db,
         cost_ledger=cost_ledger, spend_ceiling_dal=spend_ceiling_dal,
+        wif_signing_key=wif_signing_key, wif_repo=wif_repo,
     )

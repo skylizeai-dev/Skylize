@@ -157,6 +157,43 @@ class Settings(BaseSettings):
     notion_oauth_client_id: str = ""
     notion_oauth_client_secret: str = ""
 
+    # ---- GCP Workload Identity Federation (docs/06_integrations/
+    # gcp_wif_killswitch_design.md). Skylize acts as a public OIDC ISSUER for
+    # customers' Google Cloud workload identity pools.
+    #
+    # A SEPARATE KEY FROM `governance_signing_key_pem` ABOVE, and the separation
+    # is load-bearing in both directions:
+    #   1. Trust domain. The governance key signs an INTERNAL authority artifact
+    #      validated inside the platform. This key's PUBLIC half is published on
+    #      an internet-facing JWKS and invites Google's Security Token Service to
+    #      accept anything it signs. Sharing one key would let a governance token
+    #      forgery and a customer-infrastructure federation share a root of trust.
+    #   2. Algorithm. It could not be shared even if that were acceptable: the
+    #      governance key is P-384 (ES384) and Google accepts only RS256 or ES256
+    #      (verified live 2026-09-04). This key is P-256 (ES256).
+    # The two loaders are deliberately in different modules with no import edge
+    # between them (app/governance/keys.py vs app/gcp/keys.py) so neither key's
+    # access path can reach the other's material.
+    #
+    # REQUIRED whenever a WIF connection exists, exactly like the two keys above:
+    # backend != "memory" and empty means startup fails closed (app/gcp/keys.py
+    # `load_wif_signing_key`). Generate with scripts/gen_wif_signing_key.py and
+    # inject the PEM from the secrets manager.
+    wif_signing_key_pem: str = ""
+    #: The `kid` published in the JWKS and stamped into every ID token header.
+    #: Stable per key; a rotation pass (NOT this pass) will add a second slot.
+    wif_signing_key_id: str = "wif-es256-v1"
+    #: Public base URL of the OIDC issuer surface, no trailing slash, e.g.
+    #: "https://oidc.skylize.com". Empty disables the endpoints entirely: no
+    #: issuer can be formed, so the routes 404 rather than serving a document
+    #: that names a host Google could never resolve.
+    wif_issuer_base_url: str = ""
+    #: Value of the `skylize_env` claim. A customer's attribute condition pins
+    #: it so a staging deployment cannot federate into their production project.
+    #: Defaults to "development", NOT "production": the safe default is the one a
+    #: misconfigured deployment cannot use to reach real infrastructure.
+    wif_environment: str = "development"
+
     # Rate limiting (per org, per window).
     rate_limit_per_minute: int = 120
     # Tighter dedicated budget for the sensitive GET /credentials/resolve path.
