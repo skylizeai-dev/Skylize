@@ -800,14 +800,19 @@ therefore an endpoint, credentials, and scopes - nothing more, mirroring
 
 ## 2.7 - Notion
 
-> **Section status: `[DRAFT]` - NOT APPROVED. Owner sign-off pending.**
-> Drafted 2026-09-03 against commit `8f147d4`. Predecessor:
-> `docs/audits/audit_notion_asana_readiness.md`. Depends additionally on 4.0
-> (Section 1.1 must be resolved).
+> **Section status: `[APPROVED]` - 2026-09-04 (owner). Capabilities-vs-scopes
+> Q2.7a, write actions Q2.7b, governance narrative Q2.7c, version pinning Q2.7d,
+> and revocation wiring Q2.7e all decided below. Q2.7f's out-of-scope list stands
+> as recorded. Q2.7g (shared-workspace rate-limit pacing) is
+> `[DEFERRED - follow-up, non-blocking]`: a real engineering question, tracked
+> for a later pass, and explicitly NOT a condition of this approval.**
+> Drafted 2026-09-03 against commit `8f147d4`; connector shipped at `92c7706`.
+> Predecessor: `docs/audits/audit_notion_asana_readiness.md`. Depends
+> additionally on 4.0 (Section 1.1 must be resolved).
 >
 > **Process note:** as with 2.6, the connector was implemented in the SAME
-> commit as this draft on explicit owner instruction, ahead of `[APPROVED]`.
-> Recorded rather than left for a future session to infer.
+> commit as its draft (`92c7706`) on explicit owner instruction, ahead of
+> `[APPROVED]`. Recorded rather than left for a future session to infer.
 
 `[CODE-VERIFIED]` Notion is **org-level**: a page created for a customer must
 exist in **their own** workspace, where their team reads it. Same test that made
@@ -843,7 +848,7 @@ where the REST API used a custom envelope but the token endpoint turned out to b
 RFC 6749-conformant, making Asana's override defence-in-depth. Notion's override
 is load-bearing.
 
-- **Q2.7a `[OWNER-DECISION-REQUIRED]` Least privilege: capabilities, not scopes.**
+- **Q2.7a `[DECIDED - owner, 2026-09-04]` Least privilege: capabilities, not scopes.**
   `[LIVE-VERIFIED]` `https://developers.notion.com/reference/capabilities`:
   Notion has **no OAuth `scope` parameter at all**. An integration's capabilities
   are fixed when it is REGISTERED in Notion's developer portal: *Read content*,
@@ -861,13 +866,15 @@ is load-bearing.
   2. The least-privilege decision is therefore *which capabilities to register
      with*, made once in a portal and not per-authorization.
 
-  `[RESEARCH-SUGGESTED]` the minimum for Q2.7c's narrative is **Insert content**
-  and **Update content**; *Read content* is needed only if a future read tool is
-  built (none is, see Q2.7f). **User information should be set to *No user
-  information***: nothing in this connector needs a Notion user's identity, and
-  *with email addresses* would pull customer PII into a surface that has no use
-  for it. **Owner must confirm the registration choice**, since it cannot be
-  changed per-customer afterwards.
+  **Decided: register the Skylize Notion integration with *Insert content* and
+  *Update content* only**, plus **user information set to *No user
+  information***. *Read content* is not registered: no read tool is built (see
+  Q2.7f), and adding a capability with no corresponding action would widen the
+  integration's reach beyond what the narrative in Q2.7c actually needs. *With
+  email addresses* is declined for the same reason it was flagged: nothing in
+  this connector needs a Notion user's identity, and requesting it would pull
+  customer PII into a surface with no use for it. This is a one-time portal
+  registration choice; it cannot vary per customer.
 
 - **Q2.7b `[DECIDED - owner, 2026-09-03]` Write actions and severity: ALL ROUTINE.**
   Three verbs ship, and **none is permission-gated**:
@@ -899,7 +906,7 @@ is load-bearing.
   and *user information with email addresses* is a **read**-side privacy choice
   (Q2.7a), not a write action.
 
-- **Q2.7c `[OWNER-DECISION-REQUIRED]` Governance narrative - RESEARCH POSITION.**
+- **Q2.7c `[DECIDED - owner, 2026-09-04]` Governance narrative.**
   `[RESEARCH-SUGGESTED]` Notion's role is **deliverable drafting in the client's
   own workspace**: an agent produces a written work product - a brief, a research
   summary, a structured tracker - as a page or database inside the customer's
@@ -991,8 +998,10 @@ is load-bearing.
     unanalyzed here; Stripe's signature-verification precedent (2.1) is the
     nearest pattern if taken up later.
 
-- **Q2.7g `[OWNER-DECISION-REQUIRED]` Rate limits, and a real open question about
-  a SHARED budget.**
+- **Q2.7g `[DEFERRED - follow-up, non-blocking, owner 2026-09-04]` Rate limits,
+  and a real open question about a SHARED budget.** Deferred rather than decided:
+  the reactive handling below ships as-is, and the shared-budget pacing question
+  is tracked for a later pass rather than resolved or blocked on here.
   `[LIVE-VERIFIED]` 2026-09-03, `https://developers.notion.com/reference/request-limits`:
   - **Per connection:** "an average of three requests per second, with some bursts
     beyond the average allowed."
@@ -1020,10 +1029,10 @@ is load-bearing.
   2. **Size limits are enforced client-side** so an oversized append is refused
      with a clear message rather than a 400 from Notion.
 
-  **THE OPEN QUESTION `[OWNER-DECISION-REQUIRED]`.** The per-workspace budget is
-  shared with **every other integration the customer runs on that workspace**, not
-  a Skylize-dedicated allowance. Two things follow that this pass does **not**
-  resolve:
+  **THE DEFERRED QUESTION.** The per-workspace budget is shared with **every
+  other integration the customer runs on that workspace**, not a
+  Skylize-dedicated allowance. Two things follow that this pass does **not**
+  resolve, and that approval of this section does not resolve either:
   - A Skylize connector can be throttled by a customer's unrelated tools, and
     conversely **Skylize's own burst can throttle the customer's other
     integrations** - a way for this platform to degrade software it does not own.
@@ -1114,8 +1123,10 @@ reads `[APPROVED]` **and** the preconditions in 4.0 are met.
   reuse Q2.6d, fixed-`writer` mapping Q2.6e, and revocation override Q2.6f
   (kept) decided; Q2.6g out-of-scope list decided, `addUser` included):
   Approved  2026-09-03  (owner)
-- 2.7 Notion (DRAFT - capabilities Q2.7a and rate-limit pacing Q2.7g open; write
-  actions Q2.7b (all routine, no permission gate - Notion has no sharing API),
-  narrative Q2.7c, version pinning Q2.7d, and revocation wiring Q2.7e decided;
-  Q2.7f out-of-scope list stands as recorded): _______________  (owner, date)
+- 2.7 Notion (capabilities Q2.7a decided - Insert/Update content, no user
+  information; write actions Q2.7b decided - all routine, no permission gate,
+  Notion has no sharing API; narrative Q2.7c, version pinning Q2.7d, and
+  revocation wiring Q2.7e decided; Q2.7f out-of-scope list stands as recorded;
+  Q2.7g shared-workspace rate-limit pacing DEFERRED as a non-blocking
+  follow-up): Approved  2026-09-04  (owner)
 - 3.0 Credential schema: _______________________________  (owner, date)
