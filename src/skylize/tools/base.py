@@ -57,6 +57,19 @@ class ToolContext:
     #: None so every handler written before this field existed is unaffected —
     #: and so an elevated handler that is somehow reached ungated finds nothing.
     permission_grant: PermissionGrant | None = None
+    #: The HITL ticket this call is replaying, when it is one. None on an ordinary
+    #: (non-deferred) request path.
+    #:
+    #: LOAD-BEARING FOR EXTERNALLY-MUTATING HANDLERS, and the reason it is here
+    #: rather than being derived from `correlation_id`. `HitlQueueService.approve`
+    #: mints a FRESH correlation id on every approval attempt
+    #: (app/hitl/service.py:160), and a transient failure after the claim releases
+    #: the row back to 'pending' (app/hitl/service.py:234-246) so a human can
+    #: retry — which re-executes the whole agent run. An idempotency key derived
+    #: from `correlation_id` would therefore differ on every retry and defeat the
+    #: provider-side deduplication it exists to trigger. `hitl_id` is stable
+    #: across those retries; that is the entire point of threading it here.
+    hitl_id: UUID | None = None
 
 
 ToolHandler = Callable[[BaseModel, ToolContext], Awaitable[BaseModel]]
@@ -121,6 +134,48 @@ class ToolPermissionProfile(BaseModel):
     link_sharing_sentinel: str = "anyone"
 
 
+class ToolWifProfile(BaseModel):
+    """Declares a tool DEPENDENT ON A LIVE WORKLOAD IDENTITY FEDERATION TRUST.
+
+    The fourth opt-in gate on `ToolProxy.invoke`, alongside `ToolSpendProfile`,
+    `ToolPermissionProfile` and `ToolOAuthProfile`. It is a separate profile from
+    `ToolOAuthProfile` for the same reason `gcp_wif_connections` is a separate
+    table from `oauth_credentials` (migration 0024): a federation trust is not a
+    stored grant. There is no token to hold, nothing to refresh, and no expiry —
+    a short-lived credential is minted per call at Google's Security Token
+    Service from a trust relationship the customer can revoke at any moment.
+
+    WHAT IT CHECKS, and why each check is at the gate rather than in the handler:
+      1. a connection row exists for the org;
+      2. its `connection_state` is 'valid' — a connection the health probe has
+         already found broken must be refused BEFORE anything is minted, so an
+         urgent action fails in milliseconds with the right remedy named rather
+         than after a round trip to Google;
+      3. the requested resource is an ENABLED row in `gcp_wif_targets`.
+
+    A handler could do all three. It would then be invisible in the registry
+    entry, which is precisely what the other three profiles exist to avoid: all
+    of them "refuse callable predicates on purpose, so a gate stays inspectable"
+    (see `ToolSpendProfile` and `ToolPermissionProfile` above). A gate that only
+    exists inside a function body is one refactor from being skipped.
+
+    `label` selects WHICH connection when an org has more than one, matching the
+    `label` semantics `oauth_credentials` and `org_credentials` already use.
+
+    `project_field` / `zone_field` / `instance_field` name fields on the tool's
+    VALIDATED input — read off the parsed `input_schema` instance, not the raw
+    dict, so they have already passed the tool's own type validation. Same
+    discipline as `ToolSpendProfile.amount_field`.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    label: str = ""
+    project_field: str = Field(min_length=1)
+    zone_field: str = Field(min_length=1)
+    instance_field: str = Field(min_length=1)
+
+
 class ToolOAuthProfile(BaseModel):
     """Declares a tool DEPENDENT ON A LIVE OAUTH GRANT for `provider`.
 
@@ -163,6 +218,10 @@ class ToolDefinition(BaseModel):
     #: must ALSO require `ToolContext.permission_grant`, so forgetting this field
     #: fails closed at dispatch rather than silently skipping the gate.
     permission: ToolPermissionProfile | None = None
+    #: Non-None marks this tool dependent on a live GCP Workload Identity
+    #: Federation trust; see `ToolWifProfile`. Defaults to None like the three
+    #: above, so every tool registered before this field existed is unaffected.
+    wif: ToolWifProfile | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -377,3 +436,41 @@ class ToolInputError(ToolError):
 
 class ToolExecutionError(ToolError):
     """The tool's handler raised while executing."""
+
+
+class ToolWifDenied(ToolPermissionDenied):
+    """A WIF-dependent tool call was refused at the federation gate.
+
+    Subclasses `ToolPermissionDenied` so it routes through the SAME denied-call
+    audit path the scope, budget and credential denials use, rather than
+    inventing a second denial taxonomy. Never raised directly — always one of the
+    three subclasses below, so a caller can branch on the TYPE and an operator is
+    never handed the wrong remedy.
+    """
+
+
+class ToolWifNotConnected(ToolWifDenied):
+    """No GCP federation is configured for this org. REMEDY: run onboarding."""
+
+
+class ToolWifTrustBroken(ToolWifDenied):
+    """The federation exists but is not usable, and the health probe already knew.
+
+    Carries the connection's own remedy wording, because the two broken states
+    need OPPOSITE customer actions: 'revoked' means the pool or provider is gone
+    and the federation must be re-created; 'misconfigured' means the trust works
+    and one setting (an IAM binding, an audience, an attribute condition) is
+    wrong. Telling the second customer to reconnect would be actively wrong.
+
+    Raised BEFORE any token is minted. That ordering is the point: an urgent
+    action against a connection already known to be broken must fail in
+    milliseconds naming the fix, not after a round trip to Google.
+    """
+
+
+class ToolWifTargetNotAllowed(ToolWifDenied):
+    """The requested instance is not an enabled row in `gcp_wif_targets`.
+
+    Deny-by-default over the customer's own allow-list: an org that has federated
+    a project has NOT thereby authorised every machine in it. Absence is denial.
+    """

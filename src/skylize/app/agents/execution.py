@@ -131,6 +131,12 @@ _AGENT_DELIVERABLE_TYPE: dict[str, str] = {
     "tone_of_voice_agent": "other",
     # A fraud/risk verdict. `research_report` would misrepresent a control.
     "fraud_detection_agent": "other",
+    # An infrastructure containment record: what was stopped, on whose authority,
+    # and what actually changed. Deliberately "other" - every vocabulary term
+    # describes an authored artefact, and this is an ACTION RECORD. Typing it as
+    # a document would misrepresent a report of a real mutation to a customer's
+    # infrastructure as a piece of content.
+    "infrastructure_executor": "other",
     # Outreach drafts. NOT `email_copy`: the contract does not fix the channel,
     # so the type would be right only when the channel happens to be email.
     "sdr_outreach_agent": "other",
@@ -311,6 +317,11 @@ class AgentExecutionService:
                 contract=contract, org_id=org_id, correlation_id=run_id,
                 system_prompt=system_prompt, user_prompt=user_prompt,
                 on_behalf_of_principal=on_behalf_of_principal,
+                # The approval's ticket id, when this run IS a HITL replay. This
+                # is the ONLY value on this path that is stable across retries of
+                # the same approval, so it is what an externally-mutating tool
+                # must key its provider-side idempotency on.
+                hitl_id=hitl_approval.hitl_id if hitl_approval else None,
             )
             governance_token_id = token.token_id
             log.info(
@@ -815,6 +826,11 @@ class AgentExecutionService:
         system_prompt: str,
         user_prompt: str,
         on_behalf_of_principal: str | None = None,
+        # Threaded to the ToolProxy so an externally-mutating tool can derive a
+        # RETRY-STABLE idempotency key. See ToolContext.hitl_id: `correlation_id`
+        # is minted fresh per approval attempt (app/hitl/service.py:160), so it
+        # cannot serve that purpose.
+        hitl_id: UUID | None = None,
     ) -> tuple[Any, str, str, int]:
         if self._tools is None or self._authority is None or self._audit is None:
             raise RuntimeError(
@@ -919,6 +935,7 @@ class AgentExecutionService:
                     await self._invoke_tool(
                         call=call, token=token, contract=contract,
                         org_id=org_id, correlation_id=correlation_id,
+                        hitl_id=hitl_id,
                     )
                 )
             messages.append(LLMMessage(role="user", content=result_blocks))
@@ -943,6 +960,7 @@ class AgentExecutionService:
         contract: AgentContract,
         org_id: str,
         correlation_id: UUID,
+        hitl_id: UUID | None = None,
     ) -> LLMContentBlock:
         assert self._tools is not None
         try:
@@ -953,6 +971,7 @@ class AgentExecutionService:
                 contract=contract,
                 org_id=org_id,
                 correlation_id=correlation_id,
+                hitl_id=hitl_id,
             )
             return LLMContentBlock(
                 kind="tool_result",

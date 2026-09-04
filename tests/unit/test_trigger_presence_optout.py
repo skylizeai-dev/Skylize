@@ -107,10 +107,10 @@ def test_every_other_contract_keeps_the_default() -> None:
 @pytest.mark.asyncio
 async def test_every_other_contract_decides_exactly_as_before() -> None:
     """The byte-identical claim, measured against an independent restatement of
-    the old rule -- across all 21 non-cowork contracts, both the ones that
+    the old rule -- across all 22 non-cowork contracts, both the ones that
     approve and the ones that defer."""
     others = _others()
-    assert len(others) == 21, f"registry size changed: {len(others) + 1} contracts"
+    assert len(others) == 22, f"registry size changed: {len(others) + 1} contracts"
 
     for contract in others:
         result = await _evaluator().evaluate(
@@ -131,7 +131,11 @@ async def test_the_defer_and_approve_populations_are_both_non_empty() -> None:
     approving = [
         c for c in _others() if _reference_outcome_before_the_field(c) == "approved"
     ]
-    assert len(deferring) == 12, [c.agent_id for c in deferring]
+    # 13, not 12: `infrastructure_executor` carries FIRST_EXTERNAL_LAUNCH, so it
+    # joins the deferring population. That it lands HERE rather than in the
+    # approving population is the property that keeps a customer's VM from ever
+    # being stopped without a human verdict.
+    assert len(deferring) == 13, [c.agent_id for c in deferring]
     assert len(approving) == 9, [c.agent_id for c in approving]
 
 

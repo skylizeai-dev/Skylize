@@ -30,9 +30,10 @@ def test_all_4_in_mvp_contracts() -> None:
 
 
 def test_mvp_contracts_total_count() -> None:
-    # 15 original + seo_keyword + cfo + 2 sdr + 2 agency + cowork = 22. Update
-    # when the MVP set deliberately grows; this guards against accidental drops.
-    assert len(ALL_MVP_CONTRACTS) == 22
+    # 15 original + seo_keyword + cfo + 2 sdr + 2 agency + cowork
+    # + infrastructure_executor = 23. Update when the MVP set deliberately
+    # grows; this guards against accidental drops.
+    assert len(ALL_MVP_CONTRACTS) == 23
 
 
 # ---------------------------------------------------------------------------

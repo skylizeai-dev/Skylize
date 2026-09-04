@@ -42,6 +42,7 @@ from ..app.principal.models import Reservation
 from ..app.principal.spend import SpendLedger
 from ..contracts.base import AgentContract, GovernanceToken
 from ..contracts.token import LiveStateChecker, validate_tool_call
+from ..dal.gcp_wif import GcpWifRepository
 from .base import (
     PermissionGrant,
     ToolCallLimitExceeded,
@@ -57,6 +58,9 @@ from .base import (
     ToolPermissionDenied,
     ToolPermissionTierDenied,
     ToolPermissionUnavailable,
+    ToolWifNotConnected,
+    ToolWifTargetNotAllowed,
+    ToolWifTrustBroken,
     ToolResult,
     ToolSpendDeferredToHuman,
     ToolSpendHardDenied,
@@ -108,6 +112,7 @@ class ToolProxy:
         spend_ledger: SpendLedger | None = None,
         oauth_credentials: OAuthCredentialService | None = None,
         permission_gate: PermissionGate | None = None,
+        wif_repo: "GcpWifRepository | None" = None,
     ) -> None:
         self._registry = registry
         self._audit = audit
@@ -129,6 +134,11 @@ class ToolProxy:
         # `permission` profile then FAILS CLOSED in `_authorize_permission`
         # rather than performing an elevated action nobody authorized.
         self._permission_gate = permission_gate
+        # None where no GCP federation infrastructure is wired. A tool
+        # declaring a `wif` profile then FAILS CLOSED in `_authorize_wif`
+        # rather than mutating a customer's infrastructure through a trust
+        # nobody checked — same reasoning as the three gates above.
+        self._wif_repo = wif_repo
 
     @property
     def registry(self) -> ToolRegistry:
@@ -143,6 +153,10 @@ class ToolProxy:
         contract: AgentContract,
         org_id: str,
         correlation_id: UUID,
+        # The HITL ticket being replayed, when this call is one. Threaded to
+        # the handler through `ToolContext` so an externally-mutating tool can
+        # derive a RETRY-STABLE idempotency key from it; see ToolContext.hitl_id.
+        hitl_id: UUID | None = None,
     ) -> ToolResult:
         try:
             tool = self._registry.resolve(tool_id)
@@ -270,6 +284,24 @@ class ToolProxy:
                 governance_token=governance_token,
             )
 
+        # GCP federation trust (gcp_wif_connections). Only for tools declaring a
+        # `wif` profile. Placed AFTER the permission stage and BEFORE the spend
+        # reservation, for the reason the OAuth stage gives at its own site: a
+        # broken federation IS a denial, and ordering it after the spend hold
+        # would reserve budget against the customer's ceiling only to discover
+        # the call could never run, leaving a hold to unwind.
+        #
+        # It also refuses on a connection the health probe has ALREADY found
+        # broken, without minting anything. That is the whole value of the probe
+        # existing: an urgent action fails in milliseconds naming the remedy,
+        # instead of after a round trip to Google at the worst possible moment.
+        if tool.wif is not None:
+            await self._authorize_wif(
+                tool=tool, validated_input=validated_input, contract=contract,
+                org_id=org_id, correlation_id=correlation_id,
+                governance_token=governance_token,
+            )
+
         # Spend ceiling (spend.SpendLedger). LAST gate before dispatch, and only
         # for spend-capable tools: the ceiling is a shared mutable resource, so a
         # hold must be placed as late as possible — after every cheaper denial has
@@ -285,7 +317,7 @@ class ToolProxy:
 
         context = ToolContext(
             org_id=org_id, agent_id=contract.agent_id, correlation_id=correlation_id,
-            permission_grant=permission_grant,
+            permission_grant=permission_grant, hitl_id=hitl_id,
         )
         try:
             output = await tool.handler(validated_input, context)
@@ -473,6 +505,92 @@ class ToolProxy:
             ),
         )
         return grant
+
+    async def _authorize_wif(
+        self,
+        *,
+        tool: ToolDefinition,
+        validated_input: Any,
+        contract: AgentContract,
+        org_id: str,
+        correlation_id: UUID,
+        governance_token: GovernanceToken,
+    ) -> None:
+        """Refuse unless a LIVE federation covers the EXACT resource requested.
+
+        Every exit that is not a silent return denies, and each denial is audited
+        before it is raised, so a refused federation leaves the same trail a
+        refused scope check does.
+
+        Three denials with three different remedies, kept as three types because
+        collapsing them would hand an operator the wrong fix during an incident:
+        not connected (onboard), trust broken (re-create OR edit one setting,
+        depending on which broken state), target not allowed (add the instance).
+        """
+        profile = tool.wif
+        assert profile is not None  # caller checks; narrows for the type checker
+
+        async def deny(exc: ToolPermissionDenied) -> ToolPermissionDenied:
+            await self._audit_call(
+                tool_id=tool.tool_id, contract=contract, org_id=org_id,
+                correlation_id=correlation_id, governance_token=governance_token,
+                result="denied", reason=str(exc),
+            )
+            return exc
+
+        if self._wif_repo is None:
+            # FAIL CLOSED, exactly like the other three gates on a missing
+            # dependency. A tool that mutates a customer's infrastructure must
+            # never dispatch because the check itself was not wired.
+            raise await deny(ToolWifNotConnected(
+                f"tool {tool.tool_id!r} declares a WIF profile but no federation "
+                "store is wired; refusing to act on customer infrastructure "
+                "through an unchecked trust"
+            ))
+
+        row = await self._wif_repo.get(org_id, profile.label)
+        if row is None:
+            raise await deny(ToolWifNotConnected(
+                f"org {org_id!r} has no GCP federation configured"
+                + (f" for label {profile.label!r}" if profile.label else "")
+                + "; run GCP onboarding before this action can be authorized"
+            ))
+
+        if row.connection_state != "valid":
+            # The probe already established this. Refuse before minting anything,
+            # and carry the connection's own reason so the message names the
+            # remedy for THIS broken state rather than a generic one.
+            raise await deny(ToolWifTrustBroken(
+                f"GCP federation for org {org_id!r} is {row.connection_state!r} "
+                f"and cannot be used: {row.state_reason or 'no reason recorded'}"
+            ))
+
+        project = getattr(validated_input, profile.project_field, None)
+        zone = getattr(validated_input, profile.zone_field, None)
+        instance = getattr(validated_input, profile.instance_field, None)
+        if not (isinstance(project, str) and isinstance(zone, str)
+                and isinstance(instance, str)):
+            raise await deny(ToolWifTargetNotAllowed(
+                f"tool {tool.tool_id!r} did not supply a readable "
+                "project/zone/instance triple to authorize"
+            ))
+
+        targets = await self._wif_repo.list_targets(
+            org_id, row.conn_id, enabled_only=True
+        )
+        allowed = any(
+            t.gcp_project_id == project and t.zone == zone
+            and t.instance_name == instance
+            for t in targets
+        )
+        if not allowed:
+            # Deny-by-default over the customer's own allow-list. Federating a
+            # project does NOT authorise every machine in it.
+            raise await deny(ToolWifTargetNotAllowed(
+                f"{project}/{zone}/{instance} is not an enabled target for org "
+                f"{org_id!r}; add it to the GCP target list to authorize this action"
+            ))
+
 
     async def _reserve_spend(
         self,

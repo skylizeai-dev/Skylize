@@ -47,12 +47,15 @@ EXPECTED_MVP_AGENTS = {
     # cowork (lifecycle_status="sandbox" — registered so the tool proxy can
     # resolve it, but nothing schedules it)
     "cowork_agent",
+    # infrastructure: the stateful executor for GCP containment. Holds the only
+    # externally-mutating GCP verb and always defers to a human.
+    "infrastructure_executor",
 }
 
 
 def test_registry_loads_expected_mvp_agents() -> None:
     assert set(MVP_REGISTRY.agent_ids()) == EXPECTED_MVP_AGENTS
-    assert len(MVP_REGISTRY.all()) == 22
+    assert len(MVP_REGISTRY.all()) == 23
 
 
 def test_agent_ids_are_unique_and_snake_case() -> None:

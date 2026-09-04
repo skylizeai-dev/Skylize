@@ -83,7 +83,17 @@ def _full_registry() -> ToolRegistry:
         repo=InMemoryOAuthCredentialRepository(),
         audit=audit,
     )
-    return default_tool_registry(credential_vault=vault, oauth_credentials=oauth)
+    # GCP wiring included DELIBERATELY. Without it the registry holds no GCP
+    # tool and every assertion below about GCP would pass by absence rather than
+    # by the invariant actually holding.
+    from skylize.dal.gcp_wif import InMemoryGcpWifRepository
+
+    return default_tool_registry(
+        credential_vault=vault,
+        oauth_credentials=oauth,
+        wif_repo=InMemoryGcpWifRepository(),
+        gcp_executor_factory=lambda: None,
+    )
 
 
 def _stateless_contracts():
@@ -257,33 +267,96 @@ def test_drive_create_file_is_not_permission_gated() -> None:
 # GCP Workload Identity Federation (migration 0024, app/gcp/*)
 # ---------------------------------------------------------------------------
 
-def test_no_registered_tool_reaches_gcp_wif_this_pass() -> None:
-    """The WIF foundation ships with NO tool attached to it, and that is asserted
-    rather than assumed.
+def test_exactly_one_gcp_verb_is_registered_and_it_is_the_stop() -> None:
+    """The externally-mutating GCP surface is exactly one verb, asserted.
 
-    The foundation pass deliberately builds the issuer surface, the trust-state
-    table, the signing key, and the health probe, but NO Compute verb: nothing in
-    the registry can stop a machine, because no such tool exists yet. This test
-    is the tripwire that keeps that true until a later pass adds the verb
-    consciously — at which point this test must be updated in the same commit
-    that registers it, exactly as `EXPECTED_OAUTH_TOOL_IDS` forces for a new
-    OAuth connector.
+    Replaces the foundation-era tripwire that asserted NO GCP tool existed. That
+    assertion has now fired as designed and been discharged consciously: the stop
+    verb was added. What must stay true from here is narrower and more useful -
+    the registry holds that ONE verb and nothing else has been added beside it.
 
-    It is deliberately registry-wide, not restricted to the stateless agents:
-    while the verb does not exist, NO agent may hold one, and the strongest
-    version of that statement is the one worth pinning.
+    A disk verb or an `addresses.delete` appearing here would fail this test, and
+    both are excluded for the same recorded reason: they are irreversible, and
+    the HITL replay path retries on transient failure
+    (app/hitl/service.py:234-246), which is only safe for operations that
+    converge on a state.
     """
     registry = _full_registry()
-    gcp_tools = [
-        t.tool_id
-        for t in registry.all()
+    gcp_tools = sorted(
+        t.tool_id for t in registry.all()
         if "gcp" in t.tool_id.lower() or "compute" in t.tool_id.lower()
-    ]
-    assert gcp_tools == [], (
-        f"a GCP/Compute tool is registered ({gcp_tools}) but this pass ships no "
-        "trigger path for one. If a Compute verb is being added, update this test "
-        "and the stateless allow-lists above in the same commit."
     )
+    assert gcp_tools == ["integration.gcp_stop_instance"], (
+        f"the GCP verb surface changed: {gcp_tools}. Adding an irreversible verb "
+        "(disk delete, addresses.delete) is not safe under the HITL retry path - "
+        "see app/gcp/actions.py."
+    )
+
+
+def test_the_gcp_verb_is_gated_by_the_federation_profile() -> None:
+    """The stop verb must carry its `wif` profile, or it dispatches ungated.
+
+    The profile is what makes the ToolProxy check that a federation exists, that
+    the health probe has not already found it broken, and that the instance is on
+    the customer's own allow-list. A verb that performs this action without it
+    would reach a customer's infrastructure with none of those checks run.
+    """
+    tool = _full_registry().resolve("integration.gcp_stop_instance")
+    assert tool.wif is not None, "the GCP stop verb lost its federation gate"
+    assert tool.wif.project_field == "project"
+    assert tool.wif.zone_field == "zone"
+    assert tool.wif.instance_field == "instance"
+
+
+def test_the_gcp_verb_is_not_spend_gated() -> None:
+    """Stopping a customer's VM costs Skylize nothing, so it reserves nothing.
+
+    A `ToolSpendProfile` here would place a hold on the customer's own LLM
+    ceiling to perform a safety action - and, worse, the ceiling being breached
+    is what TRIGGERS this action, so a spend gate could refuse the very
+    containment the breach called for.
+    """
+    tool = _full_registry().resolve("integration.gcp_stop_instance")
+    assert tool.spend is None
+
+
+def test_only_the_infrastructure_executor_may_invoke_the_gcp_verb() -> None:
+    """Registry-wide: exactly one contract holds the stop verb.
+
+    The propose/act split depends on this. Any other contract gaining it - most
+    of all a stateless observer - would let an agent that merely NOTICES an
+    overspend also perform the containment.
+    """
+    from skylize.contracts.registry import MVP_REGISTRY
+
+    holders = sorted(
+        c.agent_id for c in MVP_REGISTRY.all()
+        if "integration.gcp_stop_instance" in (c.invocable_tools or [])
+        or any(g.tool_id == "integration.gcp_stop_instance" for g in c.allowed_tools)
+    )
+    assert holders == ["infrastructure_executor"], (
+        f"the GCP stop verb is held by {holders}; only the stateful executor may "
+        "hold it"
+    )
+
+
+def test_the_executor_can_never_auto_approve() -> None:
+    """The executor's contract must keep a human-in-loop trigger.
+
+    `_decide_agent_execution` defers on trigger PRESENCE
+    (app/decision_engine/evaluator.py:230-245), and FIRST_EXTERNAL_LAUNCH is
+    checked BEFORE the `defers_on_trigger_presence` opt-out - so it is the one
+    trigger that cannot be suppressed. Losing it would let a customer's VM be
+    stopped with no human verdict, and would also remove the `hitl_id` the action
+    derives its retry-safe idempotency key from.
+    """
+    from skylize.contracts.base import HumanInLoopTrigger
+    from skylize.contracts.registry import MVP_REGISTRY
+
+    contract = MVP_REGISTRY.resolve("infrastructure_executor")
+    assert HumanInLoopTrigger.FIRST_EXTERNAL_LAUNCH in contract.human_in_loop_triggers
+    assert contract.memory_read_access == []
+    assert contract.memory_write_access == []
 
 
 @pytest.mark.parametrize("contract", _stateless_contracts(), ids=lambda c: c.agent_id)

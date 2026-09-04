@@ -20,6 +20,7 @@ from .creative import ALL_CREATIVE_CONTRACTS
 from .executive import ALL_EXECUTIVE_CONTRACTS
 from .finance import cfo_agent
 from .growth import ALL_GROWTH_CONTRACTS
+from .infrastructure import ALL_INFRASTRUCTURE_CONTRACTS
 from .sdr import ALL_SDR_CONTRACTS
 from .security import ALL_SECURITY_CONTRACTS
 from .seo import ALL_SEO_CONTRACTS
@@ -32,6 +33,9 @@ ALL_MVP_CONTRACTS: list[AgentContract] = [
     *ALL_SECURITY_CONTRACTS,  # fraud_detection_agent
     *ALL_SEO_CONTRACTS,  # seo_keyword_agent (tool-enabled: search.web + memory.search)
     cfo_agent,  # finance's first tool-enabled capability: budget_summary
+    # The stateful executor for GCP containment. Holds exactly one
+    # externally-mutating tool and always defers to a human.
+    *ALL_INFRASTRUCTURE_CONTRACTS,
     *ALL_SDR_CONTRACTS,  # sdr_outreach_agent, lead_qualifier_agent
     *ALL_AGENCY_CONTRACTS,  # agency_requirements_analyst, agency_deliverable_drafter
     *ALL_COWORK_CONTRACTS,  # cowork_agent (sandbox; human-present, principal-scoped)

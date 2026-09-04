@@ -55,6 +55,7 @@ from .dal.credentials import CredentialRepository
 from .dal.oauth_credentials import OAuthCredentialRepository
 from .dal.gcp_wif import GcpWifRepository
 from .app.gcp.keys import WifSigningKey, load_wif_signing_key
+from .app.gcp.trigger import SpendCeilingContainmentTrigger
 from .dal.permission_grants import PermissionGrantRepository
 from .dal.ports import (
     ApiKeyRepository,
@@ -370,6 +371,10 @@ class Container:
     # import edge between them. Nothing that holds one can obtain the other.
     wif_signing_key: "WifSigningKey | None" = None
     wif_repo: "GcpWifRepository | None" = None
+    # Proposes a governed containment when an org's spend ceiling is breached.
+    # None unless GCP is wired. NOT reachable from ToolProxy: see
+    # app/gcp/trigger.py for why that edge would close a construction cycle.
+    gcp_containment: "SpendCeilingContainmentTrigger | None" = None
 
     async def aclose(self) -> None:
         # LIFO, like ExitStack: consumers/subscribers are registered after the
@@ -771,9 +776,29 @@ async def build_container(settings: Settings | None = None) -> Container:
     spend_ledger = (
         SpendLedger(PostgresSpendRepository(db.pool)) if db is not None else None
     )
+    # GCP containment executor factory. None unless the WIF issuer surface is
+    # configured AND a signing key resolved: without a key nothing can be minted,
+    # so the tool must not be registered at all rather than registered and
+    # failing at the moment it is needed. A factory rather than an instance so
+    # each call gets a fresh HTTP client scope.
+    gcp_executor_factory = None
+    if wif_signing_key is not None and settings.wif_issuer_base_url.strip():
+        import httpx as _httpx
+
+        from .app.gcp.actions import GcpKillSwitchExecutor
+
+        def gcp_executor_factory() -> "GcpKillSwitchExecutor":
+            return GcpKillSwitchExecutor(
+                key=wif_signing_key,
+                issuer_base_url=settings.wif_issuer_base_url,
+                environment=settings.wif_environment,
+                http_client_factory=_httpx.AsyncClient,
+            )
+
     tool_proxy = ToolProxy(
         registry=default_tool_registry(
-            credential_vault=credential_vault, oauth_credentials=oauth_credentials
+            credential_vault=credential_vault, oauth_credentials=oauth_credentials,
+            wif_repo=wif_repo, gcp_executor_factory=gcp_executor_factory,
         ),
         audit=audit,
         public_key=authority.public_key,
@@ -781,6 +806,7 @@ async def build_container(settings: Settings | None = None) -> Container:
         spend_ledger=spend_ledger,
         oauth_credentials=oauth_credentials,
         permission_gate=permission_gate,
+        wif_repo=wif_repo,
     )
     # AgentExecutionService also carries the synchronous decision gate (owner
     # decisions D1/D3/D4/D5): the SAME pure evaluator the async engine uses
@@ -811,6 +837,15 @@ async def build_container(settings: Settings | None = None) -> Container:
         journal=work_journal,
     )
 
+    # Built AFTER agent_execution: the trigger submits proposals THROUGH the
+    # execution service, which is the whole point of the Q2.2c inversion - a
+    # containment is an ordinary governed proposal, not a special side channel.
+    gcp_containment: SpendCeilingContainmentTrigger | None = None
+    if wif_repo is not None and gcp_executor_factory is not None:
+        gcp_containment = SpendCeilingContainmentTrigger(
+            wif_repo=wif_repo, execution=agent_execution,
+        )
+
     return Container(
         settings=settings, bus=bus, audit=audit, authority=authority,
         orchestrator=orchestrator, tenants=tenants, api_keys=api_keys,
@@ -821,4 +856,5 @@ async def build_container(settings: Settings | None = None) -> Container:
         llm=llm, work_journal=work_journal, _closers=closers, db=db,
         cost_ledger=cost_ledger, spend_ceiling_dal=spend_ceiling_dal,
         wif_signing_key=wif_signing_key, wif_repo=wif_repo,
+        gcp_containment=gcp_containment,
     )

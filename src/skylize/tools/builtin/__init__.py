@@ -17,7 +17,9 @@ from .asana_tools import (
     build_asana_create_project_tool,
     build_asana_create_task_tool,
 )
+from ...dal.gcp_wif import GcpWifRepository
 from .datetime_tool import CURRENT_DATETIME_TOOL
+from .gcp_tools import build_gcp_tools
 from .drive_tools import build_drive_create_file_tool, build_drive_share_file_tool
 from .hubspot_tools import build_hubspot_create_contact_tool, build_hubspot_search_contacts_tool
 from .notion_tools import (
@@ -34,6 +36,8 @@ def build_builtin_tools(
     web_search_port: WebSearchPort | None = None,
     credential_vault: CredentialVault | None = None,
     oauth_credentials: OAuthCredentialService | None = None,
+    wif_repo: "GcpWifRepository | None" = None,
+    gcp_executor_factory: object | None = None,
 ) -> list[ToolDefinition]:
     tools = [
         build_memory_recall_tool(memory_recall_port or NullMemoryRecallPort()),
@@ -57,6 +61,14 @@ def build_builtin_tools(
         tools.append(build_notion_create_page_tool(oauth_credentials))
         tools.append(build_notion_create_database_tool(oauth_credentials))
         tools.append(build_notion_append_blocks_tool(oauth_credentials))
+    # GCP containment. NOT on the OAuth service: a Workload Identity Federation
+    # trust is not a stored grant (migration 0024), so it has its own repository
+    # and its own gate. Registers only when BOTH the federation store and an
+    # executor factory are wired, so a deployment without GCP has no such tool in
+    # the registry at all -- it cannot be resolved, granted, or invoked.
+    tools.extend(build_gcp_tools(
+        wif_repo=wif_repo, executor_factory=gcp_executor_factory,
+    ))
     return tools
 
 
@@ -65,10 +77,13 @@ def default_tool_registry(
     web_search_port: WebSearchPort | None = None,
     credential_vault: CredentialVault | None = None,
     oauth_credentials: OAuthCredentialService | None = None,
+    wif_repo: "GcpWifRepository | None" = None,
+    gcp_executor_factory: object | None = None,
 ) -> ToolRegistry:
     registry = ToolRegistry(
         build_builtin_tools(
-            memory_recall_port, web_search_port, credential_vault, oauth_credentials
+            memory_recall_port, web_search_port, credential_vault, oauth_credentials,
+            wif_repo, gcp_executor_factory,
         )
     )
     registry.validate_schemas()
