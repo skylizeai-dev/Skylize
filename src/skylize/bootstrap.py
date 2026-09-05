@@ -845,6 +845,24 @@ async def build_container(settings: Settings | None = None) -> Container:
         gcp_containment = SpendCeilingContainmentTrigger(
             wif_repo=wif_repo, execution=agent_execution,
         )
+        # THE ONE DEFERRED ASSIGNMENT THAT CLOSES THE LOOP, and the only line in
+        # this file that had to move for the auto-hook.
+        #
+        # The dependency is genuinely cyclic:
+        #     gcp_containment -> agent_execution -> tool_proxy -> gcp_containment
+        # so no construction ORDER can satisfy it - whichever is built first
+        # needs one of the other two. Constructor injection is therefore not an
+        # option, and reordering would not help.
+        #
+        # Late binding breaks the cycle at its weakest edge: the proxy does not
+        # need the trigger to be VALID, only to be present before the first spend
+        # denial, which cannot happen until a request arrives - long after this
+        # line runs. Nothing above moves, so Drive/Asana/Notion/Slack/Stripe
+        # construction order is untouched.
+        tool_proxy.set_containment_trigger(gcp_containment)
+        # Appended LAST, so LIFO drains in-flight containment proposals
+        # FIRST - while the database and bus they write through are open.
+        closers.append(tool_proxy.drain_containment_tasks)
 
     return Container(
         settings=settings, bus=bus, audit=audit, authority=authority,

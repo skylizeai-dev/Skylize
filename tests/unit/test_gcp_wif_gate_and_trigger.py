@@ -282,9 +282,19 @@ async def test_an_unexpected_auto_approval_is_reported_as_a_defect() -> None:
 async def test_the_trigger_never_stops_anything_itself() -> None:
     """It proposes. The tool acts, and only after an approval.
 
-    Asserted structurally: the trigger is constructed with no executor, no
-    signing key, and no HTTP client, so it has nothing to act WITH.
+    Asserted by CAPABILITY rather than by an exact attribute set: the trigger
+    holds no signing key, no HTTP client and no executor, so there is nothing on
+    it that could reach Google. An exact-set assertion was the first version and
+    was wrong - it broke when the cooldown bookkeeping was added, which is a
+    change that has nothing to do with the property being protected.
     """
     trigger = await _trigger(InMemoryGcpWifRepository(), _Execution())
-    attrs = vars(trigger)
-    assert set(attrs) == {"_wif_repo", "_execution"}
+    held = list(vars(trigger).values())
+
+    from skylize.app.gcp.actions import GcpKillSwitchExecutor
+    from skylize.app.gcp.keys import WifSigningKey
+
+    assert not any(isinstance(v, (GcpKillSwitchExecutor, WifSigningKey)) for v in held)
+    assert not any(hasattr(v, "stop_and_release") for v in held)
+    # Nothing on the trigger can perform HTTP either.
+    assert not any(hasattr(v, "post") or hasattr(v, "request") for v in held)

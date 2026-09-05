@@ -139,6 +139,14 @@ class ToolProxy:
         # rather than mutating a customer's infrastructure through a trust
         # nobody checked — same reasoning as the three gates above.
         self._wif_repo = wif_repo
+        # LATE-BOUND, never a constructor argument. See
+        # `set_containment_trigger` for the cycle this breaks.
+        self._containment: Any | None = None
+        # Strong references to in-flight containment tasks. asyncio holds only a
+        # WEAK reference to a running task, so a fire-and-forget task can be
+        # garbage-collected mid-flight; keeping it here until it finishes is what
+        # stops a containment proposal vanishing silently.
+        self._containment_tasks: set[Any] = set()
 
     @property
     def registry(self) -> ToolRegistry:
@@ -506,6 +514,126 @@ class ToolProxy:
         )
         return grant
 
+    def set_containment_trigger(self, trigger: Any) -> None:
+        """Attach the GCP containment trigger AFTER construction.
+
+        WHY THIS IS NOT A CONSTRUCTOR ARGUMENT. The dependency runs
+        `gcp_containment -> agent_execution -> tool_proxy`: the trigger proposes
+        by calling `AgentExecutionService.execute`, and that service is built
+        holding this proxy. Passing the trigger in through `__init__` would close
+        a three-node construction cycle that no ordering can satisfy - one of the
+        three must always be built first, and each needs another.
+
+        Late binding breaks it with a single deferred assignment: the proxy is
+        built without the trigger, the service is built with the proxy, the
+        trigger is built with the service, and then this runs. Nothing else in
+        bootstrap moves, so no other connector's construction order is disturbed.
+
+        There is no IMPORT cycle to break - `app/gcp/trigger.py` imports the
+        execution service lazily inside its own method - which is why a plain
+        setter suffices and an event bus is not needed. See that module's
+        docstring for the full reasoning.
+        """
+        self._containment = trigger
+
+    async def drain_containment_tasks(self) -> None:
+        """Wait for in-flight containment proposals before the process goes down.
+
+        Registered as a container closer. Without it a proposal scheduled moments
+        before shutdown is simply lost: the task holds a half-finished HITL write
+        and nothing ever reports that the containment a breach called for never
+        reached the queue. Losing it SILENTLY is the part that matters - a
+        containment that was never queued looks exactly like a breach that never
+        happened.
+
+        Registered LATE in the closer list so LIFO runs it EARLY, while the
+        database and event bus these tasks depend on are still open.
+        """
+        import asyncio
+
+        while self._containment_tasks:
+            pending = list(self._containment_tasks)
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    def _schedule_containment(
+        self, *, org_id: str, reason: str, principal_id: str
+    ) -> None:
+        """Fire a containment proposal WITHOUT blocking the spend denial.
+
+        SCHEDULED, NOT AWAITED, for two reasons:
+
+        1. Latency and blast radius. Awaiting would put a federation lookup, a
+           full agent execution, a `hitl_queue` write and an event publish inside
+           a call that has ALREADY failed. The caller is owed its spend denial
+           now, not after a second agent run finishes.
+        2. Re-entrancy. `propose_containment` calls
+           `AgentExecutionService.execute`, which can reach this very proxy
+           again. Doing that inside `_reserve_spend`'s exception handler would
+           nest an agent run inside another agent's failing tool call. Handing it
+           to the event loop keeps the two call stacks separate.
+
+           A runaway loop would still need the containment tool itself to be
+           spend-capable, which it is not - asserted by
+           `test_the_gcp_verb_is_not_spend_gated`. The trigger's per-org cooldown
+           is the second, independent guard: even if that assertion were ever
+           broken, the second breach inside the window proposes nothing.
+
+        Every failure is logged, never raised: a containment proposal that could
+        not be created must not also destroy the spend denial the caller needs to
+        receive. Silence here would be the real bug, so the done-callback below
+        exists specifically to make a failed proposal loud.
+        """
+        if self._containment is None:
+            return  # GCP not wired in this deployment; nothing to propose.
+
+        import asyncio
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:  # pragma: no cover - invoke() is always async
+            logger.warning("gcp.containment_not_scheduled_no_loop", extra={"org_id": org_id})
+            return
+
+        async def _propose() -> None:
+            assert self._containment is not None
+            outcome = await self._containment.propose_containment(
+                org_id=org_id, breach_reason=reason, user_id=principal_id,
+            )
+            # Logged at the level its meaning deserves: an actual queued
+            # containment is a warning-grade event, and so is a breach that could
+            # NOT be contained. Only the cooldown case is routine.
+            if outcome.status == "already_proposed":
+                logger.info(
+                    "gcp.containment_suppressed_by_cooldown",
+                    extra={"org_id": org_id, "status": outcome.status},
+                )
+            else:
+                logger.warning(
+                    "gcp.containment_auto_proposed",
+                    extra={
+                        "org_id": org_id,
+                        "status": outcome.status,
+                        "hitl_id": str(outcome.hitl_id) if outcome.hitl_id else None,
+                    },
+                )
+
+        task = loop.create_task(_propose())
+        self._containment_tasks.add(task)
+
+        def _done(t: Any) -> None:
+            self._containment_tasks.discard(t)
+            if t.cancelled():
+                return
+            exc = t.exception()
+            if exc is not None:
+                logger.error(
+                    "gcp.containment_proposal_task_failed",
+                    exc_info=exc,
+                    extra={"org_id": org_id},
+                )
+
+        task.add_done_callback(_done)
+
     async def _authorize_wif(
         self,
         *,
@@ -662,6 +790,22 @@ class ToolProxy:
                 governance_token_id=governance_token.token_id,
             )
         except CeilingExceeded as exc:
+            # THE AUTO-HOOK. A breached ceiling proposes a containment without
+            # anyone remembering to ask for one - enforcement that depends on a
+            # caller is not enforcement.
+            #
+            # Fired for BOTH ceiling dispositions on purpose. `hard_deny` and
+            # `defer_to_human` differ in what happens to THIS TOOL CALL; the
+            # ceiling was breached either way, and that is the fact a containment
+            # responds to. It is deliberately NOT fired for `EnvelopeNotFound` or
+            # any `ToolSpendUnavailable` below: those mean "we could not check",
+            # not "the customer is overspending", and acting on an unverified
+            # signal is how a safety control starts stopping healthy machines.
+            self._schedule_containment(
+                org_id=org_id,
+                reason=f"spend ceiling breached on {tool.tool_id}: {exc}",
+                principal_id=on_behalf_of.principal_id,
+            )
             raise await deny(
                 ToolSpendDeferredToHuman(str(exc)) if exc.defer_to_human
                 else ToolSpendHardDenied(str(exc))
