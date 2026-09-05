@@ -409,10 +409,10 @@ code.
 
 ## 2.4 - GitHub
 
-> **Section status: `[OWNER-DECISION-REQUIRED]` - architecture DECIDED below
+> **Section status: `[APPROVED]` - 2026-09-05 (owner). Architecture decided
 > (Q2.4a install scope, Q2.4b permission manifest + verb surface, Q2.4c ruleset
-> dependency + onboarding probe, Q2.4d credential shape, Q2.4e webhook ingress);
-> remainder is confirmation, not open design. Predecessor:
+> dependency + onboarding probe, Q2.4d credential shape) and Q2.4e (webhook
+> ingress for uninstall detection) decided below. Predecessor:
 > `docs/audits/audit_github_readiness.md` (`e4d2173`), empirically verified at
 > `99299dd`/`6ca81d4`. Depends additionally on 4.0 (Section 1.1 must be resolved).**
 
@@ -561,27 +561,40 @@ narrowest of the three, not the primary mechanism:
     §4.0's precondition order still applies (this section reads `[APPROVED]`
     before any migration is written and reviewed).
 
-- **Q2.4e `[OWNER-DECISION-REQUIRED]` Webhook ingress for uninstall detection -
-  net-new infrastructure, genuinely open.** A customer revokes access by
-  uninstalling the App; GitHub emits an `installation` webhook (`action: "deleted"`
-  or `"suspend"`). **No webhook ingress of any kind exists anywhere in this repo
-  today** - this is the single largest net-new piece of infrastructure a GitHub
-  connector requires, larger than the connector logic itself. Owner must decide
-  between:
-  1. **Webhook ingress** (recommended default) - new HTTP endpoint, signature
-     verification (`X-Hub-Signature-256`, HMAC over the platform's webhook
-     secret), and a tenant-resolution path from `installation.id` to `org_id`.
-     Fastest detection; the only option that catches an uninstall the moment it
-     happens rather than at the next call or next scheduled probe.
-  2. **Live-call-failure detection only** (the Notion pattern,
-     `src/skylize/tools/builtin/notion_tools.py:30-46`) - that file's own
-     description of this as "silent degradation" applies here with the same
-     force; not recommended as the sole mechanism.
-  3. **Periodic probe** (the WIF pattern, `app/gcp/probe.py`) - catches it
-     eventually, adds polling load, still not instant.
-  These are not mutually exclusive - a probe (Q2.4c) as the fallback and a
-  webhook as the fast path is a defensible combination, but the owner must pick
-  the floor, not have Skylize infer it.
+- **Q2.4e `[DECIDED]` Webhook ingress for uninstall detection, via the
+  `installation` webhook's `"deleted"` action - net-new infrastructure, decided
+  by the owner 2026-09-05.** A customer revokes access by uninstalling the App;
+  GitHub emits an `installation` webhook (`action: "deleted"` or `"suspend"`).
+  **No webhook ingress of any kind exists anywhere in this repo today** - this is
+  the single largest net-new piece of infrastructure a GitHub connector requires,
+  larger than the connector logic itself. Three options were presented; the owner
+  selected webhook ingress as the detection mechanism, not merely as a fast path
+  alongside a fallback probe:
+
+  1. **Webhook ingress - SELECTED.** A new HTTP endpoint receiving GitHub's
+     `installation` event, verified with `X-Hub-Signature-256` - HMAC-SHA256 over
+     the request body, keyed by the platform's webhook secret - reusing the
+     existing verification pattern already live in this codebase at
+     `src/skylize/services/obsidian_writer/app.py:81-91` (`_verify_hmac`,
+     `hmac.compare_digest` against `sha256=` + `hmac.new(secret, body,
+     sha256).hexdigest()`). This connector's implementation needs its own
+     tenant-resolution path from the webhook payload's `installation.id` to
+     `org_id` - `obsidian_writer`'s verifier has no notion of tenancy, so only the
+     signature-verification primitive is reused, not the endpoint itself. On
+     `action: "deleted"` or `"suspend"`, the connection's `connection_state`
+     (Q2.4c) is set to `revoked`, following the same "only an unambiguous
+     provider signal may write a terminal state" discipline
+     `app/credentials/oauth.py` and `app/gcp/probe.py` already establish - a
+     webhook delivery failure or an unrecognized `action` value must not be
+     treated as silence-implies-revoked.
+  2. Live-call-failure detection only (the Notion pattern,
+     `src/skylize/tools/builtin/notion_tools.py:30-46`) - **not selected** as the
+     sole mechanism; that file's own description of this as "silent degradation"
+     was the reason against it.
+  3. Periodic probe (the WIF pattern, `app/gcp/probe.py`) - **retained**, not as
+     the uninstall-detection mechanism itself but as Q2.4c's onboarding/health
+     check, which answers a different question (is a ruleset in place, not has the
+     App been uninstalled) and remains in scope unchanged.
 
 ---
 
@@ -1271,8 +1284,9 @@ reads `[APPROVED]` **and** the preconditions in 4.0 are met.
 - 2.4 GitHub (architecture Q2.4a/b/c/d decided - App install scope, permission
   manifest + verb surface [no delete-branch tool; PR merge HITL-gated by
   default], ruleset dependency + onboarding probe, third credential shape;
-  Q2.4e webhook ingress still OPEN, owner must pick the detection floor):
-  _______________________________________________________  (owner, date)
+  Q2.4e decided - webhook ingress via `installation` webhook `"deleted"` action,
+  reusing the existing HMAC-SHA256 `X-Hub-Signature-256` verification pattern):
+  Approved  2026-09-05  (owner)
 - 2.5 Google Drive (scope Q2.5a verified, write actions Q2.5b, governance
   narrative Q2.5c, and Decision Engine hook Q2.5d decided; Q2.5e out-of-scope list
   stands as recorded): Approved  2026-08-31  (owner)
