@@ -409,25 +409,179 @@ code.
 
 ## 2.4 - GitHub
 
-> **Section status: `[OWNER-DECISION-REQUIRED]`**
+> **Section status: `[OWNER-DECISION-REQUIRED]` - architecture DECIDED below
+> (Q2.4a install scope, Q2.4b permission manifest + verb surface, Q2.4c ruleset
+> dependency + onboarding probe, Q2.4d credential shape, Q2.4e webhook ingress);
+> remainder is confirmation, not open design. Predecessor:
+> `docs/audits/audit_github_readiness.md` (`e4d2173`), empirically verified at
+> `99299dd`/`6ca81d4`. Depends additionally on 4.0 (Section 1.1 must be resolved).**
 
-`[CODE-VERIFIED]` No GitHub integration code, no Octokit, no App manifest. The only
-`.github/` content is Skylize's own CI.
+`[CODE-VERIFIED]` No GitHub integration code, no Octokit/PyGithub/githubkit, no
+App manifest. The only `.github/` content is Skylize's own CI
+(`audit_github_readiness.md` A.3, re-verified 2026-09-05).
 
-- **Q2.4a `[OWNER-DECISION-REQUIRED]` Install scope.** Org-level GitHub App install
-  or per-repository? `[RESEARCH-SUGGESTED]` App, repo-selected at install time:
-  installation tokens are short-lived and per-installation, which suits
-  attenuation-only far better than a PAT.
-- **Q2.4b `[OWNER-DECISION-REQUIRED]` Which actions are gated.** Explicit per-verb
-  decision required for at minimum: push to a protected branch; branch deletion;
-  PR merge; release publication; secret or Actions-variable modification.
-  `[RESEARCH-SUGGESTED]` merge and protected-branch push defer to a human by
-  default; branch deletion and secret modification are hard-denied to agents.
-- **Q2.4c `[OWNER-DECISION-REQUIRED]` Interaction with existing branch protection.**
-  Requirement: a Skylize agent must **never** be granted bypass on the customer's
-  branch-protection rules. If GitHub refuses the action, that refusal stands and is
-  surfaced as a clean tool error - the connector must not hold an admin path around
-  it. Owner to confirm.
+**Architecture, in one paragraph.** GitHub is not "enable + gate" like Drive,
+Asana and Notion. It is three tiers, and Skylize-side runtime gating is the
+narrowest of the three, not the primary mechanism:
+
+- **Tier 1 - permission omission.** The App manifest never requests
+  `administration` or `secrets`. This makes repository deletion,
+  branch-protection/ruleset editing, collaborator changes, and secret/Actions-
+  variable modification **structurally impossible** - no gate exists to bypass
+  because the capability was never minted. `[LIVE-VERIFIED]` 2026-09-05,
+  `audit_github_readiness.md` C.3, E.2.
+- **Tier 2 - GitHub's own ruleset enforcement.** For push and force-push to a
+  branch a customer has protected, GitHub itself refuses the installation token
+  with `GH013` (git) / `HTTP 422` (REST) when the Skylize App is not a listed
+  bypass actor - proven live, not inferred. `[EMPIRICALLY VERIFIED]` 2026-09-05,
+  `audit_github_readiness.md` E.3.1: a real App installation token
+  (`contents: write`, no `administration`) was refused on normal push,
+  force-push, and REST `PATCH .../git/refs/... {"force":true}`, against a
+  ruleset with `bypass_actors: []`. A repository admin was refused identically -
+  rulesets grant admins no implicit bypass.
+- **Tier 3 - the narrow Skylize-side residue.** Only what Tiers 1-2 cannot cover:
+  branch deletion on an *unprotected* branch, and PR merge where the customer has
+  no "require a PR" rule. Decided per-verb below (Q2.4b), not left open.
+
+- **Q2.4a `[RESEARCH-SUGGESTED, RATIFY]` Install scope.** Org-level GitHub App
+  install, repo-selected at install time. Confirmed correct and for a stronger
+  reason than short lifetime: the installation-token mint call accepts
+  `permissions` and `repository_ids` parameters that narrow a token below the
+  installation's full grant, so Skylize's attenuation-only invariant
+  (`integration_inputs.md:33-36`) becomes **provider-enforced**, not merely a
+  Skylize-side discipline. `[LIVE-VERIFIED]` `audit_github_readiness.md` C.1-C.2.
+  Less ambiguous than Drive's org-vs-platform question was: an App installation
+  is inherently org/account-scoped with repository selection built into GitHub's
+  own install UI (`integration_inputs.md:196`).
+
+- **Q2.4b `[DECIDED]` Manifest permissions and verb surface, replacing the prior
+  "hard-deny via scope" framing.** The prior draft proposed branch deletion be
+  "hard-denied to agents" as a scope decision. **That is impossible and is
+  withdrawn.** `[LIVE-VERIFIED]` `audit_github_readiness.md` A.4 Defect 1:
+  `DELETE .../git/refs/{ref}` and `POST/PATCH .../git/refs` are the *same*
+  `contents: write` permission as branch creation and push - there is no
+  `contents: write-except-delete`. Same defect for PR merge (Defect 2):
+  `PUT .../pulls/{n}/merge` is also `contents: write`, not `pull_requests:write`.
+  Q2.4b is therefore reframed into three separable questions, each answered:
+
+  1. **Manifest permissions requested:** `contents: write`, `pull_requests: write`,
+     `metadata: read`. Nothing else. This is what makes Tier 1 real - `administration`
+     and `secrets` are never requested, so their verbs need no runtime gate.
+  2. **Verb surface Skylize registers as tools - DECIDED, verb-surface minimalism
+     over a runtime gate for branch deletion:** Skylize **never registers a
+     delete-branch tool**, on any branch, protected or not. The precedent is
+     already in this codebase: `tests/contract/test_stateless_agents_no_oauth_access.py:270-292`
+     asserts the GCP verb surface is *exactly* `["integration.gcp_stop_instance"]`
+     and warns against "adding an irreversible verb." An agent that has no
+     delete-branch tool cannot delete a branch regardless of what the token would
+     technically permit - cheaper and more auditable than a gate that "only exists
+     inside a function body [and] is one refactor from being skipped"
+     (`src/skylize/tools/base.py:159-160`). This closes the one verb Tier 1/2
+     leave open (`audit_github_readiness.md` E.3 "The residue," E.4) without any
+     new gate code. If a future pass needs branch deletion as a tool, it needs a
+     `ToolPermissionProfile`-style gate at that time - not before.
+  3. **PR merge - DECIDED, defer to a human by default:** merge is a routine
+     action an agent should eventually be trusted with, so verb-surface omission
+     is the wrong tool here (customers want agents opening AND landing PRs
+     eventually). Skylize registers a merge verb but it is **HITL-gated by
+     default**, same posture as the GCP stop verb's `hitl_id` requirement
+     (`src/skylize/tools/builtin/gcp_tools.py:126-130`). This is a default, not a
+     structural impossibility like Tier 1's verbs - unlike branch deletion, merge
+     cannot be made impossible by simply not building a tool, because the whole
+     point of a PR-based workflow is that merge is the intended terminal action.
+  4. **Release publication:** rides on `contents: write` (`audit_github_readiness.md`
+     E.2 table) and is out of scope for this pass - no release-publish tool is
+     registered. Revisit if a future pass adds one.
+
+- **Q2.4c `[DECIDED]` Interaction with existing branch protection, plus a new
+  onboarding precondition.** Requirement unchanged and reaffirmed: a Skylize
+  agent must **never** be granted bypass on the customer's ruleset/branch-protection
+  rules; a GitHub refusal stands and surfaces as a clean tool error; the connector
+  holds no admin path around it (`administration` is never requested - Tier 1
+  makes this structural, not merely a promise).
+
+  **New this pass - the dependency Tier 2 has on the CUSTOMER's own configuration,
+  and how Skylize detects its absence.** Tier 2 protection exists only if the
+  customer has actually put a ruleset (or classic protection) on their protected
+  branches and left the Skylize App off the bypass list. A customer with no
+  ruleset on `main` gets **zero** Tier 2 protection, and `contents: write` alone
+  then permits a direct push to `main` - not a defect in this design, but a
+  precondition that must be probed and surfaced, never silently assumed
+  (`audit_github_readiness.md` Q-NEW-2 follow-on). Modelled on the
+  `gcp_wif_connections` health-probe pattern (migration 0024, `app/gcp/probe.py`),
+  simplified because GitHub's check is one layer, not two:
+
+  | `connection_state` | Meaning | Remedy |
+  |---|---|---|
+  | `unverified` | Installed, never successfully probed | finish onboarding |
+  | `protected` | Probe confirmed >=1 ruleset/protection rule covers a branch the org will govern, and the Skylize App is not a listed bypass actor | none - Tier 2 is live |
+  | `unprotected` | Installation is healthy but the target branch carries no ruleset/protection at all | customer must add branch protection; Skylize's guarantee reduces to Tier 1 only until they do |
+  | `bypass_granted` | A ruleset exists but lists the Skylize App (or a team/role the App inherits) as a bypass actor | customer must remove the Skylize App from bypass actors |
+  | `revoked` | Installation uninstalled or suspended (see Q2.4e) | customer reinstalls |
+
+  A transient probe failure (network fault, GitHub 5xx) records the attempt but
+  must **never** overwrite an existing terminal state, per the discipline
+  `app/credentials/oauth.py`'s `_classify_failure` and `probe.py`'s "a transient
+  failure never overwrites a good state" already establish for OAuth and WIF.
+  `unprotected` and `bypass_granted` are read states, not errors - the connector
+  functions in either, just without the Tier 2 guarantee, and the org's dashboard
+  must say so plainly rather than implying full protection exists.
+
+- **Q2.4d `[DECIDED]` Credential shape - a third pattern, not `oauth_credentials`,
+  not a copy of `gcp_wif_connections`.** `[CODE-VERIFIED against 0021 and 0024]`
+  `audit_github_readiness.md` D.2-D.5. GitHub's flow rhymes with WIF (platform
+  key signs a short-lived assertion, no token persisted, no refresh token) but
+  differs in the one place that matters for schema shape: the App private key is
+  **App-level, shared across every tenant's installation** - not a per-tenant
+  secret the way a WIF connection's trust relationship is per-tenant. Concretely:
+
+  - The App private key is a **platform-level secret**, resolved once at
+    composition time in the shape of `resolve_credential_encryption_key`
+    (`bootstrap.py:95`) / `resolve_slack_notifier_config` (`bootstrap.py:160`) -
+    **not** a new per-tenant table column, and **not** `org_credentials`.
+  - The per-tenant row needed is small: `org_id`, `installation_id`,
+    `account_login`, selected-repository list (or "all"), plus the
+    `connection_state`/probe columns from Q2.4c above. **No encrypted column and
+    no `key_id`** - `installation_id` is not a secret (same argument
+    `0024:48-53` makes for `issuer_slug`: "possession of the URL grants nothing -
+    only the signing key mints tokens"; here, possession of the installation id
+    grants nothing without the platform's App private key).
+  - This is a **new table**, structurally modelled on `gcp_wif_connections`'
+    decisions (`(org_id, label)` identity cardinality, `tenant_isolation` RLS
+    ENABLE + FORCE, `skylize_app` grant, exclusion from migration 0002's
+    cross-tenant carve-out) but smaller - GitHub has no customer-typed IAM
+    config to store, since the trust is established by GitHub's own install UI,
+    not assembled from customer input (`audit_github_readiness.md` D.4.1).
+  - Reusing `oauth_credentials` is **ruled out**, not merely disfavoured: an
+    installation token has no refresh token (permanently NULL
+    `encrypted_refresh_token`) and is never persisted (no honest value for
+    `encrypted_access_token`) - the identical defect `0024:14-32` already
+    documented for WIF, now confirmed to apply to GitHub with the same force.
+  - Migration for this table is **not part of this pass** - `integration_inputs.md`
+    §4.0's precondition order still applies (this section reads `[APPROVED]`
+    before any migration is written and reviewed).
+
+- **Q2.4e `[OWNER-DECISION-REQUIRED]` Webhook ingress for uninstall detection -
+  net-new infrastructure, genuinely open.** A customer revokes access by
+  uninstalling the App; GitHub emits an `installation` webhook (`action: "deleted"`
+  or `"suspend"`). **No webhook ingress of any kind exists anywhere in this repo
+  today** - this is the single largest net-new piece of infrastructure a GitHub
+  connector requires, larger than the connector logic itself. Owner must decide
+  between:
+  1. **Webhook ingress** (recommended default) - new HTTP endpoint, signature
+     verification (`X-Hub-Signature-256`, HMAC over the platform's webhook
+     secret), and a tenant-resolution path from `installation.id` to `org_id`.
+     Fastest detection; the only option that catches an uninstall the moment it
+     happens rather than at the next call or next scheduled probe.
+  2. **Live-call-failure detection only** (the Notion pattern,
+     `src/skylize/tools/builtin/notion_tools.py:30-46`) - that file's own
+     description of this as "silent degradation" applies here with the same
+     force; not recommended as the sole mechanism.
+  3. **Periodic probe** (the WIF pattern, `app/gcp/probe.py`) - catches it
+     eventually, adds polling load, still not instant.
+  These are not mutually exclusive - a probe (Q2.4c) as the fallback and a
+  webhook as the fast path is a defensible combination, but the owner must pick
+  the floor, not have Skylize infer it.
 
 ---
 
@@ -1114,7 +1268,11 @@ reads `[APPROVED]` **and** the preconditions in 4.0 are met.
   Q2.1i still open - see `stripe_connector_design.md`): ___  (owner, date)
 - 2.2 AWS / GCP: _______________________________________  (owner, date)
 - 2.3 Slack: Approved as post-only HITL notifier (2.3 above)  2026-08-28  (owner)
-- 2.4 GitHub: __________________________________________  (owner, date)
+- 2.4 GitHub (architecture Q2.4a/b/c/d decided - App install scope, permission
+  manifest + verb surface [no delete-branch tool; PR merge HITL-gated by
+  default], ruleset dependency + onboarding probe, third credential shape;
+  Q2.4e webhook ingress still OPEN, owner must pick the detection floor):
+  _______________________________________________________  (owner, date)
 - 2.5 Google Drive (scope Q2.5a verified, write actions Q2.5b, governance
   narrative Q2.5c, and Decision Engine hook Q2.5d decided; Q2.5e out-of-scope list
   stands as recorded): Approved  2026-08-31  (owner)
