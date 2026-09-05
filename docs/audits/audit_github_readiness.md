@@ -401,6 +401,24 @@ bypass. The first version of this audit therefore recorded the claim as a flagge
 inference and refused to build on it. **It has since been tested live and it holds
 — see E.3.1 below for the full method and results.**
 
+**Now verified, the property is exactly what the CFO Test needs**, and it is
+enforced by GitHub, not by Skylize: with `main` covered by a ruleset (restrict
+updates + block force pushes + require a PR) and the Skylize App **not** a bypass
+actor, a push to `main` is refused at GitHub no matter what the agent, the model,
+or a bug in Skylize's gate attempts. Per E.3.1 the observed refusals are `GH013`
+at the git layer and `HTTP 422 "Repository rule violations found"` at the REST
+layer — not the `403` this audit's first draft guessed at, and the real status
+codes are worth knowing for whoever writes the error-surfacing path Q2.4c
+requires. §2.4's Q2.4c (`:427-432`) already states that requirement correctly and
+this audit endorses it unchanged — and E.2 makes it structural, since weakening
+the ruleset needs `administration`.
+
+**The residue.** `contents: write` still permits deleting *unprotected* branches
+and merging PRs on unprotected branches. "Restrict deletions" is per-pattern, so
+it only covers branches matching a configured pattern. Closing the residue means
+either a broad-pattern ruleset in the customer's repo (a customer configuration
+dependency Skylize cannot guarantee) or Tier 3.
+
 ### E.3.1 `[EMPIRICALLY VERIFIED 2026-09-05]` Live test — App installation token vs a zero-bypass-actor ruleset
 
 **Verdict: a GitHub App installation token with `contents: write` CANNOT bypass a
@@ -512,23 +530,6 @@ needs a human to register it in the web UI and hand over the app id + private
 key.** Automation cannot self-provision one. This is also a real onboarding fact
 for the eventual product: Skylize registers its App once, manually, and customers
 only *install* it.
-
-**Now verified, the property is exactly what the CFO Test needs**, and it is
-enforced by GitHub, not by Skylize: with `main` covered by a ruleset (restrict
-updates + block force pushes + require a PR) and the Skylize App **not** a bypass
-actor, a push to `main` is refused at GitHub no matter what the agent, the model,
-or a bug in Skylize's gate attempts. Per E.3.1 the observed refusals are `GH013`
-at the git layer and `HTTP 422 "Repository rule violations found"` at the REST
-layer (not the `403` this audit's first draft guessed at — the status code is
-worth knowing for whoever writes the error-surfacing path Q2.4c requires). §2.4's Q2.4c (`:427-432`) already states this
-requirement correctly and this audit endorses it unchanged — and E.2 makes it
-structural, since weakening the ruleset needs `administration`.
-
-**The residue.** `contents: write` still permits deleting *unprotected* branches
-and merging PRs on unprotected branches. "Restrict deletions" is per-pattern, so
-it only covers branches matching a configured pattern. Closing the residue means
-either a broad-pattern ruleset in the customer's repo (a customer configuration
-dependency Skylize cannot guarantee) or Tier 3.
 
 ### E.4 Tier 3 — Skylize-side gate (weakest; the true remaining scope)
 
