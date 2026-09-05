@@ -46,6 +46,33 @@ blocks on one is not.
 The explicit entry point survives unchanged for operators and for tests: this is
 still an ordinary method anyone may call.
 
+DUPLICATE SUPPRESSION IS A DURABLE, CROSS-REPLICA CLAIM - NOT AN IN-PROCESS TIMER
+----------------------------------------------------------------------------------
+A runaway agent breaches its ceiling on EVERY subsequent tool call, so without
+suppression the auto-hook would queue one "stop this VM" approval per breach -
+burying the reviewer in duplicates at exactly the moment they need to act fast.
+An earlier version of this module suppressed that with a Python dict keyed by
+`(org_id, label)`, timed out after a fixed window. That dict lives in ONE
+process: two replicas each observing a breach for the same org inside the window
+each saw "no proposal pending" and each queued one. Bounded, but not correct
+under horizontal scaling.
+
+`GcpContainmentClaimRepository` (dal/gcp_containment.py, migration 0025) replaces
+it with a row in Postgres, claimed via `INSERT ... ON CONFLICT (org_id, label)`
+BEFORE `execute()` is ever called. Of two replicas racing the same breach,
+Postgres itself resolves the conflicting write to exactly one winner - "the
+guarantee lives in SQL, not in Python", the same reasoning `spend_reservation`'s
+unique constraint already rests on (app/principal/spend.py's `_RESERVE_SQL`
+docstring). The loser never calls `execute()` at all, so there is no duplicate
+`hitl_queue` row to reject, not merely a duplicate the reviewer is spared from
+seeing.
+
+The claim releases itself the moment a human decides - not after a fixed
+timeout - because staleness is checked by JOINING the claimed `hitl_id` against
+`hitl_queue.status` (migration 0025's docstring has the exact predicate). A
+ten-second decision unblocks the org in ten seconds; nothing here waits out an
+arbitrary window once the real signal is available.
+
 WHAT IT REFUSES TO PROPOSE, AND WHY EACH REFUSAL IS ITS OWN OUTCOME
 --------------------------------------------------------------------
 `propose_containment` returns a typed outcome rather than raising, because "no
@@ -59,23 +86,33 @@ an overspend needs to know which one:
                                            moment a human clicks it
   * no enabled targets                  -> the customer federated a project but
                                            listed no machine as stoppable
+  * a containment is already pending    -> the durable claim above; nothing new
+                                           is queued
   * proposed                            -> a HITL row now exists
 
 The second is the one worth dwelling on. The probe (23d339c) exists so that a
 broken trust is known BEFORE it is needed; checking it here means an operator
 learns "your federation is misconfigured" while looking at the overspend, rather
 than discovering it after approving a containment that then fails.
+
+THE WIF CHECKS RUN BEFORE THE CLAIM ATTEMPT, DELIBERATELY. A breach that finds no
+connection, a broken trust, or no targets never claims the slot at all - those
+are conditions an operator may fix within any window, and the very next breach
+must be free to propose once they have. Claiming, then releasing on those same
+early exits, would work too, but would briefly (and pointlessly) contend the row
+against a concurrent breach that might otherwise have gone on to claim and
+succeed.
 """
 
 from __future__ import annotations
 
 import logging
-import time
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 from uuid import UUID
 
+from ...dal.gcp_containment import GcpContainmentClaimRepository
 from ...dal.gcp_wif import GcpWifRepository
 
 log = logging.getLogger("skylize.gcp.trigger")
@@ -85,13 +122,14 @@ log = logging.getLogger("skylize.gcp.trigger")
 #: the executor would be letting a caller choose how much authority to use.
 EXECUTOR_AGENT_ID = "infrastructure_executor"
 
-#: How long after proposing a containment for an org this trigger refuses to
-#: propose another. A runaway agent breaches its ceiling on EVERY subsequent tool
-#: call, and without this the auto-hook would queue one "stop this VM" approval
-#: per breach - burying the reviewer in identical decisions at exactly the moment
-#: they need to make one quickly. Five minutes is well beyond a burst and well
-#: inside any human response time.
-PROPOSAL_COOLDOWN = timedelta(minutes=5)
+#: Crash-recovery BACKSTOP ONLY, not the steady-state suppression mechanism. A
+#: claim with no recorded `hitl_id` means the claimant died between reserving
+#: the slot and learning the ticket `execute()` produced (or never producing
+#: one) - the ONLY case a stuck slot can arise, since every other exit path
+#: (`AgentDeferredToHuman`, any other exception) explicitly records or releases
+#: before returning. Two minutes is generous against how long `execute()`
+#: normally takes and tight enough that a crash cannot wedge an org for long.
+CLAIM_CRASH_TIMEOUT = timedelta(minutes=2)
 
 ProposalStatus = Literal[
     "proposed",
@@ -138,22 +176,13 @@ class SpendCeilingContainmentTrigger:
         *,
         wif_repo: GcpWifRepository,
         execution: Any,
-        cooldown: timedelta = PROPOSAL_COOLDOWN,
+        claims: GcpContainmentClaimRepository,
+        crash_timeout: timedelta = CLAIM_CRASH_TIMEOUT,
     ) -> None:
         self._wif_repo = wif_repo
         self._execution = execution
-        self._cooldown_seconds = cooldown.total_seconds()
-        # (org_id, label) -> monotonic timestamp of the last accepted proposal.
-        #
-        # IN-PROCESS, and the limitation is deliberate rather than overlooked.
-        # It suppresses the case that actually happens - one runaway agent on one
-        # replica breaching repeatedly in seconds - with no query and no shared
-        # state. It does NOT coordinate across replicas, so two replicas that
-        # each see a breach inside the window can each propose once. That is a
-        # bounded, visible duplicate (two queue rows a human can read and reject)
-        # rather than a flood, and fixing it properly means a durable check
-        # against `hitl_queue`, which is a real design step and not this pass's.
-        self._last_proposed: dict[tuple[str, str], float] = {}
+        self._claims = claims
+        self._crash_timeout = crash_timeout
 
     async def propose_containment(
         self,
@@ -169,16 +198,6 @@ class SpendCeilingContainmentTrigger:
         stops anything itself: the return value's best case is a QUEUED HUMAN
         DECISION, never a completed action.
         """
-        if self._within_cooldown(org_id, label):
-            return ContainmentProposal(
-                status="already_proposed",
-                detail=(
-                    f"a containment for org {org_id!r} was proposed within the "
-                    f"last {self._cooldown_seconds:.0f}s and is presumably still "
-                    "awaiting a human; not queueing a duplicate"
-                ),
-            )
-
         row = await self._wif_repo.get(org_id, label)
         if row is None:
             return ContainmentProposal(
@@ -213,6 +232,23 @@ class SpendCeilingContainmentTrigger:
                 ),
             )
 
+        # THE ATOMIC GATE. Of any number of concurrent callers reaching this
+        # line for the same (org_id, label), Postgres's own conflict resolution
+        # on the PRIMARY KEY guarantees at most one gets True - see
+        # dal/gcp_containment.py and migration 0025.
+        stale_before = datetime.now(timezone.utc) - self._crash_timeout
+        claimed = await self._claims.try_claim(
+            org_id=org_id, label=label, stale_before=stale_before,
+        )
+        if not claimed:
+            return ContainmentProposal(
+                status="already_proposed",
+                detail=(
+                    f"a containment for org {org_id!r} is already pending a human "
+                    "decision; not queueing a duplicate"
+                ),
+            )
+
         # One target per proposal, deliberately. A human approving a containment
         # must be approving a NAMED machine, not a batch whose membership was
         # decided by this code. Multiple machines mean multiple proposals and
@@ -237,6 +273,13 @@ class SpendCeilingContainmentTrigger:
             # THE EXPECTED PATH. The executor contract carries
             # FIRST_EXTERNAL_LAUNCH, so the gate defers every time and the
             # hitl_queue row is already durable when this is raised.
+            #
+            # Recording the ticket is what lets a LATER breach's staleness check
+            # find it and release the slot the moment a human decides, rather
+            # than waiting out the crash backstop.
+            await self._claims.record_hitl_id(
+                org_id=org_id, label=label, hitl_id=deferred.hitl_id,
+            )
             log.warning(
                 "gcp.containment_proposed",
                 extra={
@@ -247,7 +290,6 @@ class SpendCeilingContainmentTrigger:
                     "instance": target.instance_name,
                 },
             )
-            self._last_proposed[(org_id, label)] = time.monotonic()
             return ContainmentProposal(
                 status="proposed",
                 detail=(
@@ -265,6 +307,13 @@ class SpendCeilingContainmentTrigger:
             # registry that does not hold the executor. Reported, never retried
             # here: a containment that silently retries is a containment nobody
             # is supervising.
+            #
+            # Released IMMEDIATELY rather than left for the crash backstop to
+            # expire: this was not a crash, it was a clean failure, and the next
+            # breach should be free to try again as soon as whatever broke is
+            # fixed - not stuck behind a timer measuring a crash that never
+            # happened.
+            await self._claims.release(org_id=org_id, label=label)
             log.error(
                 "gcp.containment_proposal_failed",
                 extra={"org_id": org_id, "error": type(exc).__name__},
@@ -279,6 +328,7 @@ class SpendCeilingContainmentTrigger:
         # impossible. Treated as a defect rather than a success: this action must
         # never execute without a human, so an unexpected approval is reported
         # instead of being quietly accepted.
+        await self._claims.release(org_id=org_id, label=label)
         return ContainmentProposal(
             status="execution_unavailable",
             detail=(
@@ -288,17 +338,3 @@ class SpendCeilingContainmentTrigger:
                 "human_in_loop_triggers."
             ),
         )
-
-    def _within_cooldown(self, org_id: str, label: str) -> bool:
-        """True when this org had a containment proposed too recently.
-
-        Only an ACCEPTED proposal starts the clock (the stamp is written on the
-        deferred branch), so a breach that found no connection, a broken trust,
-        or no targets does not suppress the next one - those are conditions an
-        operator may fix within the window, and the next breach should be free to
-        propose once they have.
-        """
-        last = self._last_proposed.get((org_id, label))
-        if last is None:
-            return False
-        return (time.monotonic() - last) < self._cooldown_seconds

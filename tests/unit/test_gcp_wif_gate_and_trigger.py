@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 import pytest
 
 from skylize.app.gcp.trigger import SpendCeilingContainmentTrigger
+from skylize.dal.gcp_containment import InMemoryGcpContainmentClaimRepository
 from skylize.dal.gcp_wif import (
     GcpWifConnectionRow,
     GcpWifTargetRow,
@@ -197,7 +198,10 @@ class _Execution:
 
 
 async def _trigger(repo, execution):
-    return SpendCeilingContainmentTrigger(wif_repo=repo, execution=execution)
+    return SpendCeilingContainmentTrigger(
+        wif_repo=repo, execution=execution,
+        claims=InMemoryGcpContainmentClaimRepository(),
+    )
 
 
 @pytest.mark.asyncio

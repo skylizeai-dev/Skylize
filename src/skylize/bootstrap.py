@@ -54,6 +54,7 @@ from .contracts.registry import MVP_REGISTRY
 from .dal.credentials import CredentialRepository
 from .dal.oauth_credentials import OAuthCredentialRepository
 from .dal.gcp_wif import GcpWifRepository
+from .dal.gcp_containment import GcpContainmentClaimRepository
 from .app.gcp.keys import WifSigningKey, load_wif_signing_key
 from .app.gcp.trigger import SpendCeilingContainmentTrigger
 from .dal.permission_grants import PermissionGrantRepository
@@ -469,6 +470,10 @@ async def build_container(settings: Settings | None = None) -> Container:
         oauth_credential_repo = InMemoryOAuthCredentialRepository()
         from .dal.gcp_wif import InMemoryGcpWifRepository
         wif_repo: GcpWifRepository = InMemoryGcpWifRepository()
+        from .dal.gcp_containment import InMemoryGcpContainmentClaimRepository
+        gcp_claims: GcpContainmentClaimRepository = (
+            InMemoryGcpContainmentClaimRepository()
+        )
         permission_grant_repo = InMemoryPermissionGrantRepository()
         broadcast = InMemoryGovernanceBroadcast()
         hitl_repo = InMemoryHitlQueueRepository()
@@ -514,6 +519,8 @@ async def build_container(settings: Settings | None = None) -> Container:
         oauth_credential_repo = PgOAuthCredentialRepository(db)
         from .dal.gcp_wif import PgGcpWifRepository
         wif_repo = PgGcpWifRepository(db)
+        from .dal.gcp_containment import PgGcpContainmentClaimRepository
+        gcp_claims = PgGcpContainmentClaimRepository(db)
         permission_grant_repo = PgPermissionGrantRepository(db)
         capital_repo = PgCapitalRepository(db)
         processed_store = PgProcessedEventStore(db)
@@ -843,7 +850,7 @@ async def build_container(settings: Settings | None = None) -> Container:
     gcp_containment: SpendCeilingContainmentTrigger | None = None
     if wif_repo is not None and gcp_executor_factory is not None:
         gcp_containment = SpendCeilingContainmentTrigger(
-            wif_repo=wif_repo, execution=agent_execution,
+            wif_repo=wif_repo, execution=agent_execution, claims=gcp_claims,
         )
         # THE ONE DEFERRED ASSIGNMENT THAT CLOSES THE LOOP, and the only line in
         # this file that had to move for the auto-hook.

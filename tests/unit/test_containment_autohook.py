@@ -10,12 +10,13 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from skylize.app.principal.errors import CeilingExceeded, EnvelopeNotFound
 from skylize.app.gcp.trigger import SpendCeilingContainmentTrigger
+from skylize.dal.gcp_containment import InMemoryGcpContainmentClaimRepository
 from skylize.dal.gcp_wif import InMemoryGcpWifRepository
 from skylize.tools.base import (
     ToolSpendDeferredToHuman,
@@ -269,9 +270,9 @@ async def test_the_task_is_strongly_referenced_until_it_finishes() -> None:
 async def test_a_burst_of_breaches_queues_exactly_one_containment() -> None:
     """A runaway agent breaches on EVERY subsequent call.
 
-    Without the cooldown the reviewer would get one identical "stop this VM"
-    approval per breach, at exactly the moment they need to make one decision
-    quickly.
+    Without the durable claim the reviewer would get one identical "stop this
+    VM" approval per breach, at exactly the moment they need to make one
+    decision quickly.
     """
     repo = InMemoryGcpWifRepository()
 
@@ -286,7 +287,10 @@ async def test_a_burst_of_breaches_queues_exactly_one_containment() -> None:
             raise AgentDeferredToHuman(hitl_id=uuid.uuid4(), reason="deferred")
 
     execution = _Execution()
-    trigger = SpendCeilingContainmentTrigger(wif_repo=repo, execution=execution)
+    trigger = SpendCeilingContainmentTrigger(
+        wif_repo=repo, execution=execution,
+        claims=InMemoryGcpContainmentClaimRepository(),
+    )
 
     from datetime import datetime, timezone
 
@@ -322,10 +326,12 @@ async def test_a_burst_of_breaches_queues_exactly_one_containment() -> None:
 
 @pytest.mark.asyncio
 async def test_a_failed_proposal_does_not_start_the_cooldown() -> None:
-    """Only an ACCEPTED proposal suppresses the next one.
+    """A breach that never reaches the claim step never blocks the next one.
 
     A breach that found no federation should not stop the next breach from
-    proposing once an operator has connected one.
+    proposing once an operator has connected one. The WIF checks run BEFORE the
+    durable claim is even attempted, so no row is ever written for this case -
+    there is nothing that could suppress a later breach.
     """
     repo = InMemoryGcpWifRepository()
 
@@ -334,7 +340,8 @@ async def test_a_failed_proposal_does_not_start_the_cooldown() -> None:
             raise AssertionError("should not execute without a connection")
 
     trigger = SpendCeilingContainmentTrigger(
-        wif_repo=repo, execution=_Execution(), cooldown=timedelta(minutes=5),
+        wif_repo=repo, execution=_Execution(),
+        claims=InMemoryGcpContainmentClaimRepository(),
     )
     first = await trigger.propose_containment(
         org_id="org_a", breach_reason="b", user_id="u1")
@@ -348,13 +355,26 @@ async def test_a_failed_proposal_does_not_start_the_cooldown() -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_cooldown_is_per_org() -> None:
-    """One org's containment must not suppress another's."""
-    repo = InMemoryGcpWifRepository()
-    trigger = SpendCeilingContainmentTrigger(wif_repo=repo, execution=object())
-    trigger._last_proposed[("org_a", "")] = __import__("time").monotonic()
-    assert trigger._within_cooldown("org_a", "") is True
-    assert trigger._within_cooldown("org_b", "") is False
+async def test_the_claim_is_per_org() -> None:
+    """One org's containment must not suppress another's.
+
+    Exercised at the repository level - `SpendCeilingContainmentTrigger` no
+    longer keeps any cooldown state of its own to poke at; the durable claim
+    (dal/gcp_containment.py) is the sole source of truth, and its key is
+    `(org_id, label)`.
+    """
+    claims = InMemoryGcpContainmentClaimRepository()
+    stale_before = datetime.now(timezone.utc) - timedelta(minutes=5)
+
+    assert await claims.try_claim(
+        org_id="org_a", label="", stale_before=stale_before) is True
+    # org_a is now claimed and NOT stale (just claimed) - a second attempt for
+    # the SAME org must refuse.
+    assert await claims.try_claim(
+        org_id="org_a", label="", stale_before=stale_before) is False
+    # A DIFFERENT org must be entirely unaffected.
+    assert await claims.try_claim(
+        org_id="org_b", label="", stale_before=stale_before) is True
 
 
 @pytest.mark.asyncio
