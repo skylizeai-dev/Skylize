@@ -6,6 +6,10 @@
 > **Date:** 2026-09-05
 > **Live-doc verification date:** all `[LIVE-VERIFIED]` claims below were fetched
 > from docs.github.com on **2026-09-05**.
+> **Live EMPIRICAL verification:** Q-NEW-2 was tested against a real GitHub
+> repository and a real GitHub App installation token on **2026-09-05** — see
+> **E.3.1**. Result: `[VERIFIED — Apps cannot bypass]`. The Tier 2 architecture
+> stands.
 > **Prior art followed:** `docs/audits/audit_gdrive_readiness.md`,
 > `docs/audits/audit_notion_asana_readiness.md`.
 
@@ -16,6 +20,8 @@
 | STOP if §2.4's `[APPROVED]` status rests on content live docs now contradict | **NOT TRIPPED.** §2.4 is not approved — see A.1. No stale approval exists to be honoured or revoked. |
 | STOP if GitHub's credential model is incompatible with BOTH `oauth_credentials` and the WIF table | **PARTIALLY TRIPPED — presented as a third-shape question, not force-fitted.** See D. The shape is a genuine third one, but it is a *hybrid* that borrows from both, not an unprecedented one. Owner decision **Q-NEW-3** in F. |
 | No code / migration / `integration_inputs.md` content written | **HELD.** This file is the only artifact. |
+| *(2026-09-05 verification pass)* STOP if no GitHub account/App/test repo available for a real test | **PARTIALLY TRIPPED, REPORTED, THEN WORKED AROUND WITHOUT SIMULATING.** No bespoke App could be registered (E.3.2, a hard GitHub API limitation), and branch enforcement is paywalled on private repos for this free account. The test was run instead against a **genuine App installation token** (Actions' `GITHUB_TOKEN`, identity proven two ways in E.3.1) on a user-authorized public probe repo. Nothing was assumed or simulated. |
+| *(2026-09-05 verification pass)* No Skylize connector code written regardless of outcome | **HELD.** Only this audit file changed. |
 
 ---
 
@@ -389,19 +395,132 @@ https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-
 bypass may be granted to "users with a **certain role, such as repository
 administrator, or it can be specific teams or GitHub Apps.**"
 
-**Inference, flagged as such — NOT quoted fact.** Neither page states in so many
-words that rulesets apply to a GitHub App that has *not* been granted bypass. The
-strong inference is that they do: GitHub Apps are an explicitly enumerated
-bypass-actor category, and a bypass grant for apps would be meaningless if rules
-did not otherwise bind them. This inference is load-bearing for the whole Tier 2
-design, so it must be **empirically confirmed against a live repository before any
-code is written** — not accepted from this audit. Recorded as **Q-NEW-2** in F.
+**Originally an inference — NOW EMPIRICALLY VERIFIED.** Neither doc page states in
+so many words that rulesets apply to a GitHub App that has *not* been granted
+bypass. The first version of this audit therefore recorded the claim as a flagged
+inference and refused to build on it. **It has since been tested live and it holds
+— see E.3.1 below for the full method and results.**
 
-If confirmed, the property is exactly what the CFO Test needs and it is enforced
-by GitHub, not by Skylize: with `main` covered by a ruleset (restrict updates +
-block force pushes + require a PR) and the Skylize App **not** a bypass actor, a
-push to `main` fails at GitHub with a 403 no matter what the agent, the model, or
-a bug in Skylize's gate attempts. §2.4's Q2.4c (`:427-432`) already states this
+### E.3.1 `[EMPIRICALLY VERIFIED 2026-09-05]` Live test — App installation token vs a zero-bypass-actor ruleset
+
+**Verdict: a GitHub App installation token with `contents: write` CANNOT bypass a
+ruleset that lists no bypass actors. Blocked at both the git layer and the REST
+API layer, for normal push, force-push, and branch deletion. The Tier 2
+architecture stands.**
+
+**Environment.** Account `skylizeai-dev` (GitHub free, type `User`, no orgs).
+Disposable public repository `skylizeai-dev/ruleset-bypass-probe`, created for
+this test and containing nothing else.
+
+**Note on why the repo is public.** Both enforcement mechanisms are paywalled on
+private repositories for a free User account. Verified empirically — ruleset
+creation and classic branch protection each returned the identical error:
+
+```
+HTTP 403 {"message":"Upgrade to GitHub Pro or make this repository public
+to enable this feature."}
+```
+
+So a public repo was the only way to exercise *any* branch enforcement on this
+account. This is a limitation of the test account, not of GitHub's model.
+
+**Ruleset under test** (id `22342290`), as stored and read back from GitHub:
+
+```json
+{"id":22342290,"name":"probe-zero-bypass","target":"branch",
+ "enforcement":"active","bypass_actors":[],
+ "current_user_can_bypass":"never",
+ "rules":["update","deletion","non_fast_forward"],
+ "conditions":{"ref_name":{"include":["refs/heads/protected-probe"],"exclude":[]}}}
+```
+
+`bypass_actors` is empty — the strictest possible configuration. Note GitHub's own
+computed field `current_user_can_bypass: "never"`, i.e. GitHub agrees the
+repository owner has no bypass path.
+
+**PROOF the token was a genuine GitHub App installation token, not a PAT or a user
+token.** The test used GitHub Actions' `GITHUB_TOKEN`, which is an installation
+access token for the first-party `github-actions` App. Two probes inside the run
+establish this positively rather than by assertion:
+
+| Probe | Result | What it proves |
+|---|---|---|
+| `GET /installation/repositories` | **HTTP 200**, `total_count: 1`, `repository_selection: "selected"` | This endpoint is valid **only** for an App installation access token. A PAT or OAuth user token cannot call it. |
+| `GET /user` | **HTTP 403** `"Resource not accessible by integration"` | The token is an *integration* (App), not a user. GitHub's own error wording. |
+
+The runner also logged the token's permission set for the job:
+`Contents: write`, `Metadata: read` — precisely the grant C.2/E.3 contemplates for
+a Skylize GitHub App, and deliberately no `administration`.
+
+**Results — four attempts, all against `refs/heads/protected-probe`:**
+
+| # | Actor | Attempt | Result |
+|---|---|---|---|
+| **B1** | App installation token | `git push` (normal, fast-forward) | **BLOCKED.** `remote: error: GH013: Repository rule violations found` / `- Cannot update this protected ref.` exit 1 |
+| **B2** | App installation token | `git push --force` | **BLOCKED.** Same `GH013` / `Cannot update this protected ref.` exit 1 |
+| **B3** | App installation token | `PATCH /repos/.../git/refs/heads/protected-probe` with `{"force":true}` | **BLOCKED.** `HTTP 422` `"Repository rule violations found\n\nCannot update this protected ref."` |
+| **B4** | App installation token | `DELETE /repos/.../git/refs/heads/protected-probe` | **BLOCKED.** `HTTP 422` `"Repository rule violations found\n\nCannot delete this branch"` |
+
+**B3 is the most important row for Skylize.** A connector would never shell out to
+`git`; it would call the REST API. B3 and B4 prove the ruleset is enforced at the
+REST layer too, with `force: true` explicitly set — so enforcement is a property of
+the ref-update path itself, not of the git transport.
+
+**Control group — the same ruleset against a repository ADMIN (user actor):**
+
+| # | Actor | Attempt | Result |
+|---|---|---|---|
+| **A1** | Repo owner/admin (`skylizeai-dev`) | `git push` | **BLOCKED.** `GH013` / `Cannot update this protected ref.` |
+| **A2** | Repo owner/admin | `git push --force` | **BLOCKED.** `GH013` / `Cannot update this protected ref.` |
+| **A3** | Repo owner/admin | `git push --delete` | **BLOCKED.** `GH013` / `- Cannot delete this branch` |
+
+So a zero-bypass-actor ruleset binds the repository owner too. Unlike classic
+branch protection's `enforce_admins` toggle, rulesets grant admins **no implicit
+bypass** — bypass exists only for explicitly listed actors.
+
+**Integrity check.** After all seven attempts, `protected-probe` remained at its
+baseline commit `9742bf8e0ed06f5bc27c6a5a1da9926015ed0c73`, and the ruleset
+remained `enforcement: active` with `bypass_actors: []`. Nothing got through.
+
+**Honest caveat, stated rather than buried.** The App exercised was
+`github-actions`, GitHub's own first-party App, because a bespoke App could not be
+created in this environment (see E.3.2). It is nonetheless a genuine App
+installation token by the two positive proofs above, and `github-actions` is
+itself a selectable ruleset bypass actor — so it sits in exactly the actor
+category under test. The residual risk is that GitHub special-cases its own App;
+that risk runs in the **safe direction**, since any first-party special-casing
+would grant *more* privilege, and it was blocked anyway. A bespoke-App re-test
+remains a cheap confirmation but is no longer load-bearing.
+
+### E.3.2 `[VERIFIED LIMITATION]` Why a bespoke GitHub App was not used
+
+A purpose-built App could not be registered in this environment, and this is a
+hard property of GitHub's API rather than a tooling gap. `[LIVE-VERIFIED]`
+2026-09-05, https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest:
+the only programmatic registration path is the App Manifest flow, which
+**mandates a browser redirect and human approval** — "You redirect people to
+GitHub to register a new GitHub App", the person "will be redirected to a GitHub
+page with an input field where they can edit the name", and GitHub then "redirects
+back to the `redirect_url` with a temporary `code`" which must be exchanged within
+one hour. Probing the exchange endpoint confirms it is the only one that exists:
+`POST /app-manifests/{code}/conversions` returns `HTTP 404` with
+`documentation_url` pointing at "create a GitHub App from a manifest". There is no
+non-interactive REST endpoint that creates a GitHub App.
+
+Consequence for future passes: **any test requiring a bespoke Skylize GitHub App
+needs a human to register it in the web UI and hand over the app id + private
+key.** Automation cannot self-provision one. This is also a real onboarding fact
+for the eventual product: Skylize registers its App once, manually, and customers
+only *install* it.
+
+**Now verified, the property is exactly what the CFO Test needs**, and it is
+enforced by GitHub, not by Skylize: with `main` covered by a ruleset (restrict
+updates + block force pushes + require a PR) and the Skylize App **not** a bypass
+actor, a push to `main` is refused at GitHub no matter what the agent, the model,
+or a bug in Skylize's gate attempts. Per E.3.1 the observed refusals are `GH013`
+at the git layer and `HTTP 422 "Repository rule violations found"` at the REST
+layer (not the `403` this audit's first draft guessed at — the status code is
+worth knowing for whoever writes the error-surfacing path Q2.4c requires). §2.4's Q2.4c (`:427-432`) already states this
 requirement correctly and this audit endorses it unchanged — and E.2 makes it
 structural, since weakening the ruleset needs `administration`.
 
@@ -461,13 +580,31 @@ E.4; (c) which registered verbs carry a gate. Recommendation: request
 `contents: write` + `pull_requests: write` + `metadata: read` only, and register
 no delete-branch and no force-push verb.
 
-**Q-NEW-2 `[OWNER-DECISION-REQUIRED / EMPIRICAL]` — Confirm rulesets bind a
-non-bypass GitHub App.** The Tier 2 inference (E.3) is not stated verbatim in
-GitHub's docs. It must be proven against a live repository with a real
-installation token before it is relied on. If it turned out false, the entire
-prevention architecture reverts to Tier 3 gating and GitHub becomes the *hardest*
-connector rather than the simplest. **This is the highest-value single test in the
-GitHub work and it is cheap to run.**
+**Q-NEW-2 — ~~`[OWNER-DECISION-REQUIRED / EMPIRICAL]`~~ → `[VERIFIED — Apps cannot
+bypass]` 2026-09-05. CLOSED, no owner decision needed.** Rulesets **do** bind a
+GitHub App installation token that is not a listed bypass actor. Proven live
+against a real repository and a real App installation token (`contents: write`,
+no `administration`): normal push, force-push and branch deletion were all
+refused, at both the git layer (`GH013`) and the REST layer (`HTTP 422`), with
+`bypass_actors: []`. A repository admin was refused identically. Full method,
+token-identity proof and raw results in **E.3.1**; the reason a first-party App
+was used instead of a bespoke one, and the hard GitHub API limitation behind
+that, in **E.3.2**.
+
+**Consequence: the Tier 2 architecture stands and the audit's recommended design
+is unchanged.** GitHub does not need a Drive/Asana-style
+`ToolPermissionProfile` runtime gate for the protected-branch case. The
+prevention property is provider-enforced. Residual Skylize-side scope stays as
+E.4 describes it — unprotected-branch deletion and PR merge only.
+
+One follow-on worth recording, not blocking: because enforcement depends on the
+**customer** having a ruleset (or classic protection) on their protected
+branches, Skylize should *verify* that at connection time rather than assume it.
+A customer with no ruleset on `main` gets no Tier 2 protection at all, and
+`contents: write` then permits a direct push to `main` — not a defect in this
+design, but a precondition the onboarding path should probe and surface. The
+`gcp_wif_connections` health-probe precedent (`connection_state`,
+`last_probe_result`, `0024:56-80`) is the natural model.
 
 **Q-NEW-3 `[OWNER-DECISION-REQUIRED]` — Ratify the third credential shape.**
 Per D.5: a new table modelled on `gcp_wif_connections`' structural decisions,
@@ -606,9 +743,17 @@ in the shape of `:270-292`.
    with the App as a non-bypass actor (E.3). Only unprotected-branch deletion and
    PR merge plausibly need Skylize-side treatment, and verb-surface minimalism may
    beat a gate there (E.4).
-7. **One load-bearing inference is unproven** (Q-NEW-2): that rulesets bind a
-   non-bypass GitHub App is not stated verbatim in GitHub's docs. Confirm
-   empirically before writing code.
+7. **The one load-bearing inference is now PROVEN** (Q-NEW-2, closed 2026-09-05).
+   A real GitHub App installation token with `contents: write` was refused on
+   normal push, force-push and branch deletion against a ruleset with
+   `bypass_actors: []` — blocked at the git layer (`GH013`) *and* the REST layer
+   (`HTTP 422`), the latter with `force: true` explicitly set. A repository admin
+   was refused identically; rulesets grant admins no implicit bypass. Method and
+   raw evidence in E.3.1. **Tier 2 stands; GitHub does not need a Drive/Asana-style
+   runtime gate for protected-branch push.** Caveat stated in E.3.1: the App was
+   GitHub's first-party `github-actions`, since a bespoke App cannot be registered
+   without a browser and human approval (E.3.2) — a risk that runs in the safe
+   direction.
 8. **Rate limits verified** (G): installation tokens start at PAT parity
    (5,000/hr), cap at 12,500, 15,000 on Enterprise Cloud. The binding constraint
    is the 80/min content-generating ceiling, not the hourly limit.
