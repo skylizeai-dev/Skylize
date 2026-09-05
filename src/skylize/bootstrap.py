@@ -54,8 +54,10 @@ from .contracts.registry import MVP_REGISTRY
 from .dal.credentials import CredentialRepository
 from .dal.oauth_credentials import OAuthCredentialRepository
 from .dal.gcp_wif import GcpWifRepository
+from .dal.github_app import GithubAppRepository
 from .dal.gcp_containment import GcpContainmentClaimRepository
 from .app.gcp.keys import WifSigningKey, load_wif_signing_key
+from .app.github.keys import GithubAppKey, load_github_app_key
 from .app.gcp.trigger import SpendCeilingContainmentTrigger
 from .dal.permission_grants import PermissionGrantRepository
 from .dal.ports import (
@@ -372,6 +374,16 @@ class Container:
     # import edge between them. Nothing that holds one can obtain the other.
     wif_signing_key: "WifSigningKey | None" = None
     wif_repo: "GcpWifRepository | None" = None
+    # Platform-level GitHub App identity, or None when the connector is off
+    # (neither SKYLIZE_GITHUB_APP_ID nor the PEM set). DELIBERATELY NOT REACHABLE
+    # FROM `authority` OR `wif_signing_key`: three keys, three trust domains,
+    # three loaders with no import edge between them. This one is the platform's
+    # only RSA key, because GitHub mandates RS256.
+    #
+    # Foundation only (integration_inputs.md 2.4, APPROVED 2026-09-05): no tool is
+    # registered against it, so nothing agent-reachable can use it yet.
+    github_app_key: "GithubAppKey | None" = None
+    github_app_repo: "GithubAppRepository | None" = None
     # Proposes a governed containment when an org's spend ceiling is breached.
     # None unless GCP is wired. NOT reachable from ToolProxy: see
     # app/gcp/trigger.py for why that edge would close a construction cycle.
@@ -404,6 +416,7 @@ async def build_container(settings: Settings | None = None) -> Container:
     # connection. Returns None when the feature is simply off; raises when it is
     # half-configured (see app/gcp/keys.py).
     wif_signing_key = load_wif_signing_key(settings)
+    github_app_key = load_github_app_key(settings)
     registry = MVP_REGISTRY
     closers: list[Callable[[], Awaitable[None]]] = []
 
@@ -470,6 +483,8 @@ async def build_container(settings: Settings | None = None) -> Container:
         oauth_credential_repo = InMemoryOAuthCredentialRepository()
         from .dal.gcp_wif import InMemoryGcpWifRepository
         wif_repo: GcpWifRepository = InMemoryGcpWifRepository()
+        from .dal.github_app import InMemoryGithubAppRepository
+        github_app_repo: GithubAppRepository = InMemoryGithubAppRepository()
         from .dal.gcp_containment import InMemoryGcpContainmentClaimRepository
         gcp_claims: GcpContainmentClaimRepository = (
             InMemoryGcpContainmentClaimRepository()
@@ -519,6 +534,8 @@ async def build_container(settings: Settings | None = None) -> Container:
         oauth_credential_repo = PgOAuthCredentialRepository(db)
         from .dal.gcp_wif import PgGcpWifRepository
         wif_repo = PgGcpWifRepository(db)
+        from .dal.github_app import PgGithubAppRepository
+        github_app_repo = PgGithubAppRepository(db)
         from .dal.gcp_containment import PgGcpContainmentClaimRepository
         gcp_claims = PgGcpContainmentClaimRepository(db)
         permission_grant_repo = PgPermissionGrantRepository(db)
@@ -881,5 +898,6 @@ async def build_container(settings: Settings | None = None) -> Container:
         llm=llm, work_journal=work_journal, _closers=closers, db=db,
         cost_ledger=cost_ledger, spend_ceiling_dal=spend_ceiling_dal,
         wif_signing_key=wif_signing_key, wif_repo=wif_repo,
+        github_app_key=github_app_key, github_app_repo=github_app_repo,
         gcp_containment=gcp_containment,
     )

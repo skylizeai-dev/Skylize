@@ -194,6 +194,44 @@ class Settings(BaseSettings):
     #: misconfigured deployment cannot use to reach real infrastructure.
     wif_environment: str = "development"
 
+    # ---------------------------------------------------------------------
+    # GitHub App (integration_inputs.md 2.4, APPROVED 2026-09-05).
+    #
+    # THE PLATFORM'S THIRD KEY, AND ITS FIRST RSA ONE. The other two are the
+    # governance key (P-384/ES384, internal authority artifacts) and the WIF
+    # signing key (P-256/ES256, OIDC assertions Google's STS accepts). This one
+    # is RSA because GitHub gives no choice: "Your JWT must be signed using the
+    # RS256 algorithm" (verified live 2026-09-05). It is loaded by
+    # app/github/keys.py, which has NO import edge to either other key loader, so
+    # neither key's access path can reach the others' material.
+    #
+    # WHY THIS IS PLATFORM-LEVEL AND NOT PER-TENANT — the fact that makes GitHub a
+    # third credential shape rather than a copy of WIF. A GitHub App's private key
+    # is managed at the APP level and one key serves EVERY customer installation
+    # (verified live 2026-09-05). So the secret is here, in configuration, and the
+    # per-tenant table (migration 0026) holds only the non-secret installation id
+    # with no encrypted column at all.
+    #
+    # OPT-IN, exactly like the Slack notifier: both empty means the GitHub
+    # connector is simply off and the deployment behaves as it did before this
+    # feature existed. Setting exactly ONE of the two is refused at boot — an app
+    # id cannot sign and a key cannot form `iss`, so either alone is a
+    # half-finished deployment (app/github/keys.py load_github_app_key).
+    #
+    # There is deliberately NO ephemeral-key fallback here, unlike the other two
+    # keys: GitHub holds the public half of this key, registered when the App was
+    # created, so a self-generated pair corresponds to no registered App and every
+    # mint would 401. Returning "feature off" is honest; fabricating a key is not.
+    github_app_id: str = ""
+    #: The PEM issued once by GitHub at App registration
+    #: (scripts/register_github_app.py). Hold it as a real secret: it
+    #: authenticates Skylize to every customer's installation at once.
+    github_app_private_key_pem: str = ""
+    #: Cosmetic; used in operator-facing messages and the registration script.
+    github_app_slug: str = ""
+    #: Overridable for GitHub Enterprise Server and for tests pointing at a stub.
+    github_api_base_url: str = "https://api.github.com"
+
     # Rate limiting (per org, per window).
     rate_limit_per_minute: int = 120
     # Tighter dedicated budget for the sensitive GET /credentials/resolve path.

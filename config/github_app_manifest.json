@@ -1,0 +1,61 @@
+{
+  "_README": [
+    "GitHub App manifest for Skylize. integration_inputs.md 2.4, APPROVED 2026-09-05.",
+    "",
+    "THIS FILE IS TIER 1. The 'default_permissions' block below is the entire",
+    "Tier 1 guarantee of the 2.4 architecture, expressed as data rather than as",
+    "code, so it can be reviewed and diffed rather than traced through call",
+    "sites. What is ABSENT matters more than what is present:",
+    "",
+    "  administration  ABSENT -> repository deletion is IMPOSSIBLE, and so is",
+    "                  editing the branch-protection rulesets that Tier 2 relies",
+    "                  on. Verified live 2026-09-05: DELETE /repos/{owner}/{repo}",
+    "                  requires administration:write, a DIFFERENT permission from",
+    "                  contents. Never requesting it is what makes repo deletion",
+    "                  structurally impossible rather than merely gated - there is",
+    "                  no gate to refactor away because the capability is never",
+    "                  minted.",
+    "  secrets         ABSENT -> repository secrets cannot be read or written.",
+    "  actions         ABSENT -> workflow runs and Actions variables cannot be",
+    "                  touched.",
+    "  environments    ABSENT -> environment secrets cannot be touched.",
+    "",
+    "A future editor adding any of those four is reversing an owner decision and",
+    "silently removing the strongest guarantee in the GitHub design. Do not do it",
+    "without a new integration_inputs.md 2.4 approval. tests/unit/",
+    "test_github_app_manifest.py asserts this file's permission set exactly and",
+    "will fail if it drifts.",
+    "",
+    "WHY contents IS write AND NOT read. A pull request needs a head branch with",
+    "commits on it, and creating that branch is contents:write - verified live",
+    "2026-09-05: POST/PATCH /repos/{o}/{r}/git/refs and POST .../git/commits are",
+    "all contents:write. There is no contents:write-except-delete, so this single",
+    "permission unavoidably also permits deleting a ref and merging a PR. That is",
+    "exactly why 2.4 Q2.4b.2 chose verb-surface minimalism: Skylize never builds",
+    "a delete-branch verb at all, so the token's theoretical capability is",
+    "unreachable by any agent.",
+    "",
+    "default_events is deliberately EMPTY this pass. The uninstall webhook",
+    "(2.4 Q2.4e) is approved but NOT built yet, and subscribing to an event with",
+    "no endpoint to receive it would only generate failing deliveries. The",
+    "'installation' event is added in the same pass that adds the ingress.",
+    "",
+    "url/redirect_url are placeholders an operator replaces at registration time;",
+    "scripts/register_github_app.py substitutes them."
+  ],
+
+  "name": "Skylize",
+  "url": "https://skylize.com",
+  "description": "Skylize governs AI-agent actions. This App lets a Skylize agent open pull requests against repositories you select. It deliberately cannot delete repositories, cannot change your branch protection rules, and cannot read or write your secrets.",
+  "public": false,
+
+  "default_permissions": {
+    "contents": "write",
+    "metadata": "read"
+  },
+
+  "default_events": [],
+
+  "request_oauth_on_install": false,
+  "setup_on_update": false
+}

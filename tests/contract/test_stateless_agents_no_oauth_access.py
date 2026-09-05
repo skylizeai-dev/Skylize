@@ -383,3 +383,108 @@ def test_stateless_agents_cannot_reach_the_wif_signing_key_or_table(contract) ->
             "Workload Identity Federation — this breaks the stateless-agent "
             "invariant for the gcp_wif_connections table and the WIF signing key"
         )
+
+
+# ---------------------------------------------------------------------------
+# GitHub App foundation (migration 0026, app/github/*)
+#
+# integration_inputs.md 2.4 APPROVED 2026-09-05. This pass built the FOUNDATION
+# only: platform key custody, token minting, and the connection-state probe. No
+# tool is registered, so these are foundation-era tripwires in the same shape the
+# GCP ones had before the stop verb landed - and like those, each says explicitly
+# what discharging it consciously would look like.
+# ---------------------------------------------------------------------------
+
+def test_no_github_tool_is_registered_yet() -> None:
+    """Foundation-era tripwire. Nothing GitHub-related is agent-reachable.
+
+    This pass deliberately registers no verb: 2.4 Q2.4b.3's PR-merge verb and
+    Q2.4e's webhook are both out of scope. When the merge verb lands, this test
+    should be REPLACED by the narrower assertion that the GitHub verb surface is
+    exactly that one verb - the way
+    `test_exactly_one_gcp_verb_is_registered_and_it_is_the_stop` replaced GCP's
+    equivalent. It must not simply be deleted.
+    """
+    registry = _full_registry()
+    github_tools = sorted(
+        t.tool_id for t in registry.all()
+        if "github" in t.tool_id.lower() or "_pr_" in t.tool_id.lower()
+    )
+    assert github_tools == [], (
+        f"a GitHub tool appeared: {github_tools}. The foundation pass registers "
+        "none. If this is the approved PR-merge verb (2.4 Q2.4b.3), replace this "
+        "test with an exact-surface assertion AND assert its HITL gate - do not "
+        "just delete it."
+    )
+
+
+def test_no_branch_deletion_verb_exists_anywhere_in_the_registry() -> None:
+    """The owner decision that must never be discharged, only kept.
+
+    2.4 Q2.4b.2 chose VERB-SURFACE MINIMALISM over a runtime gate for branch
+    deletion: Skylize never builds a delete-branch verb at all. That is a stronger
+    property than gating one, because there is no gate to refactor around - and it
+    is the only available answer, since `contents: write` is indivisible and
+    cannot withhold ref deletion at the token layer (verified live 2026-09-05:
+    DELETE /repos/{o}/{r}/git/refs/{ref} is the same permission as creating a
+    branch and pushing).
+
+    Unlike the tripwire above, this one is NOT expected to be discharged. A future
+    pass adding a delete-branch verb is reversing an owner decision and needs a new
+    2.4 approval, not a green test.
+    """
+    registry = _full_registry()
+    offenders = sorted(
+        t.tool_id for t in registry.all()
+        if any(
+            frag in t.tool_id.lower()
+            for frag in ("delete_branch", "branch_delete", "delete_ref", "force_push")
+        )
+    )
+    assert offenders == [], (
+        f"a branch-deletion or force-push verb was registered: {offenders}. "
+        "integration_inputs.md 2.4 Q2.4b.2 (APPROVED 2026-09-05) decided Skylize "
+        "never builds one. Reversing that needs a new owner approval."
+    )
+
+
+def test_stateless_agents_hold_no_github_tool() -> None:
+    """The five stateless agents get no GitHub path, now or by later accident.
+
+    Vacuously true while no GitHub tool exists, and that is the point: it is here
+    so that the moment one IS registered, this assertion is already standing rather
+    than being something a future author has to remember to add.
+    """
+    for contract in _stateless_contracts():
+        granted = {g.tool_id for g in contract.allowed_tools}
+        granted |= set(contract.invocable_tools or [])
+        github = sorted(t for t in granted if "github" in t.lower())
+        assert github == [], (
+            f"{contract.agent_id} was granted GitHub tools {github}. The five "
+            "stateless agents (cfo_agent + the four safety agents) must have no "
+            "path to a customer's third-party account."
+        )
+
+
+def test_github_credential_shape_holds_no_per_tenant_secret() -> None:
+    """2.4 Q2.4d, asserted in code rather than left to the migration alone.
+
+    The App private key is PLATFORM-level - one key shared across every tenant's
+    installation - so the per-tenant row is non-secret and the row dataclass must
+    expose no credential field. If someone starts storing a per-tenant token here,
+    this fails, and the third-credential-shape decision has been reversed.
+    """
+    from dataclasses import fields
+
+    from skylize.dal.github_app import GithubInstallationRow
+
+    names = {f.name for f in fields(GithubInstallationRow)}
+    leaked = {
+        n for n in names
+        if "token" in n or "secret" in n or "encrypted" in n or n == "key_id"
+    }
+    assert leaked == set(), (
+        f"GithubInstallationRow grew credential field(s) {leaked}. Installation "
+        "tokens are minted per call and never persisted (2.4 Q2.4d); the App "
+        "private key is platform-level configuration, not tenant state."
+    )
