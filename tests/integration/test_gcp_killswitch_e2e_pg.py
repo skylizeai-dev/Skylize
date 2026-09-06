@@ -51,6 +51,7 @@ from .conftest import (
     TEST_JWT_SECRET,
     install_dev_header_auth,
     requires_app_role,
+    requires_redis,
 )
 from .test_agent_execute_governed_e2e import (
     MODEL,
@@ -283,6 +284,7 @@ def _program_tool_call(fake) -> None:
 # THE LOOP
 # ---------------------------------------------------------------------------
 
+@requires_redis
 @requires_app_role
 async def test_ceiling_breach_defers_then_approval_stops_the_vm(
     admin_conn, app_db, fake_provider
@@ -346,6 +348,7 @@ async def test_ceiling_breach_defers_then_approval_stops_the_vm(
         await _cleanup_gcp(admin_conn, [org])
 
 
+@requires_redis
 @requires_app_role
 async def test_a_second_approval_never_executes_a_second_time(
     admin_conn, app_db, fake_provider
@@ -385,6 +388,7 @@ async def test_a_second_approval_never_executes_a_second_time(
         await _cleanup_gcp(admin_conn, [org])
 
 
+@requires_redis
 @requires_app_role
 async def test_a_broken_federation_is_never_proposed_against(
     admin_conn, app_db, fake_provider
@@ -409,6 +413,7 @@ async def test_a_broken_federation_is_never_proposed_against(
         await _cleanup_gcp(admin_conn, [org])
 
 
+@requires_redis
 @requires_app_role
 async def test_a_partial_failure_is_reported_as_partial_not_as_success(
     admin_conn, app_db, fake_provider
@@ -447,6 +452,7 @@ async def test_a_partial_failure_is_reported_as_partial_not_as_success(
         await _cleanup_gcp(admin_conn, [org])
 
 
+@requires_redis
 @requires_app_role
 async def test_an_ungoverned_org_cannot_stop_a_vm_at_all(
     admin_conn, app_db, fake_provider
@@ -506,6 +512,7 @@ async def test_an_ungoverned_org_cannot_stop_a_vm_at_all(
 # RLS
 # ---------------------------------------------------------------------------
 
+@requires_redis
 @requires_app_role
 async def test_rls_keeps_one_orgs_targets_invisible_to_another(
     admin_conn, app_db

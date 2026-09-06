@@ -71,6 +71,7 @@ from .conftest import (
     TEST_JWT_SECRET,
     install_dev_header_auth,
     requires_app_role,
+    requires_redis,
 )
 from .test_agent_execute_governed_e2e import (
     MODEL,
@@ -278,6 +279,7 @@ async def _audit(app_db: Database, org: str, action_type: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+@requires_redis
 @requires_app_role
 async def test_cfo_agent_defers_then_approves_to_a_deliverable_with_recomputed_totals(
     app_db, admin_conn, fake_provider

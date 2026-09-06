@@ -58,6 +58,7 @@ from .conftest import (
     TEST_JWT_SECRET,
     install_dev_header_auth,
     requires_app_role,
+    requires_redis,
 )
 
 pytestmark = pytest.mark.integration
@@ -231,6 +232,7 @@ async def _cleanup(admin_conn: object, org: str) -> None:
     )
 
 
+@requires_redis
 @requires_app_role
 async def test_governed_execute_three_outcomes_e2e(app_db, admin_conn, fake_provider) -> None:
     base_url, fake = fake_provider

@@ -42,6 +42,7 @@ from .conftest import (
     TEST_CREDENTIAL_KEY,
     TEST_JWT_SECRET,
     requires_app_role,
+    requires_redis,
 )
 from .test_agent_execute_governed_e2e import MODEL, _gen_key
 from .test_gcp_killswitch_e2e_pg import (
@@ -232,6 +233,7 @@ async def _breach(container: Container, org: str) -> None:
 # Tests
 # ---------------------------------------------------------------------------
 
+@requires_redis
 @requires_app_role
 async def test_a_real_ceiling_breach_queues_a_containment_with_nobody_calling_it(
     admin_conn, app_db, fake_provider
@@ -260,6 +262,7 @@ async def test_a_real_ceiling_breach_queues_a_containment_with_nobody_calling_it
         await _cleanup(admin_conn, [org])
 
 
+@requires_redis
 @requires_app_role
 async def test_no_federation_means_a_breach_queues_nothing(
     admin_conn, app_db, fake_provider
@@ -282,6 +285,7 @@ async def test_no_federation_means_a_breach_queues_nothing(
         await _cleanup(admin_conn, [org])
 
 
+@requires_redis
 @requires_app_role
 async def test_a_broken_federation_queues_nothing(
     admin_conn, app_db, fake_provider
@@ -304,6 +308,7 @@ async def test_a_broken_federation_queues_nothing(
         await _cleanup(admin_conn, [org])
 
 
+@requires_redis
 @requires_app_role
 async def test_repeated_breaches_queue_exactly_one_containment(
     admin_conn, app_db, fake_provider
@@ -323,6 +328,7 @@ async def test_repeated_breaches_queue_exactly_one_containment(
         await _cleanup(admin_conn, [org])
 
 
+@requires_redis
 @requires_app_role
 async def test_the_explicit_entry_point_still_works(
     admin_conn, app_db, fake_provider
@@ -349,6 +355,7 @@ async def test_the_explicit_entry_point_still_works(
         await _cleanup(admin_conn, [org])
 
 
+@requires_redis
 @requires_app_role
 async def test_the_proxy_and_the_container_share_one_trigger_instance(
     admin_conn, app_db, fake_provider

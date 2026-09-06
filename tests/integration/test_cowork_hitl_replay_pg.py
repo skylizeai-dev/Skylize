@@ -69,6 +69,7 @@ from .conftest import (
     TEST_JWT_SECRET,
     install_dev_header_auth,
     requires_app_role,
+    requires_redis,
 )
 from ..fakes.fake_provider_api.app import success
 from ..fakes.fake_provider_api.server import running_fake_provider
@@ -280,6 +281,7 @@ async def _journal_rows(app_db: Database, org: str) -> list[dict]:
 
 # ── (a) the binding is captured at defer time ────────────────────────────────
 
+@requires_redis
 @requires_app_role
 async def test_defer_captures_the_principal_binding_in_request_json(
     app_db, admin_conn, fake_provider, defers_externally
@@ -314,6 +316,7 @@ async def test_defer_captures_the_principal_binding_in_request_json(
         await _cleanup(admin_conn, org)
 
 
+@requires_redis
 @requires_app_role
 async def test_approval_executes_with_the_binding_intact(
     app_db, admin_conn, fake_provider, defers_externally
@@ -353,6 +356,7 @@ async def test_approval_executes_with_the_binding_intact(
 
 # ── (b) authority is recompiled at approval time ─────────────────────────────
 
+@requires_redis
 @requires_app_role
 async def test_grant_revoked_between_defer_and_approve_refuses(
     app_db, admin_conn, fake_provider, defers_externally
@@ -396,6 +400,7 @@ async def test_grant_revoked_between_defer_and_approve_refuses(
         await _cleanup(admin_conn, org)
 
 
+@requires_redis
 @requires_app_role
 async def test_principal_suspended_between_defer_and_approve_refuses(
     app_db, admin_conn, fake_provider, defers_externally
@@ -432,6 +437,7 @@ async def test_principal_suspended_between_defer_and_approve_refuses(
         await _cleanup(admin_conn, org)
 
 
+@requires_redis
 @requires_app_role
 async def test_the_stored_envelope_carries_no_authority_only_an_id(
     app_db, admin_conn, fake_provider, defers_externally

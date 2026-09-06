@@ -46,6 +46,7 @@ from .conftest import (
     TEST_JWT_SECRET,
     install_dev_header_auth,
     requires_app_role,
+    requires_redis,
 )
 from .test_agent_execute_governed_e2e import _gen_key
 
@@ -172,6 +173,7 @@ async def _running() -> AsyncIterator[tuple[AsyncClient, Container]]:
 # Org scoping — A's position never leaks into B's; the role is RLS-subject.
 # ---------------------------------------------------------------------------
 
+@requires_redis
 @requires_app_role
 async def test_spend_position_is_org_scoped(app_db, admin_conn) -> None:
     s = uuid.uuid4().hex[:8]
@@ -237,6 +239,7 @@ async def test_spend_position_is_org_scoped(app_db, admin_conn) -> None:
 # Missing ceiling — explicit, legible, never a silent zero.
 # ---------------------------------------------------------------------------
 
+@requires_redis
 @requires_app_role
 async def test_missing_ceiling_is_explicit_not_silent_zero(app_db, admin_conn) -> None:
     org = f"spend_c_{uuid.uuid4().hex[:8]}"
@@ -262,6 +265,7 @@ async def test_missing_ceiling_is_explicit_not_silent_zero(app_db, admin_conn) -
 # RBAC mirrors the audit read route: owner/admin only.
 # ---------------------------------------------------------------------------
 
+@requires_redis
 @requires_app_role
 async def test_spend_position_requires_owner_or_admin(app_db, admin_conn) -> None:
     org = f"spend_r_{uuid.uuid4().hex[:8]}"

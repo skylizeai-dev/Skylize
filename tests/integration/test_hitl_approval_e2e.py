@@ -50,6 +50,7 @@ from .conftest import (
     TEST_JWT_SECRET,
     install_dev_header_auth,
     requires_app_role,
+    requires_redis,
 )
 from .test_agent_execute_governed_e2e import (
     _INPUT,
@@ -165,6 +166,7 @@ async def _audit_causations(app_db: Database, org: str, action_type: str) -> lis
 
 # ── the full approve loop (hard exit gate) ──────────────────────────────────
 
+@requires_redis
 @requires_app_role
 async def test_hitl_approve_full_loop(app_db, admin_conn, fake_provider) -> None:
     base_url, fake = fake_provider
@@ -247,6 +249,7 @@ async def test_hitl_approve_full_loop(app_db, admin_conn, fake_provider) -> None
 
 # ── the full reject loop (hard exit gate) ───────────────────────────────────
 
+@requires_redis
 @requires_app_role
 async def test_hitl_reject_full_loop(app_db, admin_conn, fake_provider) -> None:
     base_url, fake = fake_provider
@@ -284,6 +287,7 @@ async def test_hitl_reject_full_loop(app_db, admin_conn, fake_provider) -> None:
 
 # ── tenant isolation (hard exit gate) + K5 RLS-subject facts ────────────────
 
+@requires_redis
 @requires_app_role
 async def test_org_a_cannot_list_or_act_on_org_b_rows(
     app_db, admin_conn, fake_provider
@@ -333,6 +337,7 @@ async def test_org_a_cannot_list_or_act_on_org_b_rows(
 
 # ── exactly-once under true concurrency (item 11) ───────────────────────────
 
+@requires_redis
 @requires_app_role
 async def test_simultaneous_approves_execute_exactly_once(
     app_db, admin_conn, fake_provider
@@ -365,6 +370,7 @@ async def test_simultaneous_approves_execute_exactly_once(
 
 # ── K9: an expired row is refused with a typed error ────────────────────────
 
+@requires_redis
 @requires_app_role
 async def test_expired_row_refused(app_db, admin_conn, fake_provider) -> None:
     base_url, fake = fake_provider
@@ -391,6 +397,7 @@ async def test_expired_row_refused(app_db, admin_conn, fake_provider) -> None:
 
 # ── item 10: the ordinary path cannot set the gate bypass ───────────────────
 
+@requires_redis
 @requires_app_role
 async def test_ordinary_execute_path_cannot_set_bypass(
     app_db, admin_conn, fake_provider
@@ -430,6 +437,7 @@ async def test_ordinary_execute_path_cannot_set_bypass(
 # A PERMANENT failure now moves the row to the terminal 'expired' status —
 # which is exactly what migration 0015 already does to unreplayable rows.
 
+@requires_redis
 @requires_app_role
 async def test_drifted_request_json_fails_and_terminates_row(
     app_db, admin_conn, fake_provider
@@ -475,6 +483,7 @@ async def test_drifted_request_json_fails_and_terminates_row(
 
 # ── K12/D4: a TRANSIENT failure still releases, and a retry then succeeds ────
 
+@requires_redis
 @requires_app_role
 async def test_transient_provider_failure_releases_row_and_retry_succeeds(
     app_db, admin_conn, fake_provider

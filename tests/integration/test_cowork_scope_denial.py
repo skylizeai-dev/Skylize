@@ -66,6 +66,7 @@ from .conftest import (
     TEST_JWT_SECRET,
     install_dev_header_auth,
     requires_app_role,
+    requires_redis,
 )
 from ..fakes.fake_provider_api.app import success
 from ..fakes.fake_provider_api.server import running_fake_provider
@@ -232,6 +233,7 @@ async def _hitl_count(app_db: Database, org: str) -> int:
         ))
 
 
+@requires_redis
 @requires_app_role
 async def test_out_of_scope_tool_via_chat_is_denied_at_the_scope_stage(
     app_db, admin_conn, fake_provider
@@ -300,6 +302,7 @@ async def test_out_of_scope_tool_via_chat_is_denied_at_the_scope_stage(
         await _cleanup(admin_conn, org)
 
 
+@requires_redis
 @requires_app_role
 async def test_the_same_tool_succeeds_once_the_human_actually_holds_it(
     app_db, admin_conn, fake_provider

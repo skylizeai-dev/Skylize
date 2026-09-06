@@ -40,6 +40,7 @@ from .conftest import (
     TEST_JWT_SECRET,
     install_dev_header_auth,
     requires_app_role,
+    requires_redis,
 )
 from .test_agent_execute_governed_e2e import (
     _INPUT,
@@ -115,6 +116,7 @@ async def _running(
         await container.aclose()
 
 
+@requires_redis
 @requires_app_role
 async def test_deliverable_readback_after_approve_returns_200(
     app_db, admin_conn, fake_provider

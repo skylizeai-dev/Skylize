@@ -54,6 +54,7 @@ from .conftest import (
     TEST_JWT_SECRET,
     install_dev_header_auth,
     requires_app_role,
+    requires_redis,
 )
 from ..fakes.fake_provider_api.app import success
 from ..fakes.fake_provider_api.server import running_fake_provider
@@ -241,6 +242,7 @@ async def _token_scopes(app_db: Database, org: str) -> list[list[str]]:
 
 # ── the fix: an ordinary turn does NOT defer ─────────────────────────────────
 
+@requires_redis
 @requires_app_role
 async def test_ordinary_turn_returns_201_and_opens_no_hitl_ticket(
     app_db, admin_conn, fake_provider
@@ -281,6 +283,7 @@ async def test_ordinary_turn_returns_201_and_opens_no_hitl_ticket(
         await _cleanup(admin_conn, org)
 
 
+@requires_redis
 @requires_app_role
 async def test_turn_is_journalled_as_agent_cowork_for_the_calling_principal(
     app_db, admin_conn, fake_provider
@@ -320,6 +323,7 @@ async def test_turn_is_journalled_as_agent_cowork_for_the_calling_principal(
 
 # ── the binding: the token is narrowed to the human's own authority ──────────
 
+@requires_redis
 @requires_app_role
 async def test_token_scope_is_the_intersection_not_the_manifest(
     app_db, admin_conn, fake_provider
@@ -361,6 +365,7 @@ async def test_token_scope_is_the_intersection_not_the_manifest(
 
 # ── fail closed ──────────────────────────────────────────────────────────────
 
+@requires_redis
 @requires_app_role
 async def test_caller_with_no_principal_record_is_refused_403(
     app_db, admin_conn, fake_provider
@@ -399,6 +404,7 @@ async def test_caller_with_no_principal_record_is_refused_403(
         await _cleanup(admin_conn, org)
 
 
+@requires_redis
 @requires_app_role
 async def test_principal_holding_no_manifest_tool_is_refused_403(
     app_db, admin_conn, fake_provider
@@ -432,6 +438,7 @@ async def test_principal_holding_no_manifest_tool_is_refused_403(
         await _cleanup(admin_conn, org)
 
 
+@requires_redis
 @requires_app_role
 async def test_a_caller_cannot_name_someone_else_as_the_principal(
     app_db, admin_conn, fake_provider
