@@ -283,6 +283,15 @@ of it.
 
 > **Section status: `[OWNER-DECISION-REQUIRED]` - HARD BLOCK. Not resolvable from
 > existing docs. Returned to the owner as an open question.**
+>
+> **Note:** the GCP kill-switch shipped anyway, via separate audit-and-design-doc
+> governance (`docs/audits/audit_gcp_killswitch_readiness.md`,
+> `docs/06_integrations/gcp_wif_killswitch_design.md`, owner-approved at `6265d5d`)
+> rather than through this section's approval path. Q2.2a - the account-target
+> question this section poses - remains formally unanswered; the kill-switch's own
+> design doc scoped and answered the narrower question it actually needed. A future
+> reader should not infer from shipped GCP code that this section's HARD BLOCK was
+> lifted.
 
 `[CODE-VERIFIED]` Every AWS/GCP reference in the repository is about **Skylize's own
 hosting**: ECS/RDS/ElastiCache/ALB/Secrets Manager under `infra/terraform/staging/`
@@ -334,7 +343,7 @@ it is not recorded anywhere and must not be assumed.
 `slack.post` in a unit test (`tests/unit/test_principal_authority.py:44`). No Slack
 code.
 
-- **Q2.3a `[OWNER-DECISION-REQUIRED]` Workspace scope - ANSWERED.** Owner decision:
+- **Q2.3a `[DECIDED]` Workspace scope - ANSWERED.** Owner decision:
   Skylize's own workspace (platform-level), not the customer's. Consequences of this
   answer, all following directly from it:
   - **No OAuth broker for Slack.** The broker (Faz A-D, still unbuilt per 1.0.2)
@@ -389,14 +398,14 @@ code.
     current docs before any interactive-button work is scoped or built. Out of
     scope for the current post-only plan; recorded here only so a future session
     does not go looking for a nonexistent "interactivity" OAuth scope.
-- **Q2.3b `[OWNER-DECISION-REQUIRED]` Bot token vs user token.** `[RESEARCH-SUGGESTED]`
+- **Q2.3b `[DECIDED]` Bot token vs user token.** `[RESEARCH-SUGGESTED]`
   bot token only: a user token makes agent actions indistinguishable from a human's
   in Slack's own audit trail, which contradicts the platform's audit posture. The
   platform-level answer to Q2.3a strengthens rather than changes this recommendation:
   a bot token installed once into Skylize's own workspace is the standard shape for
   a service-account Slack integration, with no per-tenant token-selection logic
   needed. Recommend ratifying as-is.
-- **Q2.3c `[OWNER-DECISION-REQUIRED]` Per-org channel provisioning.** Does the agent
+- **Q2.3c `[DECIDED]` Per-org channel provisioning.** Does the agent
   create channels, or only post to channels a human pre-designated?
   `[RESEARCH-SUGGESTED]` post-only to a designated channel first; channel creation
   is an external-action class needing its own entry in `policy_inputs.md` 0.3. Note
@@ -606,7 +615,7 @@ narrowest of the three, not the primary mechanism:
 > recorded. Depends additionally on 4.0 (Section 1.1 must be resolved and Q3.0a's
 > schema question is now answered by this section's own infrastructure, below).**
 
-`[CODE-VERIFIED]` Drive is `[OWNER-DECISION-REQUIRED -> ANSWERED]` as **org-level**:
+`[CODE-VERIFIED]` Drive is `[DECIDED]` as **org-level**:
 each customer connects their own Google Drive, distinct from Slack's platform-level
 answer (2.3, Q2.3a). This follows the classification table in 2.0 and drives every
 answer below, exactly as the platform-level answer drove every one of Slack's.
@@ -638,7 +647,7 @@ own "not Drive-specific" disclaimers) returns nothing.
   `drive.readonly` beyond what `drive.file` already covers) without a planned
   action `drive.file` cannot satisfy, per the attenuation-only principle in this
   file's Global combining principle.
-- **Q2.5b `[OWNER-DECISION-REQUIRED]` Which write actions are gated.** Mirroring
+- **Q2.5b `[DECIDED]` Which write actions are gated.** Mirroring
   2.4's per-verb treatment for GitHub. Two verbs are in scope for this pass:
   - **File creation / upload.** `[RESEARCH-SUGGESTED]` the routine case: an agent
     producing a client deliverable (see Q2.5c) writes it into the client's Drive.
@@ -658,7 +667,7 @@ own "not Drive-specific" disclaimers) returns nothing.
   - File deletion, permission *revocation*, and Shared Drive (Team Drive)
     membership changes are explicitly **not addressed** by this section - see
     Q2.5e for the full out-of-scope list.
-- **Q2.5c `[OWNER-DECISION-REQUIRED]` Governance narrative - RESEARCH POSITION.**
+- **Q2.5c `[DECIDED]` Governance narrative - RESEARCH POSITION.**
   `[RESEARCH-SUGGESTED]` Drive's role in the platform is **deliverable teslimi**
   (agency client-operations delivery): an agent produces a work product for a
   client engagement and places it in the client's own Drive, optionally sharing it
@@ -701,7 +710,7 @@ own "not Drive-specific" disclaimers) returns nothing.
   `ToolSpendDenied`), and its exact insertion point relative to the OAuth and
   spend stages are a follow-up implementation pass, gated on this decision but not
   completed by it.
-- **Q2.5e `[OWNER-DECISION-REQUIRED]` Explicitly out of scope for this section.**
+- **Q2.5e `[DECIDED]` Explicitly out of scope for this section.**
   Recorded so a future session does not assume these are covered by omission:
   - **Shared Drives (Team Drives).** Different permission model, different API
     surface (`drive.teamdrives.*`), not addressed here.
