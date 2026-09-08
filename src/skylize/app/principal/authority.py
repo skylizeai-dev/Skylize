@@ -14,6 +14,18 @@ Most restrictive wins (agent_governance.md §12.3). Authority only ever narrows 
 it flows down: human -> their agent -> that agent's sub-agents. There is no code
 path in this module that can widen a scope set, which is why the property is
 provable rather than merely intended.
+
+THE SECOND AXIS
+---------------
+Scope answers "which tools". `authority_level` answers "how far up the approval
+ladder this actor sits" — the axis the decision evaluator reads when it decides
+whether an action needs a human. Both must narrow, and until `attenuate_level`
+below only the first one did: `mint` signed the agent's contract level verbatim,
+so a worker's co-work agent carried a worker level only because its contract
+happened to say so, and an executive-level contract driven by a worker would
+have minted an executive token. Same invariant, second axis:
+
+    token.authority_level  =  min(agent_contract_level, principal_level)
 """
 
 from __future__ import annotations
@@ -28,6 +40,7 @@ from .errors import (
     PrincipalSuspended,
     StaleAuthority,
 )
+from ...contracts.base import AUTHORITY_RANK, AuthorityLevel
 from .models import (
     AuthoritySnapshot,
     Grant,
@@ -38,15 +51,61 @@ from .models import (
 )
 
 
-def fingerprint_scopes(org_id: str, principal_id: str, scopes: Iterable[ScopeId]) -> str:
-    """Stable identity of an authority set.
+def fingerprint_authority(
+    org_id: str,
+    principal_id: str,
+    scopes: Iterable[ScopeId],
+    authority_level: AuthorityLevel,
+) -> str:
+    """Stable identity of a principal's compiled authority — scopes AND level.
 
     Embedded in the token so a verifier can detect that the principal's authority
     changed since mint, using a cheap string compare against a cached snapshot
     instead of a per-call permission join.
+
+    THE LEVEL IS IN HERE ON PURPOSE. `mint` clamps a token's `authority_level` to
+    the principal's, and a clamp applied only at mint time is not a control if a
+    demotion leaves live tokens alone. A demotion that touches no grant changes no
+    scope, so a scopes-only fingerprint would be byte-identical before and after
+    it, `assert_snapshot_current` would pass, and a demoted human's outstanding
+    token would keep the level they just lost until it expired. Including the
+    level means that demotion invalidates those tokens at their very next call,
+    the same way a scope revocation already does.
+
+    `authority_level` is appended AFTER the sorted scopes, on its own separator,
+    so it cannot collide with a scope id of the same name.
     """
-    canonical = "\x1f".join([org_id, principal_id, *sorted(set(scopes))])
+    canonical = "\x1f".join(
+        [org_id, principal_id, *sorted(set(scopes)), "\x1elevel", authority_level]
+    )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def attenuate_level(
+    *,
+    agent_level: AuthorityLevel,
+    principal_level: AuthorityLevel,
+) -> AuthorityLevel:
+    """The level a token gets when an agent acts FOR a human: the lower of the two.
+
+        an employee's agent can never do anything the employee could not do
+
+    Scope attenuation makes that true tool by tool. This makes it true on the
+    approval ladder as well, so a high-authority contract driven by a junior
+    employee cannot mint a token that clears an approval gate the employee
+    themselves would be stopped at.
+
+    Ordering is `contracts.base.AUTHORITY_RANK`, the same ladder the inline
+    decision evaluator compares against — one ladder, or `min` here and the
+    evaluator's `<` there could disagree about which of two levels is higher.
+
+    Returns one of its two inputs, never a synthesized level: `min` on a rank
+    integer would need a reverse lookup, and a reverse lookup over a dict is one
+    refactor away from silently picking the wrong key on a tie.
+    """
+    if AUTHORITY_RANK[agent_level] <= AUTHORITY_RANK[principal_level]:
+        return agent_level
+    return principal_level
 
 
 def compile_authority(
@@ -87,9 +146,13 @@ def compile_authority(
         principal_id=principal.principal_id,
         org_id=principal.org_id,
         scopes=effective,
+        authority_level=principal.authority_level,
         computed_at=at,
-        fingerprint=fingerprint_scopes(
-            principal.org_id, principal.principal_id, effective
+        fingerprint=fingerprint_authority(
+            principal.org_id,
+            principal.principal_id,
+            effective,
+            principal.authority_level,
         ),
     )
 

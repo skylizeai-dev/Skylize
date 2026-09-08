@@ -48,15 +48,73 @@ timeout, or evaluator error on ANY class → deny.
 > **Section status: `[OWNER-DECISION-REQUIRED]` — the matrix rows are research-suggested; the dollar thresholds and level assignments need your sign-off.**
 
 ### Authority levels (ordered)
-`[RESEARCH-SUGGESTED]` Five levels, mapping to Skylize's agent hierarchy:
+`[CODE-VERIFIED]` The ladder is **not** a doc-local invention. It is
+`AUTHORITY_RANK` in `src/skylize/contracts/base.py:41-47` — the single ordering the
+inline decision evaluator compares against
+(`src/skylize/app/decision_engine/evaluator.py:46-54`, which aliases it as `_RANK`)
+and the one `GovernanceAuthority.mint` clamps a token against
+(`src/skylize/app/governance/authority.py:336-339`):
 
 ```
-L1 = Worker agent      (fully autonomous, logged)
-L2 = Manager agent     approval
-L3 = Director agent    approval
-L4 = Executive agent   approval
-L5 = Human Principal   (mandatory HITL — human approval)
+worker    = 1   (fully autonomous, logged)
+manager   = 2
+director  = 3
+vp        = 4
+executive = 5
 ```
+
+**`Min Level` in every matrix below means the minimum `authority_level` the acting
+agent's token must carry** — exactly what the evaluator's `authority_check` stage
+tests (`_RANK[contract.authority_level] < _RANK[required]` → `deferred_to_human`,
+`evaluator.py:312-323`).
+
+> **RECONCILED 2026-09-06 — this section previously carried a parallel `L1..L5`
+> ladder that did not match the code.** The old ladder read
+> `L1=Worker, L2=Manager, L3=Director, L4=Executive, L5=Human Principal`. Two things
+> were wrong with it, and both are fixed here rather than in the code, because the
+> code's ordering is the one that is live and executing:
+>
+> 1. **It had no `vp` rung.** The code has had five *agent* levels all along, with
+>    `vp` sitting between director and executive. The old `L4` was Executive, so the
+>    doc's fourth rung and the code's fourth rung were different levels wearing the
+>    same ordinal — the exact collision that makes a mis-transcribed Rego rule
+>    silently under-gate an action.
+> 2. **Its top rung was not an agent level at all.** `L5 = Human Principal` used the
+>    authority ladder to express "a human must approve this", which is a different
+>    mechanism with a different implementation. The ladder now stops at `executive`,
+>    and mandatory human approval moved to its own column (see below).
+>
+> **The remap applied, row for row:** `L1→worker`, `L2→manager`, `L3→director`,
+> `L4→executive`, `L5→executive` **plus `Mandatory HITL = yes`**.
+>
+> `L4→executive` (not `vp`) is deliberate. The old `L4` label read "Executive agent
+> approval" in this file's own words, and its Finance row's trigger signal literally
+> names `exec_threshold`. It meant executive, not "senior, broadly". Nothing in the
+> old matrices ever meant `vp` — which is why no row below is `vp`. Read that silence
+> as the open question at the end of this section, not as a decision.
+>
+> `L4` and `L5` therefore both land on `executive` on the authority axis. That is not
+> a lost tier: they never differed by agent rung (there was no rung above Executive),
+> only by whether a human had to sign. That difference is now explicit instead of
+> being smuggled into an ordinal.
+
+### Mandatory HITL — the mechanism that replaced `L5`
+`[CODE-VERIFIED]` Human approval is **not** a rung on the ladder. It is a separate,
+already-implemented gate: `AgentContract.human_in_loop_triggers`
+(`src/skylize/contracts/base.py:157`), evaluated by the evaluator's `hitl_check`
+stage (`evaluator.py:479-492`), which returns `deferred_to_human` independently of
+`authority_check`. The two stages are independent, which is precisely what lets a row
+be **both** `executive` **and** mandatory-HITL — something the old single ordinal
+could not express.
+
+The declared trigger vocabulary is `HumanInLoopTrigger` (`contracts/base.py:81-89`):
+`spend_over_ceiling`, `first_external_launch`, `brand_legal_sensitive`,
+`authority_exceeded`, `security_severity_high`, `low_confidence_irreversible`.
+
+A `Mandatory HITL` cell below names the trigger that carries the row. A cell reading
+**`yes — NO TRIGGER YET`** is a **gap, not an approval**: the row's intent survived
+the remap, but no existing enum member expresses it, and Rego for that row stays
+blocked until one is added.
 
 ### Risk bands (the core axis — dollar amount is only ONE dimension)
 `[RESEARCH-SUGGESTED]` The primary axis is **reversible vs. irreversible** and
@@ -74,49 +132,78 @@ L5 = Human Principal   (mandatory HITL — human approval)
 ### SDR / Sales matrix
 `[RESEARCH-SUGGESTED]` — every row needs owner confirmation:
 
-| Action | Risk | Min Level | Rego trigger signal |
-|---|---|---|---|
-| Templated outbound email (opted-in list) | Low | L1 | `tool=="sendEmail" && template in approved && list=="opted_in"` |
-| Meeting booking / calendar | Low | L1 | `tool=="bookMeeting"` |
-| CRM update (standard fields, audited) | Low-Med | L2 | `tool=="updateCRM" && field in standard_fields` |
-| Personalized/free-text outbound (new content) | Medium | L2 | `tool=="sendEmail" && template==null` |
-| Discount offer 0–15% | Medium | L2 | `discount <= 0.15` |
-| Discount 16–30% or Net 60 | High | L3 | `discount > 0.15 \|\| terms=="net60"` |
-| Send proposal (standard template) | Med-High | L3 | `tool=="sendProposal"` |
-| Send contract / e-signature | Critical | L5 | `tool=="sendContract" \|\| esignature==true` |
-| Discount >30% or non-standard legal term | Critical | L5 | `discount > 0.30 \|\| nonStandardLegal==true` |
+| Action | Risk | Min Level | Mandatory HITL | Rego trigger signal |
+|---|---|---|---|---|
+| Templated outbound email (opted-in list) | Low | `worker` | no | `tool=="sendEmail" && template in approved && list=="opted_in"` |
+| Meeting booking / calendar | Low | `worker` | no | `tool=="bookMeeting"` |
+| CRM update (standard fields, audited) | Low-Med | `manager` | no | `tool=="updateCRM" && field in standard_fields` |
+| Personalized/free-text outbound (new content) | Medium | `manager` | no | `tool=="sendEmail" && template==null` |
+| Discount offer 0–15% | Medium | `manager` | no | `discount <= 0.15` |
+| Discount 16–30% or Net 60 | High | `director` | no | `discount > 0.15 \|\| terms=="net60"` |
+| Send proposal (standard template) | Med-High | `director` | no | `tool=="sendProposal"` |
+| Send contract / e-signature | Critical | `executive` | **yes — `brand_legal_sensitive`** | `tool=="sendContract" \|\| esignature==true` |
+| Discount >30% or non-standard legal term | Critical | `executive` | **yes — `brand_legal_sensitive`** | `discount > 0.30 \|\| nonStandardLegal==true` |
 
 ### Marketing matrix
 `[RESEARCH-SUGGESTED]`:
 
-| Action | Risk | Min Level | Rego trigger signal |
-|---|---|---|---|
-| Internal content/report draft, analysis | Low | L1 | `tool in {"draftContent","analyze"}` |
-| Schedule social post (approved content) | Low-Med | L2 | `tool=="schedulePost" && content_approved==true` |
-| Paid ad spend, under daily cap | Medium | L2 | `tool=="adSpend" && dailySpend+amount <= cap` |
-| Email campaign send (existing list) | Medium | L3 | `tool=="sendCampaign"` |
-| Paid ad spend, over cap / new campaign | High | L3 | `dailySpend+amount > cap` |
-| Brand/messaging change | High | L4 | `tool=="changeBrandMessaging"` |
-| New market expansion, large budget realloc | Critical | L5 | `tool=="budgetReallocation" && amount > exec_limit` |
+| Action | Risk | Min Level | Mandatory HITL | Rego trigger signal |
+|---|---|---|---|---|
+| Internal content/report draft, analysis | Low | `worker` | no | `tool in {"draftContent","analyze"}` |
+| Schedule social post (approved content) | Low-Med | `manager` | no | `tool=="schedulePost" && content_approved==true` |
+| Paid ad spend, under daily cap | Medium | `manager` | no | `tool=="adSpend" && dailySpend+amount <= cap` |
+| Email campaign send (existing list) | Medium | `director` | no | `tool=="sendCampaign"` |
+| Paid ad spend, over cap / new campaign | High | `director` | no | `dailySpend+amount > cap` |
+| Brand/messaging change | High | `executive` | no | `tool=="changeBrandMessaging"` |
+| New market expansion, large budget realloc | Critical | `executive` | **yes — `spend_over_ceiling`** | `tool=="budgetReallocation" && amount > exec_limit` |
 
 ### Finance matrix
 `[RESEARCH-SUGGESTED]`:
 
-| Action | Risk | Min Level | Rego trigger signal |
-|---|---|---|---|
-| Financial report generation (read-only) | Low | L1 | `tool=="generateReport" && mode=="read"` |
-| PO-matched, clean three-way-match invoice → approval route | Low-Med | L2 | `threeWayMatch==true && poBacked==true` |
-| Invoice approval (within tolerance, under threshold) | Medium | L2 | `tool=="approveInvoice" && amount < mgr_limit` |
-| Refund (small, under threshold, no fraud flag) | Medium | L2 | `tool=="issueRefund" && amount < refund_threshold && !fraudFlag` |
-| Vendor record create/modify | High | L3 | `tool=="modifyVendor"` |
-| Payment processing (over threshold) | High | L4 | `tool=="processPayment" && amount >= exec_threshold` |
-| Budget reallocation (large) | Critical | L5 | `tool=="budgetReallocation" && amount > critical_limit` |
-| Vendor bank-detail change | Critical | L5 | `tool=="changeVendorBank"` |
+| Action | Risk | Min Level | Mandatory HITL | Rego trigger signal |
+|---|---|---|---|---|
+| Financial report generation (read-only) | Low | `worker` | no | `tool=="generateReport" && mode=="read"` |
+| PO-matched, clean three-way-match invoice → approval route | Low-Med | `manager` | no | `threeWayMatch==true && poBacked==true` |
+| Invoice approval (within tolerance, under threshold) | Medium | `manager` | no | `tool=="approveInvoice" && amount < mgr_limit` |
+| Refund (small, under threshold, no fraud flag) | Medium | `manager` | no | `tool=="issueRefund" && amount < refund_threshold && !fraudFlag` |
+| Vendor record create/modify | High | `director` | no | `tool=="modifyVendor"` |
+| Payment processing (over threshold) | High | `executive` | no | `tool=="processPayment" && amount >= exec_threshold` |
+| Budget reallocation (large) | Critical | `executive` | **yes — `spend_over_ceiling`** | `tool=="budgetReallocation" && amount > critical_limit` |
+| Vendor bank-detail change | Critical | `executive` | **yes — `payment_instrument_change`** | `tool=="changeVendorBank"` |
 
 > **`[OWNER-DECISION-REQUIRED]`** — Fill in the actual dollar values for:
 > `mgr_limit`, `refund_threshold`, `exec_threshold`, `exec_limit`, `critical_limit`,
 > `cap` (daily ad cap). These live in `data.json` (tunable without touching Rego).
 > See 0.2 for suggested defaults to align against.
+
+### Open sub-questions raised by the 2026-09-06 ladder reconciliation
+
+Every one of the 24 matrix rows above remapped with its governance intent intact —
+the ordinals changed, no row's meaning did. These three questions are what the
+remap *exposed*; none of them existed as a decision before, and none is guessed at
+above.
+
+- **Q0.1a `[OWNER-DECISION-REQUIRED]` — `vp` (rank 4) has no rows.** The old ladder
+  had no VP rung, so no matrix row was ever written against one, and inventing rows
+  now would be exactly the unsourced-label failure the banner at the top of this file
+  exists to prevent. `vp` is a real, live level: `vp_creative`
+  (`src/skylize/contracts/mvp/`) holds it today. **Decide one of:** (i) `vp` is a
+  pass-through rung no gate targets, and the matrices are correct as written;
+  (ii) some rows currently `executive` should be `vp` — name them; (iii) `vp` should
+  be retired from `AUTHORITY_RANK`, which is a code change, not a doc change.
+- **Q0.1b `[OWNER-DECISION-REQUIRED]` — `L4` and `L5` both became `executive`.**
+  Faithful to the old text (there was no rung above Executive; `L5` meant "a human
+  signs"), so the four `executive` rows now split only by the `Mandatory HITL`
+  column. Confirm that is the intended shape, or supply the missing distinction.
+- **Q0.1c RESOLVED** — "Vendor bank-detail change" had no HITL trigger. It was
+  `L5` (mandatory human) and it is a first-rank payment-fraud vector, but no
+  `HumanInLoopTrigger` member covered it: it is not spend (`spend_over_ceiling`
+  reads an amount, and a bank-detail change carries none), not brand/legal, not a
+  detected security event, and `low_confidence_irreversible` turns on model
+  confidence rather than on the action's nature. Added `payment_instrument_change`
+  to `HumanInLoopTrigger` (`src/skylize/contracts/base.py`). No contract currently
+  declares a `changeVendorBank` stage — the trigger exists as the mechanism the
+  Rego for this row can target; wiring a stage to it is a separate piece of work.
 
 ---
 

@@ -22,7 +22,12 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from uuid import UUID
 
-from ...contracts.base import AgentContract, AuthorityLevel, HumanInLoopTrigger
+from ...contracts.base import (
+    AUTHORITY_RANK,
+    AgentContract,
+    AuthorityLevel,
+    HumanInLoopTrigger,
+)
 from ...contracts.registry import AgentNotRegistered, AgentRegistry
 from ...dal.ports import BudgetCeiling, CapitalRepository
 from .events import (
@@ -39,13 +44,14 @@ from .events import (
 POLICY_VERSION = "mvp-inline-1.0"
 
 # Authority ordering (agent_governance.md §2); higher rank == more authority.
-_RANK: dict[AuthorityLevel, int] = {
-    "worker": 1,
-    "manager": 2,
-    "director": 3,
-    "vp": 4,
-    "executive": 5,
-}
+#
+# ALIAS, not a copy. The ladder moved to `contracts.base.AUTHORITY_RANK` when
+# `GovernanceAuthority.mint` started clamping a token's level to the human
+# principal's: that clamp and the `<` comparisons below must order the five
+# levels identically, and two separately-maintained dicts is how they would stop
+# doing so. Values are unchanged (worker=1 .. executive=5), so every comparison
+# and the `* 8.0` score weight behave exactly as before.
+_RANK: dict[AuthorityLevel, int] = AUTHORITY_RANK
 
 # Stage names (mirrored into the emitted DecisionEvaluated record).
 STAGE_SECURITY = "safety_veto"

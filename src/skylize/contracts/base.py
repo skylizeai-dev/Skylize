@@ -25,6 +25,27 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 # Canonical authority levels — IDENTICAL to agent_governance.md §2.
 AuthorityLevel = Literal["executive", "vp", "director", "manager", "worker"]
 
+# The ONE ordering of those levels. Higher rank == more authority.
+#
+# It lives here, next to the literal it ranks, because two independent consumers
+# now need it and neither may import the other: the inline decision evaluator
+# (`app.decision_engine.evaluator`, which compares an agent's level against a
+# stage's requirement and scores it) and the Governance Authority
+# (`app.governance.authority`, which clamps a minted token's level to the human
+# principal's). A second, privately-defined copy of this ladder is exactly the
+# drift that would make "the agent can never exceed the human" silently false in
+# one of the two.
+#
+# docs/04_decision_engine/policy_inputs.md §0.1 is reconciled to THIS ordering:
+# the doc's L1..L5 labels are the ranks below, not a parallel ladder.
+AUTHORITY_RANK: dict[AuthorityLevel, int] = {
+    "worker": 1,
+    "manager": 2,
+    "director": 3,
+    "vp": 4,
+    "executive": 5,
+}
+
 # Schema version of the SIGNED token payload.
 #   "1.0" — the original eleven-field token. Its canonical bytes are frozen
 #           forever by tests/contract/test_token_v10_backcompat.py.
@@ -66,6 +87,7 @@ class HumanInLoopTrigger(str, Enum):
     AUTHORITY_EXCEEDED = "authority_exceeded"
     SECURITY_SEVERITY_HIGH = "security_severity_high"
     LOW_CONFIDENCE_IRREVERSIBLE = "low_confidence_irreversible"
+    PAYMENT_INSTRUMENT_CHANGE = "payment_instrument_change"
 
 
 class ToolGrant(BaseModel):
@@ -182,10 +204,17 @@ class OnBehalfOf(BaseModel):
     not import from `app`. `app.principal.models` re-exports it so the principal
     kernel keeps its own vocabulary.
 
-    `authority_fingerprint` is the sha256 over the principal's compiled scope set
-    at mint time (`app.principal.authority.fingerprint_scopes`). It is what lets a
-    verifier detect that the human's authority changed after the token was minted,
-    without a per-call permission join.
+    `authority_fingerprint` is the sha256 over the principal's compiled authority
+    at mint time — their scope set AND their `authority_level`
+    (`app.principal.authority.fingerprint_authority`). It is what lets a verifier
+    detect that the human's authority changed after the token was minted, without
+    a per-call permission join.
+
+    The level is inside the fingerprint deliberately. `GovernanceAuthority.mint`
+    clamps a token's `authority_level` to the principal's, so a demotion that did
+    not touch a single scope must still invalidate every token minted before it —
+    otherwise the clamp holds only until the next mint and a demoted human's live
+    token keeps the level they no longer have for the rest of its TTL.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")

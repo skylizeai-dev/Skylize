@@ -25,6 +25,7 @@ from cryptography.hazmat.primitives.asymmetric.ec import EllipticCurvePublicKey
 from ...config import Settings
 from ...contracts.base import (
     AgentContract,
+    AuthorityLevel,
     GovernanceToken,
     OnBehalfOf,
     SessionKind,
@@ -32,7 +33,7 @@ from ...contracts.base import (
 )
 from ...contracts.registry import AgentRegistry
 from ...contracts.token import LiveStateChecker, TokenSigner
-from ..principal.authority import resolve_effective_scope
+from ..principal.authority import attenuate_level, resolve_effective_scope
 from ..principal.errors import AuthorityUnavailable, PrincipalError
 from ..principal.provider import AuthorityProvider
 from ...dal.ports import GovernanceRepository, KillScope, TokenRow
@@ -280,10 +281,30 @@ class GovernanceAuthority:
 
             an employee's agent can never do anything the employee could not do.
 
-        So the requested scope is intersected against the principal's COMPILED
-        authority before anything is signed, and an excess raises
-        `AuthorityExceeded` — it is never silently trimmed, because an agent that
-        quietly does less than it was asked is the failure nobody notices.
+        That property has TWO axes, and this method enforces both:
+
+          - SCOPE. The requested scope is intersected against the principal's
+            COMPILED authority before anything is signed, and an excess raises
+            `AuthorityExceeded` — never silently trimmed, because an agent that
+            quietly does less than it was asked is the failure nobody notices.
+          - AUTHORITY LEVEL. The signed `authority_level` is CLAMPED to
+            `min(contract level, principal level)` over `AUTHORITY_RANK`. Without
+            it a director-level contract driven by a worker would mint a
+            director token, and the evaluator's `authority_check` stage would wave
+            through an action that employee could never have approved themselves.
+
+        Scope excess raises and level excess clamps, and that asymmetry is
+        deliberate. A scope the human lacks is a request for something that was
+        never theirs to delegate — a bug or an attack, and it should be loud. A
+        level above the human's is the NORMAL case for a shared contract: the same
+        contract is legitimately driven by employees at different ranks, and the
+        answer is the token each of them is entitled to, not a denial. The clamp
+        is never silent, though: it writes a `governance.authority_attenuated`
+        audit row whenever it actually lowers the level.
+
+        Autonomous mints do not clamp. There is no human in that shape, so there
+        is nothing to clamp against, and `contract.authority_level` — rooted at
+        `human_owner` and flowed down the agent org tree — is already the answer.
 
         The `authority_fingerprint` in the claim is derived HERE from the snapshot
         this method just compiled. It is deliberately not a parameter: a
@@ -298,9 +319,11 @@ class GovernanceAuthority:
         )
         on_behalf_of: OnBehalfOf | None = None
         token_version: TokenVersion = "1.0"
+        # Autonomous default. Reassigned below only on the principal path.
+        authority_level = contract.authority_level
 
         if on_behalf_of_principal is not None:
-            on_behalf_of = await self._gate_principal_scope(
+            on_behalf_of, principal_level = await self._gate_principal_scope(
                 org_id=org_id,
                 correlation_id=correlation_id,
                 contract=contract,
@@ -310,11 +333,31 @@ class GovernanceAuthority:
                 at=now,
             )
             token_version = "1.1"
+            authority_level = attenuate_level(
+                agent_level=contract.authority_level,
+                principal_level=principal_level,
+            )
+            if authority_level != contract.authority_level:
+                # Audited BEFORE the signature exists, so the trail shows the
+                # narrowing even if signing or persistence then fails.
+                await self._audit.record(
+                    org_id=org_id,
+                    correlation_id=correlation_id,
+                    action_type="governance.authority_attenuated",
+                    result="success",
+                    source_agent_id=contract.agent_id,
+                    authority_level=authority_level,
+                    result_reason=(
+                        f"contract authority_level {contract.authority_level!r} "
+                        f"clamped to {authority_level!r} by principal "
+                        f"{on_behalf_of_principal!r} (level {principal_level!r})"
+                    ),
+                )
 
         token = self._signer.sign(
             token_id=uuid4(),
             agent_id=contract.agent_id,
-            authority_level=contract.authority_level,
+            authority_level=authority_level,
             department=contract.department,
             delegation_chain=delegation_chain or [contract.agent_id],
             scope=requested_scope,
@@ -368,8 +411,16 @@ class GovernanceAuthority:
         session_kind: SessionKind,
         requested_scope: list[str],
         at: datetime,
-    ) -> OnBehalfOf:
+    ) -> tuple[OnBehalfOf, AuthorityLevel]:
         """Intersect the requested scope against the human's authority, or deny.
+
+        Returns the signable claim AND the principal's own `authority_level`, so
+        `mint` can clamp with it. The level rides back from here rather than being
+        fetched separately because the snapshot compiled below ALREADY read the
+        `Principal` row to get it (`PrincipalAuthorityService.snapshot_for`): the
+        clamp therefore adds no query, and the whole principal read stays exactly
+        ONE per mint. Nothing on the per-CALL verification path gained a lookup —
+        that path still compares the fingerprint against the cached snapshot.
 
         Every denial is audited before it propagates, so a refused delegation is
         as visible in the trail as a granted one — that record is the thing a
@@ -409,10 +460,13 @@ class GovernanceAuthority:
         self._snapshot.set_authority_fingerprint(
             org_id, principal_id, snapshot.fingerprint
         )
-        return OnBehalfOf(
-            principal_id=principal_id,
-            authority_fingerprint=snapshot.fingerprint,
-            session_kind=session_kind,
+        return (
+            OnBehalfOf(
+                principal_id=principal_id,
+                authority_fingerprint=snapshot.fingerprint,
+                session_kind=session_kind,
+            ),
+            snapshot.authority_level,
         )
 
     async def invalidate_principal_authority(

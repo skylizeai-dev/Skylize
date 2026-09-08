@@ -147,6 +147,18 @@ class AuthoritySnapshot(BaseModel):
     changes the fingerprint changes, so live tokens minted under the old authority
     are detectable at verification time WITHOUT a database lookup per call. This
     is how revocation works without making the hot path chatty.
+
+    `authority_level` is carried here rather than re-read, because
+    `PrincipalAuthorityService.snapshot_for` has already loaded the `Principal`
+    row to compile the scopes. `GovernanceAuthority.mint` needs the level to clamp
+    the token it is about to sign; taking it off this snapshot means the clamp
+    costs ZERO additional queries and stays exactly ONE read per mint — the
+    fingerprint's no-lookup-per-CALL design is untouched, because nothing on the
+    verification path reads a Principal row.
+
+    It is a REQUIRED field. Defaulting it would mean a snapshot built by some
+    future path without a level silently attenuating to whatever that default is,
+    and every safe default here is a wrong answer for someone.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -154,8 +166,9 @@ class AuthoritySnapshot(BaseModel):
     principal_id: str
     org_id: str
     scopes: frozenset[ScopeId]
+    authority_level: AuthorityLevel
     computed_at: datetime
-    fingerprint: str  # sha256 over (org_id, principal_id, sorted(scopes))
+    fingerprint: str  # sha256 over (org_id, principal_id, sorted(scopes), level)
 
     @field_validator("scopes", mode="before")
     @classmethod

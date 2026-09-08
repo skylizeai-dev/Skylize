@@ -16,7 +16,8 @@ from .authority import (
     assert_snapshot_current,
     attenuate_for_subagent,
     compile_authority,
-    fingerprint_scopes,
+    attenuate_level,
+    fingerprint_authority,
     resolve_effective_scope,
 )
 from .errors import (
@@ -80,6 +81,7 @@ __all__ = [
     "assert_snapshot_current",
     "attenuate_for_subagent",
     "compile_authority",
-    "fingerprint_scopes",
+    "attenuate_level",
+    "fingerprint_authority",
     "resolve_effective_scope",
 ]

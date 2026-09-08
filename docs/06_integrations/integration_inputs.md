@@ -229,10 +229,13 @@ of it.
   endpoint exists.
 - **Q2.1c `[OWNER-DECISION-REQUIRED]` Refund authorization ceiling.** A concrete
   number, or the explicit statement that refunds always defer to a human.
-  `policy_inputs.md:110` already carries a `[RESEARCH-SUGGESTED]` row -
-  "Refund (small, under threshold, no fraud flag) | Medium | L2" - but the threshold
-  itself is unset, and `policy_inputs.md:141` defines T4 as auto-reject before
-  execution. Until 1.1 is resolved neither is enforceable on the tool path.
+  `policy_inputs.md:168` already carries a `[RESEARCH-SUGGESTED]` row -
+  "Refund (small, under threshold, no fraud flag) | Medium | `manager` | no" - but the
+  threshold itself is unset, and `policy_inputs.md:227` defines T4 as auto-reject
+  before execution. Until 1.1 is resolved neither is enforceable on the tool path.
+  (The level column read `L2` until the 2026-09-06 reconciliation of that file's
+  ladder to the canonical `AUTHORITY_RANK`; `L2` was and is `manager`, so the row's
+  meaning is unchanged - only its label is.)
 - **Q2.1d `[OWNER-DECISION-REQUIRED]` Idempotency key strategy.** Non-optional here.
   The HubSpot precedent retries on 429/5xx with `reraise=True`
   (`src/skylize/tools/builtin/hubspot_tools.py:95-100,111-116`). That shape applied
