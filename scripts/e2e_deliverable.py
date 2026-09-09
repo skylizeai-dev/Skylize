@@ -20,7 +20,6 @@ Live (real Claude):
 from __future__ import annotations
 
 import sys
-from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
@@ -53,9 +52,9 @@ def main() -> int:
             json={
                 "agent_id": "hook_generator_agent",
                 "input": {
-                    "brief_id": str(uuid4()),
-                    "product": "an AI-native business operating system",
-                    "audience": "seed-stage startup founders",
+                    "brand_name": "Skylize",
+                    "product_description": "an AI-native business operating system",
+                    "target_audience": "seed-stage startup founders",
                 },
             },
         )
