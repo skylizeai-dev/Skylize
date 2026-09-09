@@ -761,8 +761,13 @@ class AnthropicAdapter:
             kwargs: dict[str, Any] = dict(
                 model=model_id,
                 max_tokens=request.requested_max_tokens,
-                temperature=request.temperature,
                 messages=[{"role": "user", "content": request.prompt}],
+                # `temperature` is no longer a typed Messages.create() kwarg in
+                # anthropic>=1.0 (TypeError: unexpected keyword argument
+                # 'temperature'); extra_body merges flat into the outgoing JSON
+                # body (_base_client.py's _merge_mappings), so the wire format
+                # to the API is unchanged.
+                extra_body={"temperature": request.temperature},
             )
             if request.system:
                 kwargs["system"] = request.system
@@ -837,9 +842,12 @@ class AnthropicAdapter:
         kwargs: dict[str, Any] = dict(
             model=model_id,
             max_tokens=request.requested_max_tokens,
-            temperature=request.temperature,
             messages=[_to_anthropic_message(m) for m in request.messages],
             tools=anthropic_tools,
+            # See the comment at the other call site (generate()) — temperature
+            # moved to extra_body because anthropic>=1.0 dropped it as a typed
+            # Messages.create() kwarg.
+            extra_body={"temperature": request.temperature},
         )
         if request.system:
             kwargs["system"] = request.system
