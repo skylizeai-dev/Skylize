@@ -196,6 +196,41 @@ class ToolOAuthProfile(BaseModel):
     label: str = ""
 
 
+class ToolApprovalProfile(BaseModel):
+    """Declares that invoking this tool requires a HUMAN APPROVAL OF THE EXACT
+    SAMPLED CALL, not merely of the request that started the run.
+
+    Opt-in and explicit, exactly like the three profiles above and `ToolWifProfile`:
+    a tool without this profile keeps precisely the behaviour it had before the
+    mid-loop suspension gate existed. That default is what preserves the property
+    at app/agents/execution.py:292-293 -- "a reject/defer verdict means no LLM
+    call, no deliverable, and no ledger row" -- for every contract that does not
+    opt in. Declaring this field is what knowingly gives that property up, in
+    exchange for the human reviewing an ACTION instead of a REQUEST (owner
+    decision D1, docs/architecture/hitl_approval_resumption_design.md).
+
+    WHY THIS LIVES ON THE TOOL AND NOT ON THE CONTRACT'S human_in_loop_triggers.
+    The synchronous decision gate's evaluator "runs before the mint and before
+    the model, against a proposal with no spend, no scope and no security
+    verdict, so trigger PRESENCE is all it can observe"
+    (app/decision_engine/evaluator.py:211-220). It is therefore structurally
+    unable to answer "is THIS sampled call gated". The tool is the thing whose
+    invocation moves money or mutates the world, so the tool is where the
+    declaration belongs -- the same seam the spend / oauth / permission / wif
+    profiles already use.
+
+    `reason` is shown to the reviewer and recorded in the queue row's
+    trigger_reason. `irreversible` is disclosure, not control flow: it tells the
+    reviewer that rejecting stops what has not happened and does not reverse what
+    has, because no compensation mechanism exists anywhere in this codebase.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    reason: str = Field(min_length=1)
+    irreversible: bool = True
+
+
 class ToolDefinition(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", arbitrary_types_allowed=True)
 
@@ -222,6 +257,13 @@ class ToolDefinition(BaseModel):
     #: Federation trust; see `ToolWifProfile`. Defaults to None like the three
     #: above, so every tool registered before this field existed is unaffected.
     wif: ToolWifProfile | None = None
+    #: Non-None marks this tool as requiring a human approval of the exact
+    #: sampled call; see `ToolApprovalProfile`. Defaults to None like the four
+    #: above. Unlike them it is NOT enforced in the proxy: the gate that reads it
+    #: lives in the agent tool loop, because only there does the whole turn (and
+    #: the conversation prefix a resumption needs) exist at once. See
+    #: AgentExecutionService._govern_tool_turn.
+    approval: ToolApprovalProfile | None = None
 
 
 @dataclass(frozen=True, slots=True)

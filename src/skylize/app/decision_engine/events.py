@@ -58,14 +58,45 @@ DecisionOutcome = Literal["approved", "rejected", "deferred_to_human"]
 RuleApplied = Literal["authority", "recency", "safety_veto", "escalated"]
 
 
-def decision_id_for(proposal_id: UUID) -> UUID:
-    """Deterministic decision_id derived from the source proposal id."""
-    return uuid5(_DECISION_NS, f"decision:{proposal_id}")
+def _suffix(discriminator: str | None) -> str:
+    return f":{discriminator}" if discriminator else ""
 
 
-def hitl_id_for(proposal_id: UUID) -> UUID:
-    """Deterministic HITL ticket id derived from the source proposal id."""
-    return uuid5(_DECISION_NS, f"hitl:{proposal_id}")
+def decision_id_for(proposal_id: UUID, *, discriminator: str | None = None) -> UUID:
+    """Deterministic decision_id derived from the source proposal id.
+
+    See ``hitl_id_for`` for what ``discriminator`` is and why it defaults to None.
+    """
+    return uuid5(_DECISION_NS, f"decision:{proposal_id}{_suffix(discriminator)}")
+
+
+def hitl_id_for(proposal_id: UUID, *, discriminator: str | None = None) -> UUID:
+    """Deterministic HITL ticket id derived from the source proposal id, and
+    optionally from WHICH SUSPENSION within that proposal.
+
+    ``discriminator`` exists because a proposal can now reach a human in more
+    than one way. The synchronous stage-2.5 gate defers a REQUEST; the mid-loop
+    gate (``AgentExecutionService._govern_tool_turn``) defers a specific sampled
+    TURN and passes ``turn:{iteration}``. Both ids are primary keys --
+    ``hitl_queue.hitl_id`` (migration 0001:204) and, through ``decision_id_for``,
+    ``decisions.decision_id`` (:207) -- so two suspensions deriving the same id
+    would be a primary-key violation on a governance table.
+
+    THAT COLLISION IS NOT REACHABLE AT THIS COMMIT, and this parameter is
+    defence in depth rather than a fix for a live bug. Both gates RAISE on defer
+    (``execution.py:613-616``, and the mid-loop gate likewise) and the raise ends
+    the run, so one ``execute()`` call produces at most one deferral; every
+    ``execute()`` mints a fresh ``run_id`` (:301), including on every approval
+    retry. Today's non-collision is therefore a property of CONTROL FLOW, not of
+    the derivation. Making the derivation itself collision-free is what stops a
+    future edit -- one that lets a run defer twice -- from becoming a
+    primary-key violation instead of a second ticket.
+
+    With no discriminator the uuid5 input is character-for-character what it was
+    before this parameter existed, so every id already written to ``decisions``
+    and ``hitl_queue`` is unchanged.
+    """
+    return uuid5(_DECISION_NS, f"hitl:{proposal_id}{_suffix(discriminator)}")
 
 
 class SecurityVerdict(BaseModel):
