@@ -23,7 +23,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from cryptography.hazmat.primitives.asymmetric.ec import EllipticCurvePublicKey
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from ..app.audit.service import AuditService
 from ..app.credentials.oauth import (
@@ -77,6 +77,59 @@ LiveStateFor = Callable[[str], LiveStateChecker]
 # workflow). Injected as a callback so the proxy stays decoupled from the full
 # Authority — it only needs this one hot-path hook.
 RecordAction = Callable[..., Awaitable[bool]]
+
+
+def _settlement_amount(
+    tool: ToolDefinition, output: BaseModel, reservation: Reservation | None
+) -> tuple[int, str | None]:
+    """How much of the hold to settle, and why if that is not what the tool said.
+
+    Returns `(amount_minor, anomaly)`. `anomaly` is None on every healthy path;
+    non-None means the tool reported something unusable and the caller is
+    settling the FULL reservation instead, which the caller must surface.
+
+    THE DIRECTION OF THE FALLBACK IS THE DESIGN. A tool that declares
+    `actual_amount_field` but reports garbage has still MOVED REAL MONEY — the
+    handler already returned. Settling low would hand the ceiling back budget
+    that a completed action consumed and let the org spend it twice; settling the
+    reservation is bounded by what the org already approved and merely keeps the
+    ceiling conservative. So this fails toward over-committing, but never
+    SILENTLY: every fallback carries an `anomaly` that lands in the audit row.
+
+    Over-report (`actual > reserved`) is treated the same way rather than left to
+    the repository's `LEAST(actual, amount_minor)` clamp
+    (app/principal/spend.py:333). The clamp produces the same number, but does it
+    without a trace — and `SpendLedger.commit` is explicit that over-spend "is a
+    policy event, not a rounding detail" (app/principal/spend.py:172-174), which
+    is not something a ledger should absorb quietly.
+    """
+    if reservation is None:
+        return 0, None
+    profile = tool.spend
+    # No profile, or a profile that declares actual-always-equals-reserved. Not
+    # an anomaly: it is the majority case, and it is DECLARED, not assumed.
+    if profile is None or profile.actual_amount_field is None:
+        return reservation.amount_minor, None
+
+    field = profile.actual_amount_field
+    # `ToolDefinition` proved this field exists on `output_schema` at
+    # registration, so a miss here means the handler returned some other model.
+    actual = getattr(output, field, None)
+    # bool is an int subclass; `True` must not settle as 1 cent. Same guard the
+    # reservation side applies to `amount_field`.
+    if not isinstance(actual, int) or isinstance(actual, bool) or actual < 0:
+        return reservation.amount_minor, (
+            f"tool {tool.tool_id!r} declares actual-spend field {field!r} but "
+            f"returned {actual!r}, which is not a non-negative integer minor-unit "
+            f"amount; settled the full reservation of {reservation.amount_minor}"
+        )
+    if actual > reservation.amount_minor:
+        return reservation.amount_minor, (
+            f"tool {tool.tool_id!r} reported spending {actual} against a hold of "
+            f"{reservation.amount_minor}; over-spend must go back through reserve "
+            f"for the delta, so the full reservation was settled instead"
+        )
+    return actual, None
 
 
 class ToolCallCounter:
@@ -365,6 +418,14 @@ class ToolProxy:
             )
             raise ToolExecutionError(str(exc)) from exc
 
+        # What the hold should settle for. Computed BEFORE the audit call so an
+        # anomaly (below) lands in the audit row rather than only in a log line:
+        # a settlement that disagrees with the tool's own report is precisely the
+        # thing a human reconciling this org's ledger has to be able to find.
+        # Pure and total — no I/O, raises nothing — so moving it above the audit
+        # cannot cost us the audit row that ordering exists to protect.
+        settle_minor, settle_anomaly = _settlement_amount(tool, output, reservation)
+
         # The side effect has happened. Audit it BEFORE settling the ledger: the
         # audit record is the evidence that the action ran, and a ledger failure
         # must not be able to erase it. Ordered the other way, a raising commit
@@ -372,21 +433,27 @@ class ToolProxy:
         await self._audit_call(
             tool_id=tool_id, contract=contract, org_id=org_id,
             correlation_id=correlation_id, governance_token=governance_token,
-            result="success", reason=None, outputs=output.model_dump(mode="json"),
+            result="success", reason=settle_anomaly,
+            outputs=output.model_dump(mode="json"),
         )
 
-        # Settle the hold with the reserved amount. Deliberately NOT released on
-        # failure here — the action ran, so the budget it consumed is real; a
-        # release would under-count spend for an action that actually happened.
-        # A commit failure propagates: the caller has to know the ledger and the
-        # world disagree, and the audit row above lets a human reconcile. The
-        # hold meanwhile stays 'held', so the ceiling keeps binding until
-        # `sweep_expired` reclaims it rather than freeing budget prematurely.
+        # Settle the hold. Deliberately NOT released on failure here — the action
+        # ran, so the budget it consumed is real; a release would under-count
+        # spend for an action that actually happened. A commit failure
+        # propagates: the caller has to know the ledger and the world disagree,
+        # and the audit row above lets a human reconcile. The hold meanwhile
+        # stays 'held', so the ceiling keeps binding until `sweep_expired`
+        # reclaims it rather than freeing budget prematurely.
         if reservation is not None:
+            if settle_anomaly is not None:
+                logger.error(
+                    "settling reservation %s at its full reserved amount: %s",
+                    reservation.reservation_id, settle_anomaly,
+                )
             await self._spend_ledger.commit(  # type: ignore[union-attr]
                 org_id=org_id,
                 reservation_id=reservation.reservation_id,
-                actual_minor=reservation.amount_minor,
+                actual_minor=settle_minor,
             )
 
         return ToolResult(tool_id=tool_id, output=output)
@@ -790,9 +857,25 @@ class ToolProxy:
                 # tool). `try_reserve` treats a repeated idempotency_key as a
                 # retry and returns the ORIGINAL hold, so a key shared by two
                 # distinct calls would let the second spend against the first's
-                # reservation. `invoke` has no retry/replay path — every call is a
-                # distinct logical spend. Idempotent replay needs a
-                # caller-supplied key, which this signature does not accept.
+                # reservation.
+                #
+                # KNOWN GAP, deliberately left open here. An earlier version of
+                # this comment claimed `invoke` has no replay path and cannot
+                # accept a caller-supplied key; both halves are now false —
+                # `invoke` takes `hitl_id` (see its signature) and
+                # agents/execution.py:967-975 passes it. So a HITL replay of the
+                # SAME logical spend reserves a SECOND hold here, the handler
+                # dedupes provider-side on `ctx.hitl_id` and moves no money, and
+                # the ledger still settles both holds. That double-counts spend
+                # that happened once.
+                #
+                # Keying off `hitl_id` is the fix and is NOT applied yet, because
+                # two things must land with it: `try_reserve` returns a reservation
+                # whatever its state (app/principal/spend.py:296-308), so a replay
+                # after the failure path would receive a RELEASED hold and settle
+                # it to nothing — under-counting a real spend, which is worse than
+                # the double-count. Replay semantics per reservation state are an
+                # owner decision, not a cleanup.
                 idempotency_key=f"tool:{tool.tool_id}:{uuid4()}",
                 correlation_id=correlation_id,
                 governance_token_id=governance_token.token_id,
