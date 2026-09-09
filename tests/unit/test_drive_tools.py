@@ -92,6 +92,29 @@ def _patch_drive_http(monkeypatch, handler) -> list[httpx.Request]:
     return seen
 
 
+#: The pre-generated id the fake Drive hands out. Every create in this module
+#: spends this one, so a test asserting on the created file's id and a test
+#: asserting on the 409 dedupe path are talking about the same file.
+FAKE_GENERATED_ID = "file-123"
+
+
+def _with_generate_ids(handler, *, generated_id: str = FAKE_GENERATED_ID):
+    """Wrap a create-handler so `files/generateIds` is answered for it.
+
+    Every `create_file` now reserves an id first (`drive_tools.py` `generate_id`),
+    so a handler that answers only the upload would see the id call too and return
+    the wrong body. This dispatches on URL and leaves each test's handler concerned
+    only with the request it is actually about.
+    """
+
+    def dispatch(request: httpx.Request) -> httpx.Response:
+        if "generateIds" in str(request.url):
+            return httpx.Response(200, json={"ids": [generated_id]})
+        return handler(request)
+
+    return dispatch
+
+
 # ---------------------------------------------------------------------------
 # Profile declarations — the Q2.5b severity split
 # ---------------------------------------------------------------------------
@@ -130,7 +153,7 @@ async def test_create_file_uploads_and_returns_ids(monkeypatch) -> None:
             "webViewLink": "https://drive.google.com/file/d/file-123",
         })
 
-    seen = _patch_drive_http(monkeypatch, handler)
+    seen = _patch_drive_http(monkeypatch, _with_generate_ids(handler))
     tool = build_drive_create_file_tool(await _oauth_service(None))
     out = await tool.handler(
         DriveCreateFileIn(name="report.md", content="hello", mime_type="text/markdown"),
@@ -148,10 +171,133 @@ async def test_create_file_normalizes_a_drive_error(monkeypatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(403, json={"error": {"message": "quota exceeded"}})
 
-    _patch_drive_http(monkeypatch, handler)
+    _patch_drive_http(monkeypatch, _with_generate_ids(handler))
     tool = build_drive_create_file_tool(await _oauth_service(None))
     with pytest.raises(ToolExecutionError, match="quota exceeded"):
         await tool.handler(DriveCreateFileIn(name="a", content="b"), _ctx())
+
+
+# ---------------------------------------------------------------------------
+# Duplicate-on-5xx — the D.5 hazard (audit_gdrive_readiness.md:392)
+# ---------------------------------------------------------------------------
+
+async def test_create_file_sends_the_pregenerated_id(monkeypatch) -> None:
+    """The id must reach Drive in the metadata part, or 409 dedupe never engages."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"id": FAKE_GENERATED_ID, "name": "a"})
+
+    seen = _patch_drive_http(monkeypatch, _with_generate_ids(handler))
+    tool = build_drive_create_file_tool(await _oauth_service(None))
+    await tool.handler(DriveCreateFileIn(name="a", content="b"), _ctx())
+
+    upload = [r for r in seen if "upload/drive" in str(r.url)]
+    assert upload, "expected a multipart upload request"
+    assert f'"id": "{FAKE_GENERATED_ID}"'.encode() in upload[0].content
+
+
+async def test_a_5xx_after_server_side_success_does_not_duplicate(monkeypatch) -> None:
+    """THE REGRESSION TEST FOR THIS FIX.
+
+    Models the exact hazard: Drive COMMITS the file, then the response is lost to a
+    503. tenacity retries; the retry carries the same pre-generated id, so Drive
+    answers 409. Before this fix that retry was an un-keyed re-POST and Drive
+    created a SECOND file.
+
+    The assertion that matters is not merely that the call succeeded — it is that
+    exactly ONE id was ever reserved, so both upload attempts named the same file.
+    """
+    uploads = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal uploads
+        uploads += 1
+        if uploads == 1:
+            # Committed server-side; the response is lost.
+            return httpx.Response(503, json={"error": {"message": "backend error"}})
+        # The retry re-presents the same id: Drive refuses to duplicate.
+        return httpx.Response(409, json={"error": {"message": "A file with that id already exists"}})
+
+    seen = _patch_drive_http(monkeypatch, _with_generate_ids(handler))
+    tool = build_drive_create_file_tool(await _oauth_service(None))
+    out = await tool.handler(
+        DriveCreateFileIn(name="deliverable.md", content="x"), _ctx()
+    )
+
+    # The caller is told the truth: the file exists, under the id we reserved.
+    assert out.file_id == FAKE_GENERATED_ID
+    assert uploads == 2, "expected exactly one retry after the 503"
+
+    id_calls = [r for r in seen if "generateIds" in str(r.url)]
+    assert len(id_calls) == 1, (
+        "the id must be reserved ONCE, outside the retry loop; reserving per "
+        "attempt would give each attempt a different id and restore the duplicate"
+    )
+
+
+async def test_409_on_the_first_attempt_is_still_reported_as_success(monkeypatch) -> None:
+    """A connection drop can lose the response before any status is seen.
+
+    tenacity then retries and the FIRST status this code observes is the 409. The
+    handler must not report failure for a file that demonstrably exists.
+    """
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(409, json={"error": {"message": "already exists"}})
+
+    _patch_drive_http(monkeypatch, _with_generate_ids(handler))
+    tool = build_drive_create_file_tool(await _oauth_service(None))
+    out = await tool.handler(DriveCreateFileIn(name="a", content="b"), _ctx())
+    assert out.file_id == FAKE_GENERATED_ID
+
+
+async def test_retry_after_a_genuine_failure_still_succeeds(monkeypatch) -> None:
+    """The fix must not cost real resilience: a 503 with NO server-side write
+    still retries and still creates the file normally."""
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return httpx.Response(503, json={"error": {"message": "transient"}})
+        return httpx.Response(200, json={
+            "id": FAKE_GENERATED_ID, "name": "a",
+            "webViewLink": "https://drive.google.com/file/d/file-123",
+        })
+
+    _patch_drive_http(monkeypatch, _with_generate_ids(handler))
+    tool = build_drive_create_file_tool(await _oauth_service(None))
+    out = await tool.handler(DriveCreateFileIn(name="a", content="b"), _ctx())
+    assert out.file_id == FAKE_GENERATED_ID
+    assert out.web_view_link.endswith("file-123")
+    assert attempts == 2
+
+
+async def test_exhausted_retries_surface_a_clean_tool_error(monkeypatch) -> None:
+    """Persistent 5xx must degrade to ToolExecutionError, never a raw httpx error."""
+    _patch_drive_http(
+        monkeypatch,
+        _with_generate_ids(lambda r: httpx.Response(503, json={"error": {"message": "down"}})),
+    )
+    tool = build_drive_create_file_tool(await _oauth_service(None))
+    with pytest.raises(ToolExecutionError, match="retries exhausted"):
+        await tool.handler(DriveCreateFileIn(name="a", content="b"), _ctx())
+
+
+async def test_refuses_to_create_when_no_id_can_be_reserved(monkeypatch) -> None:
+    """Fail closed. An un-keyed create is exactly the unsafe state this fix removes,
+    so it must not be silently fallen back to."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "generateIds" in str(request.url):
+            return httpx.Response(200, json={"ids": []})
+        return httpx.Response(200, json={"id": "unexpected"})
+
+    seen = _patch_drive_http(monkeypatch, handler)
+    tool = build_drive_create_file_tool(await _oauth_service(None))
+    with pytest.raises(ToolExecutionError, match="pre-generated file id"):
+        await tool.handler(DriveCreateFileIn(name="a", content="b"), _ctx())
+    assert not [r for r in seen if "upload/drive" in str(r.url)], (
+        "no upload may be attempted without a reserved id"
+    )
 
 
 # ---------------------------------------------------------------------------
