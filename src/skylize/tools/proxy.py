@@ -165,6 +165,13 @@ class ToolProxy:
         # the handler through `ToolContext` so an externally-mutating tool can
         # derive a RETRY-STABLE idempotency key from it; see ToolContext.hitl_id.
         hitl_id: UUID | None = None,
+        # The provider's id for the `tool_use` block behind this call, and
+        # whether that block was READ FROM STORAGE (a human-approved turn
+        # replayed verbatim) rather than freshly sampled. Threaded together
+        # because neither is usable alone: see `ToolContext.replay_key`, which is
+        # the only sanctioned way to combine them.
+        tool_use_id: str | None = None,
+        is_hitl_resumption: bool = False,
     ) -> ToolResult:
         try:
             tool = self._registry.resolve(tool_id)
@@ -326,6 +333,7 @@ class ToolProxy:
         context = ToolContext(
             org_id=org_id, agent_id=contract.agent_id, correlation_id=correlation_id,
             permission_grant=permission_grant, hitl_id=hitl_id,
+            tool_use_id=tool_use_id, is_hitl_resumption=is_hitl_resumption,
         )
         try:
             output = await tool.handler(validated_input, context)

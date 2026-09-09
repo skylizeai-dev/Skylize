@@ -16,11 +16,15 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Literal
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from pydantic import BaseModel, ConfigDict, Field
 
 ToolCategory = Literal["memory", "search", "integration", "compute"]
+
+#: Namespace for `ToolContext.replay_key`. Its own namespace, so a replay key can
+#: never coincide with a hitl_id, a decision_id, or a GCP requestId.
+_REPLAY_KEY_NS = uuid5(NAMESPACE_URL, "skylize.tools.replay_key")
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +74,45 @@ class ToolContext:
     #: provider-side deduplication it exists to trigger. `hitl_id` is stable
     #: across those retries; that is the entire point of threading it here.
     hitl_id: UUID | None = None
+    #: The provider's id for the `tool_use` block that produced this call, when
+    #: the caller is the agent tool loop. Informational on its own -- it is
+    #: provider-scoped and carries no tenancy or ticket binding -- and load-bearing
+    #: only in combination with the two fields around it. See `replay_key`.
+    tool_use_id: str | None = None
+    #: True ONLY for the dispatch of a turn a human approved and that was replayed
+    #: from storage rather than re-sampled. Not true for the whole resumed run:
+    #: turns AFTER the approved one are sampled fresh, so their block ids are no
+    #: more stable than any other run's.
+    is_hitl_resumption: bool = False
+
+    def replay_key(self) -> UUID | None:
+        """A RETRY-STABLE identity for this logical tool call, or None.
+
+        None is the honest answer almost everywhere, and returning it is the
+        point of this being a method rather than three fields a handler has to
+        combine correctly.
+
+        `tool_use_id` alone was rejected as a replay identity because "each
+        approval attempt is a fresh LLM sampling and mints fresh block ids"
+        (docs/architecture/spend_reservation_replay_semantics.md section 7). That
+        is still true of every path except one: on a RESUMED turn the reviewed
+        assistant message is read from storage and not re-sampled, so the block
+        id is the same on every retry of that approval. Hence all three
+        conditions below, together:
+
+          * `is_hitl_resumption` -- the id came from storage, not from sampling;
+          * `hitl_id`            -- binds the key to a ticket and a tenant, the
+                                    same pairing `request_id_for(hitl_id, operation)`
+                                    already uses (app/gcp/actions.py:127-138);
+          * `tool_use_id`        -- distinguishes the calls within that turn.
+
+        A caller that gets None must fall back to a run-level key and a
+        once-per-run rule, not invent one from `correlation_id`, which is minted
+        fresh on every approval attempt.
+        """
+        if not self.is_hitl_resumption or self.hitl_id is None or self.tool_use_id is None:
+            return None
+        return uuid5(_REPLAY_KEY_NS, f"{self.hitl_id}:{self.tool_use_id}")
 
 
 ToolHandler = Callable[[BaseModel, ToolContext], Awaitable[BaseModel]]

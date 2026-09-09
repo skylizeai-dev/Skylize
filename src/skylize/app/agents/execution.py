@@ -1176,7 +1176,9 @@ class AgentExecutionService:
                 # authority is not.
                 resume_this_turn = False
                 calls = [b for b in messages[-1].content if b.kind == "tool_use"]
+                resumed_dispatch = True
             else:
+                resumed_dispatch = False
                 request = LLMGenerateWithToolsRequest(
                     model="fast",
                     system=system_prompt,
@@ -1228,6 +1230,11 @@ class AgentExecutionService:
                         call=call, token=token, contract=contract,
                         org_id=org_id, correlation_id=correlation_id,
                         hitl_id=hitl_id,
+                        # True only for the turn a human approved and that was
+                        # replayed from storage. That is the one condition under
+                        # which the block id is stable across retries, which is
+                        # what makes ToolContext.replay_key trustworthy.
+                        is_hitl_resumption=resumed_dispatch,
                     )
                 )
             messages.append(LLMMessage(role="user", content=result_blocks))
@@ -1253,6 +1260,7 @@ class AgentExecutionService:
         org_id: str,
         correlation_id: UUID,
         hitl_id: UUID | None = None,
+        is_hitl_resumption: bool = False,
     ) -> LLMContentBlock:
         assert self._tools is not None
         try:
@@ -1264,6 +1272,13 @@ class AgentExecutionService:
                 org_id=org_id,
                 correlation_id=correlation_id,
                 hitl_id=hitl_id,
+                # The block's own id, which until now stopped at this method and
+                # was used only to build the tool_result below. A spend-capable
+                # handler needs it to tell one call in a turn from another; see
+                # ToolContext.replay_key for why it is useless without the flag
+                # beside it.
+                tool_use_id=call.tool_use_id,
+                is_hitl_resumption=is_hitl_resumption,
             )
             return LLMContentBlock(
                 kind="tool_result",
