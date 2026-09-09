@@ -1,9 +1,9 @@
 """The spend ceiling on the tool-call path — REAL Postgres, as the app role.
 
 This file exists for one claim the unit suite cannot make: that the ceiling is
-ATOMIC under concurrency. `spend.py:214`
+ATOMIC under concurrency. `spend.py:237`
 
-    AND e.spent_minor + e.reserved_minor + $3 <= e.ceiling_minor
+    WHERE t.spent_minor + t.reserved_minor + $3 <= t.ceiling_minor
 
 is the entire policy, and its correctness is a property of PostgreSQL's
 concurrent-UPDATE semantics — a fake repository asserts the invariant it was
@@ -112,6 +112,25 @@ async def _reservation_states(org: str) -> dict[str, int]:
             org,
         )
         return {r["state"]: r["n"] for r in rows}
+    finally:
+        await conn.close()
+
+
+async def _held_total(org: str) -> int:
+    """Sum of the reservations actually sitting in 'held'.
+
+    The counterpart to `spend_envelope.reserved_minor`: the two must agree, or
+    the envelope is holding budget that no reservation row can ever release.
+    """
+    import asyncpg
+
+    conn = await asyncpg.connect(DB_URL)
+    try:
+        return await conn.fetchval(
+            "SELECT coalesce(sum(amount_minor), 0) FROM spend_reservation "
+            "WHERE org_id=$1 AND state='held'",
+            org,
+        )
     finally:
         await conn.close()
 
@@ -280,6 +299,122 @@ async def test_reserve_commit_moves_hold_into_spent() -> None:
         assert row["spent_minor"] == 2_500
         assert (await _reservation_states(org)).get("committed") == 1
     finally:
+        await _drop_org(org)
+
+
+@requires_app_role
+async def test_committing_less_than_the_hold_frees_the_difference() -> None:
+    """`SpendLedger.commit` accepts an actual BELOW the hold, and `ToolProxy` now
+    passes one. This proves what that does to the envelope against real SQL —
+    the half nothing covered before, because every existing commit test settles
+    for exactly what it reserved.
+
+    The claim being tested is not "a smaller number is recorded" but "the
+    difference becomes spendable again": the UPDATE takes the FULL hold off
+    `reserved_minor` while adding only `committed_minor` to `spent_minor`. If it
+    took only the committed amount off the hold instead, the remainder would sit
+    reserved forever and quietly shrink the org's ceiling.
+    """
+    import asyncpg
+
+    org = await _seed_envelope(ceiling_minor=10_000)
+    pool = await asyncpg.create_pool(APP_DB_URL, min_size=2, max_size=4)
+    try:
+        ledger = SpendLedger(PostgresSpendRepository(pool))
+        res = await ledger.reserve(
+            org_id=org, principal_id=PRINCIPAL, amount_minor=10_000,
+            idempotency_key=f"partial-{org}", correlation_id=uuid.uuid4(),
+        )
+        mid = await _envelope_row(org)
+        assert mid["reserved_minor"] == 10_000, "the whole ceiling is held"
+
+        # The tool asked for 10000 and the provider moved 6000.
+        await ledger.commit(
+            org_id=org, reservation_id=res.reservation_id, actual_minor=6_000
+        )
+
+        row = await _envelope_row(org)
+        assert row["spent_minor"] == 6_000, "only what moved is spend"
+        assert row["reserved_minor"] == 0, "the whole hold is released, not 6000 of it"
+        available = (
+            row["ceiling_minor"] - row["spent_minor"] - row["reserved_minor"]
+        )
+        assert available == 4_000
+
+        # The real proof that the difference came back: spend it.
+        again = await ledger.reserve(
+            org_id=org, principal_id=PRINCIPAL, amount_minor=4_000,
+            idempotency_key=f"partial-again-{org}", correlation_id=uuid.uuid4(),
+        )
+        assert again is not None, "the unspent 4000 must be reservable again"
+    finally:
+        await pool.close()
+
+    try:
+        assert (await _envelope_row(org))["reserved_minor"] == 4_000
+    finally:
+        await _drop_org(org)
+
+
+@requires_app_role
+async def test_a_replayed_idempotency_key_does_not_leak_a_phantom_hold() -> None:
+    """REGRESSION. `try_reserve` returns the ORIGINAL hold for a repeated
+    idempotency_key — that part always worked. What did not: the envelope's
+    `reserved_minor` was bumped anyway, by a CTE that ran before `ON CONFLICT DO
+    NOTHING` discarded the insert. The replay therefore consumed ceiling with no
+    `spend_reservation` row behind it, and nothing could ever give it back —
+    `release` and `commit` both work from a reservation row, and `sweep_expired`
+    scans the same table.
+
+    Measured before the fix: a 4000 reservation replayed once left
+    `reserved_minor = 8000` against a single 4000 reservation row.
+
+    Unreachable from `ToolProxy` today, which mints a fresh uuid4 key per call
+    (tools/proxy.py `_reserve_spend`). It becomes reachable the moment a
+    caller-supplied key does what the re-read branch below was written to serve,
+    so the invariant is pinned here first.
+    """
+    import asyncpg
+
+    org = await _seed_envelope(ceiling_minor=10_000)
+    pool = await asyncpg.create_pool(APP_DB_URL, min_size=2, max_size=4)
+    key = f"replay-{org}"
+    try:
+        ledger = SpendLedger(PostgresSpendRepository(pool))
+        first = await ledger.reserve(
+            org_id=org, principal_id=PRINCIPAL, amount_minor=4_000,
+            idempotency_key=key, correlation_id=uuid.uuid4(),
+        )
+        assert (await _envelope_row(org))["reserved_minor"] == 4_000
+
+        replay = await ledger.reserve(
+            org_id=org, principal_id=PRINCIPAL, amount_minor=4_000,
+            idempotency_key=key, correlation_id=uuid.uuid4(),
+        )
+        assert replay.reservation_id == first.reservation_id, (
+            "a repeated key must return the ORIGINAL hold, not a second one"
+        )
+
+        row = await _envelope_row(org)
+        assert row["reserved_minor"] == 4_000, (
+            "the replay must not bump the envelope again — a second 4000 here is "
+            "a hold no reservation row backs and nothing can reclaim"
+        )
+        assert (await _reservation_states(org)).get("held") == 1
+
+        # THE INVARIANT, stated directly: every reserved cent is backed by a row.
+        held_total = await _held_total(org)
+        assert row["reserved_minor"] == held_total
+
+        # And the leak is not merely hidden — the ceiling still has its full
+        # remaining 6000 to give, which it would not if 4000 had been lost.
+        rest = await ledger.reserve(
+            org_id=org, principal_id=PRINCIPAL, amount_minor=6_000,
+            idempotency_key=f"rest-{org}", correlation_id=uuid.uuid4(),
+        )
+        assert rest is not None
+    finally:
+        await pool.close()
         await _drop_org(org)
 
 
