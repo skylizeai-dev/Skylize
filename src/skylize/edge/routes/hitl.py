@@ -126,6 +126,7 @@ async def approve(
 ) -> HitlApproveResponse:
     from ...app.hitl.service import (
         HitlAlreadyActioned,
+        HitlDeferredAgain,
         HitlExecutionFailed,
         HitlExpired,
         HitlNotFound,
@@ -157,6 +158,16 @@ async def approve(
         # status, not released to 'pending'. Nothing executed; a retry is
         # impossible by design (it would fail identically forever).
         raise HTTPException(status_code=422, detail=f"replay invalid: {exc}") from exc
+    except HitlDeferredAgain as exc:
+        # 202, the same code /agents/execute uses to say "a human must decide
+        # this": the approval WAS applied and the run WAS executed, and it then
+        # hit a narrower gate that raised a new row. Not an error, and not a
+        # retry — this row is now 'approved' and a second POST here gets the 409
+        # above. The caller must act on the hitl_id named in the detail.
+        raise HTTPException(
+            status_code=202,
+            detail=f"deferred again: {exc}; act on hitl_id={exc.hitl_id}",
+        ) from exc
     except HitlExecutionFailed as exc:
         # K12: execution failed after the claim for a TRANSIENT reason. The row
         # WAS released back to 'pending' so the approved work is not lost; retry

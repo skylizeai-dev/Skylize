@@ -671,16 +671,42 @@ async def test_a_row_with_no_snapshot_still_approves_by_re_running(
             assert item["pending_tool_calls"] is None
 
             # Approval re-runs the agent from `input`: the model is sampled
-            # again, so the gate fires again and the run defers a second time.
-            # That is the honest old behaviour, and it is not an error.
+            # again -- which is exactly the old semantics -- so the mid-loop gate
+            # fires and raises a NEW row for the specific call.
             _program_gated_turn(fake)
             before = fake.attempts
             r = await client.post(
                 f"/api/v1/hitl/{hitl_id}/approve", json=None, headers=_owner(org)
             )
             assert fake.attempts > before  # it really re-sampled
-            assert r.status_code >= 400  # the re-run deferred again
+            assert r.status_code == 202, r.text
             assert DISPATCHED == []
+
+            # THE LOOP THAT MUST NOT EXIST. The original row is 'approved' and
+            # stays there, so a second POST is refused rather than re-running,
+            # re-sampling, and filing yet another ticket.
+            original = await _row(app_db, org, hitl_id)
+            assert original is not None and original["status"] == "approved"
+            # And its decision chain is closed, not left open: the human really
+            # did resolve the question THIS decision deferred.
+            async with app_db.tenant_session(org) as conn:
+                approved_audits = await conn.fetchval(
+                    "SELECT count(*) FROM audit_log WHERE action_type=$1",
+                    "hitl.approve_deferred_again",
+                )
+            assert approved_audits == 1
+            again = await client.post(
+                f"/api/v1/hitl/{hitl_id}/approve", json=None, headers=_owner(org)
+            )
+            assert again.status_code == 409, again.text
+
+            # The new row carries the question, and it is the action-level shape.
+            new_id = uuid.UUID(r.json()["detail"].rsplit("hitl_id=", 1)[1])
+            assert new_id != hitl_id
+            new_row = await _row(app_db, org, new_id)
+            assert new_row is not None
+            assert new_row["status"] == "pending"
+            assert new_row["resumption_json"] is not None
     finally:
         await _cleanup(admin_conn, org)
 

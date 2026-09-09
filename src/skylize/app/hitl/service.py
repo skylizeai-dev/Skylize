@@ -61,6 +61,7 @@ from ...events.bus import EventBus
 from ...schemas.events.decision import DecisionApproved, DecisionRejected
 from ...schemas.hitl import HitlReplayEnvelope, HitlResumptionPoint
 from ..agents.execution import (
+    AgentDeferredToHuman,
     AgentExecutionService,
     AgentInputError,
     HitlApprovalContext,
@@ -123,6 +124,32 @@ class HitlExecutionFailed(HitlError):
     (provider failure, database unavailable, ceiling refusal, output
     validation). Row released back to 'pending' so the approved work is not
     silently lost; the failure is audited and the reviewer can retry."""
+
+
+class HitlDeferredAgain(HitlError):
+    """The approved run reached a NARROWER gate and raised a NEW approval request.
+
+    Reachable only since the mid-loop suspension gate exists: before it,
+    ``execute()`` could not defer on the approval path at all, because the
+    stage-2.5 gate is skipped when a ``HitlApprovalContext`` is present. Now an
+    approved request can be re-sampled, ask for an ``approval``-declaring tool,
+    and suspend on that specific call.
+
+    THIS ROW IS NOT RELEASED, and that is the whole point of the type existing.
+    Treating it as a transient failure would put the row back to 'pending', and
+    approving it again would re-run, re-sample, and defer again -- the
+    pending -> approve -> fail -> pending loop this module already eliminated for
+    input drift, except unbounded, because each pass also files a fresh ticket.
+    The human's verdict on THIS row was honoured; the new question lives on the
+    new row named by ``hitl_id``.
+    """
+
+    def __init__(self, hitl_id: UUID, reason: str) -> None:
+        super().__init__(
+            f"the approved run raised a new approval request {hitl_id}: {reason}"
+        )
+        self.hitl_id = hitl_id
+        self.reason = reason
 
 
 class HitlQueueService:
@@ -264,6 +291,30 @@ class HitlQueueService:
                 source_agent_id=envelope.agent_id,
             )
             raise HitlReplayInvalid(str(exc)) from exc
+        except AgentDeferredToHuman as exc:
+            # NOT transient, and deliberately NOT released. The run did what the
+            # human approved and then hit a narrower gate; the row keeps the
+            # 'approved' status the claim already set, so it can never be
+            # re-approved into the same deferral again. The audit says what
+            # happened and names the row that now carries the question.
+            #
+            # The terminal decision.approved is still emitted: the human really
+            # did resolve the question THIS decision deferred, and the new
+            # deferral is a new decision with its own chain.
+            await self._publish_approved(row, org_id, envelope.agent_id, fresh_correlation)
+            await self._audit.record(
+                org_id=org_id,
+                correlation_id=fresh_correlation,
+                causation_id=row.correlation_id,
+                action_type="hitl.approve_deferred_again",
+                result="escalated",
+                source_agent_id=envelope.agent_id,
+                partition_key=row.partition_key,
+                inputs={"hitl_id": str(row.hitl_id)},
+                outputs={"disposition": "deferred_again", "hitl_id": str(exc.hitl_id)},
+                result_reason=exc.reason,
+            )
+            raise HitlDeferredAgain(exc.hitl_id, exc.reason) from exc
         except Exception as exc:
             # TRANSIENT (K12): anything else that failed after the claim — LLM
             # egress, output validation, governance denial, budget or ceiling
@@ -282,28 +333,7 @@ class HitlQueueService:
         await self._repo.update_verdict_json(hitl_id, org_id, verdict)
 
         # Terminal decision event + audit, synchronously before responding.
-        decision_id = self._decision_id(row)
-        if decision_id is not None:
-            await self._bus.publish(
-                DecisionApproved(
-                    tenant_id=org_id,
-                    partition_key=row.partition_key,
-                    department="decision",
-                    correlation_id=fresh_correlation,
-                    causation_id=row.correlation_id,
-                    payload=DecisionApproved.Payload(
-                        decision_id=decision_id,
-                        action_kind=self._action_kind(row),
-                        approved_scope={
-                            "agent": envelope.agent_id,
-                            "department": str(row.proposal_json.get("department", "")),
-                            "partition_key": row.partition_key,
-                        },
-                    ),
-                )
-            )
-        else:  # pragma: no cover - request-path rows always carry decision_id
-            log.warning("hitl_approve_no_decision_id", extra={"hitl_id": str(hitl_id)})
+        await self._publish_approved(row, org_id, envelope.agent_id, fresh_correlation)
         await self._audit.record(
             org_id=org_id,
             correlation_id=fresh_correlation,
@@ -480,6 +510,45 @@ class HitlQueueService:
             inputs={"hitl_id": str(row.hitl_id)},
             outputs={"disposition": "released", "status": "pending"},
             result_reason=reason,
+        )
+
+    async def _publish_approved(
+        self,
+        row: HitlQueueItem,
+        org_id: str,
+        agent_id: str,
+        correlation_id: UUID,
+    ) -> None:
+        """Close the deferred decision with its terminal ``decision.approved``.
+
+        Shared by the two paths on which a human approval is APPLIED: the one
+        that produces a deliverable, and the one where the approved run went on
+        to hit the narrower mid-loop gate (`HitlDeferredAgain`). Both must emit
+        it, because in both the human really did resolve the question this
+        decision deferred — and a subscriber tracking decision lifecycle would
+        otherwise see the second one's decision stay open forever.
+        """
+        decision_id = self._decision_id(row)
+        if decision_id is None:  # pragma: no cover - request-path rows carry one
+            log.warning("hitl_approve_no_decision_id", extra={"hitl_id": str(row.hitl_id)})
+            return
+        await self._bus.publish(
+            DecisionApproved(
+                tenant_id=org_id,
+                partition_key=row.partition_key,
+                department="decision",
+                correlation_id=correlation_id,
+                causation_id=row.correlation_id,
+                payload=DecisionApproved.Payload(
+                    decision_id=decision_id,
+                    action_kind=self._action_kind(row),
+                    approved_scope={
+                        "agent": agent_id,
+                        "department": str(row.proposal_json.get("department", "")),
+                        "partition_key": row.partition_key,
+                    },
+                ),
+            )
         )
 
     async def _terminate_failed(
