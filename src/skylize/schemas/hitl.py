@@ -65,7 +65,7 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class HitlReplayEnvelope(BaseModel):
@@ -122,3 +122,36 @@ class HitlResumptionPoint(BaseModel):
     #: Running token total at suspension, so the ordered token pipeline's BUDGET
     #: stage resumes against the real ledger rather than zero.
     tokens_used_so_far: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _tail_matches_pending_ids(self) -> "HitlResumptionPoint":
+        """The stored tail MUST be the reviewed assistant turn, exactly.
+
+        This is where a truncated, reordered, or tampered snapshot is caught, and
+        catching it HERE is deliberate: the approval path already validates this
+        model before it reaches ``execute()``, and a validation failure there is a
+        PERMANENT disposition that terminates the row -- the same treatment an
+        invalid ``request_json`` gets, and for the same reason (it will fail
+        identically on every retry). Left to the execution path instead, the same
+        corruption would surface as a transient failure and loop the row back to
+        'pending' forever.
+
+        It reads the serialized ``LLMMessage`` shape by key rather than importing
+        the adapter model, which keeps this module free of that dependency. The
+        coupling is to the stored JSON shape, which is exactly what this model is
+        the schema for.
+        """
+        tail = self.messages[-1]
+        if tail.get("role") != "assistant":
+            raise ValueError("resumption tail must be the reviewed assistant message")
+        tail_ids = [
+            block.get("tool_use_id")
+            for block in tail.get("content") or []
+            if isinstance(block, dict) and block.get("kind") == "tool_use"
+        ]
+        if tail_ids != list(self.pending_tool_use_ids):
+            raise ValueError(
+                "pending_tool_use_ids does not match the tool_use blocks in the "
+                f"stored assistant turn: {self.pending_tool_use_ids!r} != {tail_ids!r}"
+            )
+        return self

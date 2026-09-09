@@ -59,7 +59,7 @@ from ..principal.errors import (
 from ...dal.ports import DeliverableRow, HitlQueueItem, HitlQueueRepository
 from ...events.bus import EventBus
 from ...schemas.events.decision import DecisionApproved, DecisionRejected
-from ...schemas.hitl import HitlReplayEnvelope
+from ...schemas.hitl import HitlReplayEnvelope, HitlResumptionPoint
 from ..agents.execution import (
     AgentExecutionService,
     AgentInputError,
@@ -183,6 +183,34 @@ class HitlQueueService:
                 f"stored request envelope is not a valid HitlReplayEnvelope: {exc}"
             ) from exc
 
+        # The two ticket shapes, discriminated by one column. None is the
+        # request-level shape -- "re-run this agent on this input" - which is
+        # every stage-2.5 deferral and every row written before migration 0027.
+        # Present is the action-level shape: approval RESUMES the reviewed turn,
+        # dispatching the stored tool_use block(s) verbatim rather than letting
+        # the model decide again.
+        resumption: HitlResumptionPoint | None = None
+        if row.resumption_json is not None:
+            try:
+                resumption = HitlResumptionPoint.model_validate(row.resumption_json)
+            except ValidationError as exc:
+                # PERMANENT, exactly as an invalid envelope is and for the same
+                # reason: resumption_json is written once at enqueue and never
+                # rewritten, so this fails identically on every approval. It is
+                # also where a truncated or tampered snapshot is caught -- the
+                # model's own validator checks the stored tail against
+                # pending_tool_use_ids -- so nothing downstream can dispatch a
+                # different set of calls than the human approved.
+                await self._terminate_failed(
+                    row, org_id, fresh_correlation,
+                    action_type="hitl.approve_failed",
+                    reason=f"stored resumption point invalid: {exc}",
+                    source_agent_id=envelope.agent_id,
+                )
+                raise HitlNotReplayable(
+                    f"stored resumption point is not a valid HitlResumptionPoint: {exc}"
+                ) from exc
+
         try:
             deliverable = await self._execution.execute(
                 org_id=org_id,
@@ -194,6 +222,11 @@ class HitlQueueService:
                     decision_id=row.decision_id,
                     original_correlation_id=envelope.correlation_id,
                     approved_by=reviewed_by,
+                    # The frozen ACTION. Deliberately carried beside the
+                    # principal id, not instead of it: the action is frozen, the
+                    # authority is not, so the run below still re-mints and
+                    # recompiles and still refuses a descoped human.
+                    resumption=resumption,
                 ),
                 # The ID only. mint() recompiles this human's authority from their
                 # CURRENT grants, so a principal offboarded, suspended, or

@@ -30,7 +30,7 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, NoReturn
 from uuid import UUID, uuid4
 
 from pydantic import ValidationError
@@ -52,22 +52,23 @@ from ...contracts.registry import AgentRegistry, resolve_model
 from ...contracts.token import ValidationStage, validate_tool_call
 from ...dal.ports import DeliverableRow, HitlEscalation, HitlQueueRepository
 from ...events.bus import EventBus
-from ...schemas.hitl import HitlReplayEnvelope
+from ...schemas.hitl import HitlReplayEnvelope, HitlResumptionPoint
 from ...schemas.events.decision import (
     DecisionApproved,
     DecisionDeferredToHuman,
     DecisionEvaluated,
     DecisionRejected,
 )
-from ...tools.base import ToolError
+from ...tools.base import ToolDefinition, ToolError
 from ...tools.proxy import ToolProxy
 from ..principal.errors import AuthorityExceeded, AuthorityUnavailable
 from ..principal.provider import AuthorityProvider
-from ..decision_engine.evaluator import DecisionEvaluator
+from ..decision_engine.evaluator import POLICY_VERSION, DecisionEvaluator
 from ..decision_engine.events import (
     AGENT_EXECUTE_ACTION_KIND,
     DecisionProposal,
     DecisionResult,
+    decision_id_for,
     hitl_id_for,
 )
 
@@ -208,6 +209,13 @@ class HitlApprovalContext:
     # replay's audit record so defer -> approve -> execute is traceable (K8).
     original_correlation_id: UUID
     approved_by: str
+    # Present when the approval RESUMES a stored turn rather than re-running the
+    # request. Absent (the default) is the pre-existing shape and every
+    # stage-2.5 deferral: the agent is re-run from `input` and the model
+    # re-decides. Carried on this object rather than on a second entry point so
+    # the "unreachable from the HTTP path by construction" argument above keeps
+    # holding without needing a second proof.
+    resumption: HitlResumptionPoint | None = None
 
 
 class AgentExecutionService:
@@ -316,12 +324,19 @@ class AgentExecutionService:
             token, response_text, provider, total_tokens = await self._execute_with_tools(
                 contract=contract, org_id=org_id, correlation_id=run_id,
                 system_prompt=system_prompt, user_prompt=user_prompt,
+                validated_input=validated_input, user_id=user_id,
                 on_behalf_of_principal=on_behalf_of_principal,
                 # The approval's ticket id, when this run IS a HITL replay. This
                 # is the ONLY value on this path that is stable across retries of
                 # the same approval, so it is what an externally-mutating tool
                 # must key its provider-side idempotency on.
                 hitl_id=hitl_approval.hitl_id if hitl_approval else None,
+                # Present only when the human approved a specific sampled turn.
+                # Steps 1, 2 and 2.5 above ran unchanged on this path: the input
+                # was re-validated (K7), and the gate was skipped because the
+                # human verdict IS its resolution. Only the tool loop behaves
+                # differently, and only for one turn.
+                resumption=hitl_approval.resumption if hitl_approval else None,
             )
             governance_token_id = token.token_id
             log.info(
@@ -545,16 +560,16 @@ class AgentExecutionService:
         the route can map them (D4): AgentGovernanceRejected -> 403,
         AgentDeferredToHuman -> 202.
 
-        ORDERING (D3). On a deferral the hitl_queue row is written BEFORE the
-        terminal event and the audit record. It used to be the other way round,
-        contradicting both AgentDeferredToHuman's docstring ("A hitl_queue row is
-        written first") and edge/routes/agents.py ("the hitl_queue row was
-        written before this response") — and, worse, a subscriber reacting to
-        DecisionDeferredToHuman raced an empty table, while an _enqueue_hitl
-        failure (Postgres down, FK violation, RLS refusal) 500'd the request with
-        a terminal "deferred, hitl_id=X" event and audit record already published
-        for a row that would never exist. A published terminal event now always
-        describes a row that is already durable.
+        THIS IS THE REQUEST-LEVEL GATE, and it stays exactly what it was: it runs
+        before the prompt, the mint, and any LLM spend, so a reject or defer here
+        still means no LLM call, no deliverable, and no ledger row. The mid-loop
+        gate added for approval resumption (`_govern_tool_turn`) is a SECOND,
+        NARROWER gate and not a relocation of this one — this gate is what refuses
+        a rejected request at zero cost, and `_decide_agent_execution`'s
+        FIRST_EXTERNAL_LAUNCH branch is unconditional by deliberate decision.
+
+        ORDERING (D3) on a deferral, and the emit-failure guard, live in
+        `_defer_to_human`, which both gates call.
         """
         if self._evaluator is None:
             raise RuntimeError(
@@ -566,17 +581,214 @@ class AgentExecutionService:
         )
         result = await self._evaluator.evaluate(proposal)
 
-        # D3: durable row first. A raise here means NO terminal event and NO
-        # audit record were published — the caller gets the failure and there is
-        # nothing downstream claiming a hitl_id that was never written.
-        hitl_id: UUID | None = None
         if result.outcome == "deferred_to_human":
-            hitl_id = hitl_id_for(proposal.proposal_id)
-            await self._enqueue_hitl(
-                contract, proposal, result, hitl_id,
+            # The entire deferral — durable row, terminal event, 202 — is
+            # _defer_to_human, which the mid-loop gate calls too. It never
+            # returns: it raises AgentDeferredToHuman, or propagates a write or
+            # emit failure.
+            await self._defer_to_human(
+                contract=contract, proposal=proposal, result=result,
+                hitl_id=hitl_id_for(proposal.proposal_id),
                 validated_input=validated_input, user_id=user_id,
                 on_behalf_of_principal=on_behalf_of_principal,
             )
+
+        # Not deferred, so no row was written: there is nothing for an emit
+        # failure to orphan and the exception simply propagates. Byte-equivalent
+        # to the `hitl_id is None` path of the guard this used to share with the
+        # deferred branch.
+        await self._emit_decision(proposal, result, hitl_id=None)
+        if result.outcome == "approved":
+            return
+        raise AgentGovernanceRejected(
+            "; ".join(result.reasons) or "governance rejected the request"
+        )
+
+    # -- Mid-loop suspension gate (owner decision D1) -------------------------
+
+    async def _govern_tool_turn(
+        self,
+        *,
+        contract: AgentContract,
+        org_id: str,
+        correlation_id: UUID,
+        iteration: int,
+        messages: list[LLMMessage],
+        calls: list[LLMContentBlock],
+        total_tokens: int,
+        validated_input: Any,
+        user_id: str,
+        on_behalf_of_principal: str | None,
+    ) -> None:
+        """Suspend this turn if any of its tool calls requires a human approval.
+
+        Returns on the ordinary path, which is every turn no call in which names
+        an `approval`-declaring tool. Raises AgentDeferredToHuman otherwise, after
+        freezing the reviewed turn into hitl_queue.resumption_json.
+
+        WHERE THIS RUNS, AND WHY EXACTLY HERE. Between the assistant message being
+        appended to `messages` and the dispatch loop below it. After the append,
+        because the snapshot must contain the assistant message carrying the
+        reviewed tool_use blocks — the tool_result blocks that eventually follow
+        correlate to it POSITIONALLY in the message array, so the prefix cannot be
+        trimmed or rebuilt. Before the dispatch, because one line later the side
+        effect has happened and there is nothing left to approve.
+
+        WHY NOT IN ToolProxy.invoke, alongside the four gates that already live
+        there. The proxy is deliberately ignorant of the conversation; a gate
+        there could not capture the prefix without either inverting that
+        dependency or passing the whole message history into every tool call. It
+        also sees one call at a time, so it would raise one ticket per call and
+        contradict the per-turn atomicity of owner decision D4. The bypass-proofing
+        that placement would buy is already available here, because
+        _execute_with_tools is the only caller of _invoke_tool.
+
+        WHY THE EVALUATOR IS NOT CONSULTED. `_decide_agent_execution` reads only
+        `contract.human_in_loop_triggers`, and evaluator.py:211-220 states why:
+        that stage "runs before the mint and before the model, against a proposal
+        with no spend, no scope and no security verdict, so trigger PRESENCE is
+        all it can observe". It is structurally unable to answer "is THIS sampled
+        call gated", and asking it again from here would return `approved`,
+        because a run that reached the tool loop already passed stage 2.5. The
+        arbiter is therefore the tool's own declaration (ToolApprovalProfile),
+        the same seam the spend / oauth / permission / wif profiles use. What is
+        NOT re-invented is the deferral itself: `_defer_to_human` below is the
+        same code `_govern` runs, so the D3 ordering and the emit guard cannot
+        drift between the two gates.
+
+        NOT SCOPED BY governed_org_ids, unlike `_govern`. That switch scopes a
+        gate whose arbiter is org policy. This gate's arbiter is a property of
+        the tool, identical for every tenant, and the four sibling profiles in
+        the proxy are likewise unconditional. Scoping it on tenant enrolment
+        would mean an unenrolled org executes the very call an enrolled org must
+        have approved, which is the wrong way to fail.
+        """
+        assert self._tools is not None  # _execute_with_tools checked it
+        gated: list[tuple[LLMContentBlock, str]] = []
+        for call in calls:
+            tool_id = call.tool_name or ""
+            if not self._tools.registry.has(tool_id):
+                continue
+            definition: ToolDefinition = self._tools.registry.resolve(tool_id)
+            if definition.approval is not None:
+                gated.append((call, definition.approval.reason))
+        if not gated:
+            return
+
+        if self._hitl is None:
+            # Fails closed exactly as _govern does when the repository is absent.
+            # A gated tool with nowhere to file the approval must stop the run,
+            # not execute unreviewed.
+            raise RuntimeError(
+                f"agent_id={contract.agent_id!r} invoked a tool requiring human "
+                "approval but AgentExecutionService was built without a "
+                "HitlQueueRepository"
+            )
+
+        # Every block in the turn must carry a provider id, or the turn cannot be
+        # replayed verbatim and there is no honest way to freeze it. Refuse rather
+        # than store a snapshot whose resumption would dispatch something other
+        # than what the human was shown.
+        pending_ids = [c.tool_use_id for c in calls]
+        if any(tool_use_id is None for tool_use_id in pending_ids):
+            reason = (
+                f"tool call in agent_id={contract.agent_id!r} requires human approval "
+                "but carries no tool_use id, so the turn cannot be frozen for replay"
+            )
+            assert self._audit is not None
+            await self._audit.record(
+                org_id=org_id, correlation_id=correlation_id,
+                action_type="governance.tool_call_denied", result="denied",
+                source_agent_id=contract.agent_id,
+                authority_level=contract.authority_level,
+                result_reason=reason,
+            )
+            raise GovernanceDenied(reason)
+
+        resumption = HitlResumptionPoint(
+            messages=[m.model_dump(mode="json") for m in messages],
+            # EVERY call in the turn, not only the gated ones. Per-turn atomicity
+            # (owner decision D4): the blocks were sampled together under one
+            # plan, so executing some and not others would hand the model a
+            # tool_result set no plan produced.
+            pending_tool_use_ids=[str(tool_use_id) for tool_use_id in pending_ids],
+            iteration=iteration,
+            tokens_used_so_far=total_tokens,
+        )
+
+        proposal = _build_execution_proposal(
+            contract=contract, org_id=org_id, agent_id=contract.agent_id,
+            correlation_id=correlation_id,
+        )
+        # `turn:{iteration}` is the per-suspension discriminator: unique within a
+        # run because a loop index is, and stable across retries of the same
+        # approval because it is stored in the snapshot. See hitl_id_for.
+        discriminator = f"turn:{iteration}"
+        reasons = [
+            f"tool_approval_required: {call.tool_name} ({why})" for call, why in gated
+        ]
+        result = DecisionResult(
+            proposal_id=proposal.proposal_id,
+            decision_id=decision_id_for(proposal.proposal_id, discriminator=discriminator),
+            proposing_agent=contract.agent_id,
+            action_kind=proposal.action_kind,
+            outcome="deferred_to_human",
+            stages_completed=["tool_approval"],
+            stage_failed_at="tool_approval",
+            reasons=reasons,
+            hitl_trigger="TOOL_APPROVAL_REQUIRED",
+            policy_version=POLICY_VERSION,
+            authority_level=contract.authority_level,
+        )
+        await self._defer_to_human(
+            contract=contract, proposal=proposal, result=result,
+            hitl_id=hitl_id_for(proposal.proposal_id, discriminator=discriminator),
+            validated_input=validated_input, user_id=user_id,
+            on_behalf_of_principal=on_behalf_of_principal,
+            resumption=resumption,
+        )
+
+    async def _defer_to_human(
+        self,
+        *,
+        contract: AgentContract,
+        proposal: DecisionProposal,
+        result: DecisionResult,
+        hitl_id: UUID,
+        validated_input: Any,
+        user_id: str,
+        on_behalf_of_principal: str | None,
+        resumption: HitlResumptionPoint | None = None,
+    ) -> NoReturn:
+        """Persist a deferral, announce it, and raise the 202 — for BOTH gates.
+
+        Shared deliberately. The stage-2.5 gate (`_govern`) and the mid-loop gate
+        (`_govern_tool_turn`) disagree about WHO decides — see
+        `_govern_tool_turn` for why the evaluator structurally cannot answer the
+        second question — but they must never disagree about WHAT A DEFERRAL IS.
+        One body of code is what stops the D3 ordering below, the emit-failure
+        guard, and the exception type from drifting apart between the two gates.
+
+        ORDERING (D3). On a deferral the hitl_queue row is written BEFORE the
+        terminal event and the audit record. It used to be the other way round,
+        contradicting both AgentDeferredToHuman's docstring ("A hitl_queue row is
+        written first") and edge/routes/agents.py ("the hitl_queue row was
+        written before this response") — and, worse, a subscriber reacting to
+        DecisionDeferredToHuman raced an empty table, while an _enqueue_hitl
+        failure (Postgres down, FK violation, RLS refusal) 500'd the request with
+        a terminal "deferred, hitl_id=X" event and audit record already published
+        for a row that would never exist. A published terminal event now always
+        describes a row that is already durable.
+        """
+        # D3: durable row first. A raise here means NO terminal event and NO
+        # audit record were published — the caller gets the failure and there is
+        # nothing downstream claiming a hitl_id that was never written.
+        await self._enqueue_hitl(
+            contract, proposal, result, hitl_id,
+            validated_input=validated_input, user_id=user_id,
+            on_behalf_of_principal=on_behalf_of_principal,
+            resumption=resumption,
+        )
 
         # D3: emission failure AFTER a written row is LOGGED AT ERROR NAMING THE
         # ROW AND RE-RAISED — never swallowed. Justification: an unannounced but
@@ -585,31 +797,22 @@ class AgentExecutionService:
         # failure would report a decision as delivered that no subscriber ever
         # received.
         try:
-            # H2: the id derived (and enqueued) above is passed in, not derived
-            # a second time inside _emit_decision.
+            # H2: the id enqueued above is passed in, not derived a second time
+            # inside _emit_decision.
             await self._emit_decision(proposal, result, hitl_id=hitl_id)
         except Exception:
-            if hitl_id is not None:
-                log.error(
-                    "hitl_row_written_but_decision_emit_failed",
-                    extra={
-                        "hitl_id": str(hitl_id),
-                        "org_id": proposal.org_id,
-                        "correlation_id": str(proposal.correlation_id),
-                        "decision_id": str(result.decision_id),
-                    },
-                    exc_info=True,
-                )
+            log.error(
+                "hitl_row_written_but_decision_emit_failed",
+                extra={
+                    "hitl_id": str(hitl_id),
+                    "org_id": proposal.org_id,
+                    "correlation_id": str(proposal.correlation_id),
+                    "decision_id": str(result.decision_id),
+                },
+                exc_info=True,
+            )
             raise
 
-        if result.outcome == "approved":
-            return
-        if result.outcome == "rejected":
-            raise AgentGovernanceRejected(
-                "; ".join(result.reasons) or "governance rejected the request"
-            )
-        # deferred_to_human — the row is already durable; surface the 202.
-        assert hitl_id is not None  # set above for exactly this outcome
         raise AgentDeferredToHuman(
             hitl_id=hitl_id,
             reason="; ".join(result.reasons) or result.hitl_trigger or "deferred to human",
@@ -625,12 +828,19 @@ class AgentExecutionService:
         validated_input: Any,
         user_id: str,
         on_behalf_of_principal: str | None = None,
+        resumption: HitlResumptionPoint | None = None,
     ) -> None:
         """Persist the HITL escalation (and its parent decision) via the app-layer
         DAL (owner decision K3). hitl_id is minted once by hitl_id_for
         (events.py:54) and is the SAME id carried by the 202 response and the
         terminal event. request_json (owner decisions K4/K6) is the serialized
         HitlReplayEnvelope a later human approval executes.
+
+        `resumption` is the mid-loop gate's addition and goes in its OWN column,
+        not into the envelope: request_json is the small frozen replay identity,
+        written once and never rewritten, while resumption_json is the larger,
+        more sensitive snapshot of the reviewed turn (migration 0027). None here
+        is the request-level shape, which is every stage-2.5 deferral.
 
         The principal binding goes in the ENVELOPE (request_json), not in
         proposal_json: HitlQueueService.approve rebuilds the execute() call purely
@@ -675,6 +885,9 @@ class AgentExecutionService:
                 expires_at=now + timedelta(hours=_HITL_EXPIRY_HOURS),
                 created_at=now,
                 request_json=envelope.model_dump(mode="json"),
+                resumption_json=(
+                    resumption.model_dump(mode="json") if resumption is not None else None
+                ),
             )
         )
         # Best-effort notification — the row above is already durable, so a
@@ -825,12 +1038,22 @@ class AgentExecutionService:
         correlation_id: UUID,
         system_prompt: str,
         user_prompt: str,
+        # The two request-level values the mid-loop suspension gate needs, and the
+        # only reason they are here: _enqueue_hitl builds the HitlReplayEnvelope
+        # from them, so a turn suspended inside this loop can be approved and
+        # replayed exactly as a request-level deferral can.
+        validated_input: Any,
+        user_id: str,
         on_behalf_of_principal: str | None = None,
         # Threaded to the ToolProxy so an externally-mutating tool can derive a
         # RETRY-STABLE idempotency key. See ToolContext.hitl_id: `correlation_id`
         # is minted fresh per approval attempt (app/hitl/service.py:160), so it
         # cannot serve that purpose.
         hitl_id: UUID | None = None,
+        # Present ONLY on an approval that resumes a specific reviewed turn.
+        # None is every other run: an ordinary request, and every approval of a
+        # stage-2.5 deferral, both of which sample from turn zero.
+        resumption: HitlResumptionPoint | None = None,
     ) -> tuple[Any, str, str, int]:
         if self._tools is None or self._authority is None or self._audit is None:
             raise RuntimeError(
@@ -856,18 +1079,48 @@ class AgentExecutionService:
             else:
                 log.warning("agent_tool_not_registered", extra={"agent_id": contract.agent_id, "tool_id": tool_id})
 
-        messages: list[LLMMessage] = [
-            LLMMessage(role="user", content=[LLMContentBlock(kind="text", text=user_prompt)])
-        ]
         provider = "unknown"
-        total_tokens = 0
+        if resumption is None:
+            # Ordinary run: byte-identical to before resumption existed.
+            messages: list[LLMMessage] = [
+                LLMMessage(role="user", content=[LLMContentBlock(kind="text", text=user_prompt)])
+            ]
+            total_tokens = 0
+            start_iteration = 0
+        else:
+            # RESUMED run. The prompts above were still rebuilt (deterministic
+            # functions of the contract and the validated input) and the token was
+            # still minted against authority as it stands NOW — only the message
+            # array and the loop's entry point come from storage.
+            try:
+                messages = [LLMMessage.model_validate(m) for m in resumption.messages]
+            except ValidationError as exc:
+                # PERMANENT, and typed as such deliberately: AgentInputError is the
+                # K7 "stored payload does not validate against the current schema"
+                # class, which HitlQueueService.approve already terminates the row
+                # on. A stored snapshot that cannot be hydrated fails identically
+                # on every retry, so releasing it back to 'pending' would loop it
+                # forever.
+                raise AgentInputError(
+                    f"stored resumption messages are not valid LLMMessages: {exc}"
+                ) from exc
+            # The run resumes against the REAL accrued total, not zero, so the
+            # ordered pipeline's BUDGET stage keeps binding across the suspension.
+            total_tokens = resumption.tokens_used_so_far
+            start_iteration = resumption.iteration
+        # Spent after one iteration: only the turn the human actually reviewed is
+        # replayed verbatim. Every later turn in this run samples normally, which
+        # is why the honest claim is "approving executes THIS call" and never
+        # "approving executes only this call".
+        resume_this_turn = resumption is not None
+
         max_tokens = min(contract.max_token_budget // 2, 4096)
         allowed_tool_ids = {grant.tool_id for grant in contract.allowed_tools}
         primary_tool = (
             "llm.generate" if "llm.generate" in allowed_tool_ids else next(iter(allowed_tool_ids))
         )
 
-        for iteration in range(contract.max_tool_iterations):
+        for iteration in range(start_iteration, contract.max_tool_iterations):
             # Pre-egress governance re-validation. `total_tokens` is the real
             # running ledger accrued from prior turns and `max_tokens` is the
             # ceiling this turn could add — so the BUDGET stage can actually trip
@@ -903,34 +1156,73 @@ class AgentExecutionService:
                     raise TokenBudgetExceeded(gate.reason or "token budget exceeded")
                 raise GovernanceDenied(gate.reason or "governance denied mid-run")
 
-            request = LLMGenerateWithToolsRequest(
-                model="fast",
-                system=system_prompt,
-                messages=messages,
-                requested_max_tokens=max_tokens,
-                temperature=0.7,
-                governance_token_id=token.token_id,
-                org_id=org_id,
-                correlation_id=correlation_id,
-                agent_id=token.agent_id,
-            )
-            response = await self._llm.generate_with_tools(request, available)
-            provider = response.provider
-            total_tokens += response.usage.total_tokens
-            log.info(
-                "agent_llm_tool_turn",
-                extra={
-                    "agent_id": contract.agent_id, "iteration": iteration,
-                    "stop_reason": response.stop_reason, "tokens": response.usage.total_tokens,
-                },
-            )
+            if resume_this_turn:
+                # THE APPROVED TURN. No sampling call: the reviewed assistant
+                # message is already the tail of the hydrated `messages`, so the
+                # tool id, the tool input, and the tool_use id dispatched below
+                # are byte-identical to what the human was shown. Its consistency
+                # with `pending_tool_use_ids` was enforced when the snapshot was
+                # validated (schemas/hitl.py), which is why nothing is re-checked
+                # here.
+                #
+                # The model is deliberately NOT re-invoked and then overridden.
+                # That would bill a sampling call whose result is discarded, and
+                # it is unsound besides: the response could carry tool_use blocks
+                # with NEW ids sitting in `messages` beside the stored ones, and
+                # the provider correlates those positionally.
+                #
+                # Note what still ran above: the full ordered token pipeline, on
+                # this turn exactly as on any other. The action is frozen; the
+                # authority is not.
+                resume_this_turn = False
+                calls = [b for b in messages[-1].content if b.kind == "tool_use"]
+            else:
+                request = LLMGenerateWithToolsRequest(
+                    model="fast",
+                    system=system_prompt,
+                    messages=messages,
+                    requested_max_tokens=max_tokens,
+                    temperature=0.7,
+                    governance_token_id=token.token_id,
+                    org_id=org_id,
+                    correlation_id=correlation_id,
+                    agent_id=token.agent_id,
+                )
+                response = await self._llm.generate_with_tools(request, available)
+                provider = response.provider
+                total_tokens += response.usage.total_tokens
+                log.info(
+                    "agent_llm_tool_turn",
+                    extra={
+                        "agent_id": contract.agent_id, "iteration": iteration,
+                        "stop_reason": response.stop_reason,
+                        "tokens": response.usage.total_tokens,
+                    },
+                )
 
-            if response.stop_reason != "tool_use":
-                return token, response.text, provider, total_tokens
+                if response.stop_reason != "tool_use":
+                    return token, response.text, provider, total_tokens
 
-            messages.append(LLMMessage(role="assistant", content=response.content))
+                messages.append(LLMMessage(role="assistant", content=response.content))
+                calls = [b for b in response.content if b.kind == "tool_use"]
+
+                # Mid-loop suspension gate (owner decision D1). Deliberately
+                # AFTER the append above and BEFORE the dispatch below: the
+                # snapshot needs the assistant message, and one line later the
+                # side effect has already happened. Returns immediately unless a
+                # call in this turn names an `approval`-declaring tool, so a
+                # contract using no such tool runs byte-identically to before
+                # this gate existed. Not reached on the resumed turn, which is
+                # the turn a human has already approved.
+                await self._govern_tool_turn(
+                    contract=contract, org_id=org_id, correlation_id=correlation_id,
+                    iteration=iteration, messages=messages, calls=calls,
+                    total_tokens=total_tokens, validated_input=validated_input,
+                    user_id=user_id, on_behalf_of_principal=on_behalf_of_principal,
+                )
+
             result_blocks: list[LLMContentBlock] = []
-            for call in (b for b in response.content if b.kind == "tool_use"):
+            for call in calls:
                 result_blocks.append(
                     await self._invoke_tool(
                         call=call, token=token, contract=contract,
