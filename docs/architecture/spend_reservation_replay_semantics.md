@@ -192,3 +192,103 @@ Independent of the decisions above:
 
 These three are not in dispute. What blocks them is that none can be *keyed*
 until §B is answered.
+
+## 7. Rejected candidate identity: `tool_use.id` (LLM tool-call block id)
+
+Proposed as the answer to §B: key the reservation on `(hitl_id, tool_use.id)`,
+where `tool_use.id` is the Anthropic Messages API's per-tool-call block id.
+**Verified and rejected — it is not stable across the retry it exists to
+protect.**
+
+### Why it fails
+
+A HITL approval does not resume a suspended tool call. It **re-executes the
+agent run from its stored input**:
+
+- `HitlReplayEnvelope` (`schemas/hitl.py:56-63`) stores `agent_id`, `input`,
+  `user_id`, `correlation_id`, `on_behalf_of_principal`. There is no tool call,
+  no message history, and no `tool_use` block in it.
+- `HitlQueueService.approve` calls
+  `self._execution.execute(agent_id=envelope.agent_id, input_data=envelope.input, ...)`
+  (`app/hitl/service.py:187-204`).
+- `execute` mints a fresh `run_id` (`app/agents/execution.py:301`), rebuilds the
+  prompts (`:310-311`), and runs the full tool loop (`:315-325`).
+- Every `tool_use_id` is taken straight off the new API response —
+  `adapters/llm/anthropic_adapter.py:154`, `tool_use_id=raw_block.id`.
+
+So each approval attempt is a fresh LLM sampling and mints fresh block ids. The
+codebase already says so, at the exact place the id would have to come from
+(`app/agents/execution.py:320-324`):
+
+> The approval's ticket id, when this run IS a HITL replay. This is the ONLY
+> value on this path that is stable across retries of the same approval.
+
+The failure is worse than instability. Because the model re-samples, a replay may
+produce a **different set of tool calls entirely** — different count, order, or
+arguments. There is no per-call thing to key on because the run genuinely
+re-decides what to do. This is deliberate and disclosed, not a bug: the review UI
+shows the human "WHAT WOULD EXECUTE if approved (the replay envelope's input)"
+(`edge/routes/hitl.py:49`). Approval means "re-run this agent on this input", not
+"perform this exact call".
+
+### What IS stable across an approval retry
+
+Frozen in `request_json`, which is "written once at enqueue and never rewritten"
+(`app/hitl/service.py:175-176`):
+
+| Value | Source |
+|---|---|
+| `hitl_id` | `row.hitl_id` (`service.py:193`) |
+| `decision_id` | `row.decision_id` (`service.py:194`) |
+| `original_correlation_id` | `envelope.correlation_id` (`service.py:195`) |
+| `agent_id`, `input`, `user_id`, `on_behalf_of_principal` | the envelope |
+
+Not stable: `run_id` (`execution.py:301`), the per-attempt `fresh_correlation`
+(`service.py:234`), `tool_use.id`, and the model output generally.
+
+**Every stable value is run-level. Nothing at tool-call granularity survives a
+retry**, because tool calls are re-sampled rather than replayed.
+
+### The plumbing question, answered separately
+
+`tool_use_id` also never reaches the proxy today. `execution.py:978,983` uses it
+only to build the `tool_result` block; the `invoke` call at `execution.py:967-975`
+passes `tool_id`, `input_data`, `governance_token`, `contract`, `org_id`,
+`correlation_id`, `hitl_id` — no `tool_use_id`. That gap is about one line, and
+closing it would not help, per the above.
+
+### Ordinary-path scope (question 4), re-answered
+
+The hoped-for graceful degradation to `(None, tool_call_id)` **does not hold**,
+for the opposite reason: ordinary runs are never re-executed by the platform.
+The release-to-pending retry loop (`app/hitl/service.py:240-246`) is HITL-only,
+and no edge route carries a request idempotency key — the only match in
+`edge/` is the HITL verdict's 409 (`edge/routes/hitl.py:129`).
+
+So on the ordinary path there is no platform replay to protect against, and a
+`tool_use.id`-derived key would guard nothing. The real ordinary-path vector is a
+**client retrying the HTTP request**, which re-runs the agent and re-samples the
+model — so it needs a *client-supplied* request idempotency key, which
+`/agents/execute` does not currently accept. That is a separate piece of work.
+
+### Options that remain
+
+1. **Make replay a resumption instead of a re-sampling.** Persist the approved
+   tool call (or the message history) in `HitlReplayEnvelope` at defer time and
+   execute *that* on approve. Then `tool_use.id` is stable because it is stored
+   rather than re-minted, and the owner's chosen identity works as intended. This
+   also closes the gap where an approved run can execute different actions than
+   the ones reviewed — worth weighing on its own merits, not only for spend.
+   Largest change; the only one that makes replay deterministic in general.
+2. **Run-level, enforced:** key on `uuid5(hitl_id, tool_id)` plus an explicit
+   rule that a spend-capable tool may be invoked at most once per approved run.
+   A second spend call to the same tool in one replay is refused as a policy
+   violation rather than silently keyed onto the first. Crude and over-restrictive
+   (it blocks a legitimate two-refunds-in-one-run), but it never double-counts
+   and never misattributes, and it needs no architecture change.
+3. **Content-addressed:** `uuid5(hitl_id, tool_id, canonical(input), occurrence)`.
+   Rejected unless someone argues for it: when the model *does* re-sample
+   differently, this silently maps a different action onto a prior reservation,
+   which is worse than the double-count being fixed.
+
+Option 1 or 2. Not 3.
