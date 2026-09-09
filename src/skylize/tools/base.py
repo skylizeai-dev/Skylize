@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 ToolCategory = Literal["memory", "search", "integration", "compute"]
 
@@ -134,12 +134,33 @@ class ToolSpendProfile(BaseModel):
     Deliberately NOT a callable estimator: the amount a tool is about to spend has
     to be inspectable and auditable before dispatch, and a lambda in a registry
     entry is neither.
+
+    `actual_amount_field` is the settlement half of the same idea, read off the
+    tool's VALIDATED OUTPUT instead of its input. A tool whose actual spend can
+    come in BELOW what it asked to reserve — a refund the provider partially
+    approves, an order the provider fills short — names the output field carrying
+    what really moved, and `ToolProxy` settles the hold with THAT rather than with
+    the reservation. Leaving it None declares the opposite and equally explicitly:
+    this tool always spends what it reserved, so the reservation IS the actual.
+
+    Not inferred from a conventional field name, and not discovered by probing the
+    output for a plausible attribute. Either would make a tool that forgot to
+    report a lower actual indistinguishable from one that correctly has none, and
+    the ledger would over-commit without anything to notice it. Declaring it puts
+    that difference in the registry entry, where `ToolDefinition` can — and does —
+    check it against `output_schema` before the tool is ever registered.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     currency: str = Field(min_length=3, max_length=3)
     amount_field: str = Field(min_length=1)
+    #: Field on the VALIDATED OUTPUT carrying the amount that actually moved, in
+    #: the same integer MINOR units as `amount_field`. None means "actual always
+    #: equals reserved"; see the class docstring. Validated against the tool's
+    #: `output_schema` in `ToolDefinition`, so a typo here fails at registration
+    #: rather than silently over-committing a real spend.
+    actual_amount_field: str | None = Field(default=None, min_length=1)
 
 
 class ToolPermissionProfile(BaseModel):
@@ -307,6 +328,39 @@ class ToolDefinition(BaseModel):
     #: the conversation prefix a resumption needs) exist at once. See
     #: AgentExecutionService._govern_tool_turn.
     approval: ToolApprovalProfile | None = None
+
+    @model_validator(mode="after")
+    def _spend_fields_exist_on_their_schemas(self) -> ToolDefinition:
+        """Reject a spend profile naming a field its schemas do not have.
+
+        Runs at CONSTRUCTION, which is the whole point. `ToolProxy` reads
+        `amount_field` off the validated input and `actual_amount_field` off the
+        validated output; a typo in either is a silent money bug at the moment it
+        finally matters, and `actual_amount_field` is the worse of the two — a
+        declared-but-absent output field would send the proxy back to committing
+        the reservation, over-committing a spend that came in lower, which is
+        exactly the failure declaring the field was meant to prevent.
+
+        Checking here rather than in `ToolRegistry.validate_schemas` is
+        deliberate: a `ToolDefinition` that never reaches a registry (a test
+        fixture, a directly-dispatched tool) is just as capable of moving money.
+        """
+        if self.spend is None:
+            return self
+        for field_name, schema, which in (
+            (self.spend.amount_field, self.input_schema, "input_schema"),
+            (self.spend.actual_amount_field, self.output_schema, "output_schema"),
+        ):
+            if field_name is None:
+                continue
+            if field_name not in schema.model_fields:
+                raise ValueError(
+                    f"tool_id={self.tool_id!r} declares a spend field "
+                    f"{field_name!r} that {which} {schema.__name__!r} does not "
+                    f"define; a spend field the proxy cannot read is a silent "
+                    f"money bug, so registration fails closed"
+                )
+        return self
 
 
 @dataclass(frozen=True, slots=True)
