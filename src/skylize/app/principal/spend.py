@@ -195,9 +195,30 @@ class SpendLedger:
 # asyncpg adapter
 # --------------------------------------------------------------------------- #
 
+# THE INSERT DRIVES THE BUMP, never the other way round.
+#
+# An earlier shape ran the `reserved_minor` UPDATE in its own CTE and fed the
+# INSERT from it. That is correct only while every idempotency_key is unique: on
+# a REPEATED key the UPDATE had already applied by the time `ON CONFLICT DO
+# NOTHING` dropped the insert, so the envelope carried a hold with no
+# `spend_reservation` row behind it. Nothing could ever reclaim it — `release`
+# and `commit` both work from a reservation row, and `sweep_expired` scans the
+# same table — so the org silently lost that much ceiling until the period
+# rolled. Measured against PostgreSQL 16, a 10000-minor reservation replayed
+# once left `reserved_minor = 20000` with 10000 backed by rows.
+#
+# Ordering the CTEs this way makes the leak unrepresentable rather than merely
+# unlikely: `bumped` reads from `ins`, so a conflicting insert returns no row and
+# bumps nothing. That also settles the concurrent case, where a NOT EXISTS
+# pre-check would not — a racing transaction's uncommitted row is invisible to a
+# pre-check, but its own INSERT still loses the conflict and so still bumps
+# nothing.
+#
+# `FOR UPDATE` in `target` is what serializes two reservations against the same
+# envelope, so the ceiling test below reads a value nobody else can be mutating.
 _RESERVE_SQL = """
 WITH target AS (
-    SELECT envelope_id
+    SELECT envelope_id, ceiling_minor, reserved_minor, spent_minor
       FROM spend_envelope
      WHERE org_id = $1
        AND principal_id = $2
@@ -206,22 +227,26 @@ WITH target AS (
        AND $6 <  period_end
      FOR UPDATE
 ),
+ins AS (
+    INSERT INTO spend_reservation (
+        reservation_id, envelope_id, org_id, idempotency_key, amount_minor,
+        correlation_id, governance_token_id, state, created_at, expires_at
+    )
+    SELECT $4, t.envelope_id, $1, $5, $3, $8, $9, 'held', $6, $7
+      FROM target t
+     WHERE t.spent_minor + t.reserved_minor + $3 <= t.ceiling_minor
+    ON CONFLICT (org_id, idempotency_key) DO NOTHING
+    RETURNING reservation_id, envelope_id, amount_minor, created_at, expires_at
+),
 bumped AS (
     UPDATE spend_envelope e
        SET reserved_minor = e.reserved_minor + $3
-      FROM target t
-     WHERE e.envelope_id = t.envelope_id
-       AND e.spent_minor + e.reserved_minor + $3 <= e.ceiling_minor
+      FROM ins i
+     WHERE e.envelope_id = i.envelope_id
     RETURNING e.envelope_id
 )
-INSERT INTO spend_reservation (
-    reservation_id, envelope_id, org_id, idempotency_key, amount_minor,
-    correlation_id, governance_token_id, state, created_at, expires_at
-)
-SELECT $4, b.envelope_id, $1, $5, $3, $8, $9, 'held', $6, $7
-  FROM bumped b
-ON CONFLICT (org_id, idempotency_key) DO NOTHING
-RETURNING reservation_id, envelope_id, amount_minor, created_at, expires_at;
+SELECT reservation_id, envelope_id, amount_minor, created_at, expires_at
+  FROM ins;
 """
 
 
