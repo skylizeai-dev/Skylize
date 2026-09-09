@@ -705,6 +705,23 @@ class AgentExecutionService:
             )
             raise GovernanceDenied(reason)
 
+        # RETENTION RE-REVIEW TRIGGER. What lands in this column, in CLEARTEXT,
+        # is the rendered prompt, every assistant turn, and every prior
+        # tool_result. The first two are derived from the validated input, which
+        # `hitl_queue.request_json` already stores in cleartext. The third is the
+        # new class: data a tool read back from a customer's connected system,
+        # which the audit trail deliberately keeps only as a SHA-256 digest
+        # (app/audit/service.py:28-33, "PII-safe").
+        #
+        # That was checked and accepted when this gate was built, because no
+        # contract's `invocable_tools` could reach a tool whose output carries
+        # third-party personal data -- the four manifests are llm.generate,
+        # memory.search, search.web, utility.current_datetime, and
+        # integration.gcp_stop_instance. IT STOPS BEING TRUE the moment a
+        # manifest gains a tool like `integration.hubspot_search_contacts`, and
+        # at that point this snapshot needs its own retention and security
+        # sign-off. See docs/architecture/hitl_approval_resumption_design.md
+        # section 0.3.
         resumption = HitlResumptionPoint(
             messages=[m.model_dump(mode="json") for m in messages],
             # EVERY call in the turn, not only the gated ones. Per-turn atomicity

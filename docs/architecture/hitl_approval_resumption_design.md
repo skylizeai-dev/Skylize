@@ -569,9 +569,17 @@ Validation into `LLMMessage` happens at read time, where a failure is a PERMANEN
 disposition the existing code already handles (`app/hitl/service.py:173-184`).
 
 `pending_tool_use_ids` is redundant with `messages[-1]` by construction, and that
-is the point: on resume the hydrated tail's `tool_use` ids are checked against it,
-so a truncated or tampered snapshot is refused instead of silently dispatching a
-different set of calls than the one the human approved.
+is the point: the stored tail's `tool_use` ids are checked against it, so a
+truncated, reordered, or tampered snapshot is refused instead of silently
+dispatching a different set of calls than the one the human approved.
+
+**That check is a validator on the model, not a check inside the tool loop**, and
+the placement is load-bearing. The approval path validates this model before
+`execute()` is called, where a failure is a PERMANENT disposition that terminates
+the row — the same treatment an invalid `request_json` gets, and for the same
+reason: it fails identically on every retry. Performed during execution instead,
+the identical corruption would surface as a transient failure and release the row
+to `pending` forever.
 
 #### 3.2.3 Write on suspension, read on approval
 
@@ -786,6 +794,36 @@ untrue:
 * **The sampled-but-rejected turn was billed.** Per section 2.1. The
   `ai_cost_ledger` row is correct and stays.
 
+### 4.3 An approval that defers again — a loop this design has to close
+
+**Surfaced during implementation, and recorded here because it is a new state
+this work creates rather than one it inherits.** Before the mid-loop gate,
+`execute()` could not raise `AgentDeferredToHuman` on the approval path at all:
+the stage-2.5 gate is skipped whenever a `HitlApprovalContext` is present
+(`execution.py:302`). It can now. A request-level ticket, once approved,
+re-samples; if that sampling asks for an `approval`-declaring tool, the mid-loop
+gate fires and files a second ticket. `infrastructure_executor` is exactly this
+shape in production today — `FIRST_EXTERNAL_LAUNCH` plus a tool loop
+(`contracts/mvp/infrastructure.py:53,62`) — so this is a realistic combination,
+not a corner case.
+
+Left to the pre-existing handling it would have fallen into
+`HitlQueueService.approve`'s catch-all transient branch
+(`app/hitl/service.py:234-246`), which **releases the row back to `pending`**.
+That produces an unbounded loop: approve, re-sample, defer, released to pending,
+approve again — with a fresh ticket filed on every pass. It is the
+`pending -> approve -> fail -> pending` loop the module already eliminated for
+input drift, made worse by the ticket growth.
+
+**Resolution: `HitlDeferredAgain`, and the row is NOT released.** The claim
+already set `status='approved'`, and that status stands, because it is true —
+the human's verdict on that row was applied and the run really did execute. The
+row is therefore no longer claimable, so a second POST to it gets the existing
+409. The new question lives on the new row, whose id the 202 response names. 202
+is the same code `/agents/execute` uses to say "a human must decide this", so no
+new vocabulary is invented. An audit record (`hitl.approve_deferred_again`)
+carries both ids so the chain is traceable.
+
 ---
 
 ## 5. `tool_use.id` stability and the ledger identity
@@ -902,7 +940,8 @@ changing):
 | ledger identity | `replay_key()` is identical across two approval attempts of the same resumed call, and None on a stage-2.5 approval |
 | pre-migration rows | `resumption_json IS NULL` approves and re-runs under old semantics, no error |
 | authority is not frozen | a resumption after the principal was descoped refuses via `_PERMANENT_PRINCIPAL_ERRORS` (`app/hitl/service.py:81-85`) |
-| corrupt snapshot | stored `messages` that fail `LLMMessage` validation are PERMANENT, terminal, nothing executed |
+| corrupt snapshot | a snapshot whose stored ids disagree with its stored turn is PERMANENT, terminal, nothing executed |
+| approval that defers again | 202 naming the new row; the original stays `approved`, so a second POST is a 409 rather than another re-run (section 4.3) |
 
 **Gates.** `powershell -ExecutionPolicy Bypass -File scripts/ci_unit_gate.ps1` for
 the unit job. The Postgres-backed integration tests must be confirmed to have RUN,
