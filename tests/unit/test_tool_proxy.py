@@ -299,3 +299,39 @@ async def test_no_record_action_wired_skips_convergence_tracking() -> None:
             governance_token=token, contract=contract, org_id=ORG, correlation_id=corr,
         )
         assert result.tool_id == "memory.search"
+
+
+def test_a_reservation_key_conflict_sits_outside_the_ceiling_taxonomy() -> None:
+    """Pins the placement of `ToolSpendKeyConflict` in the error hierarchy.
+
+    Cheap to assert and easy to break by "tidying" the spend errors back into one
+    family later, so it is stated directly rather than left implicit in the
+    Postgres suite (tests/integration/test_tool_proxy_reservation_conflict_pg.py).
+
+    Two independent properties:
+
+      * it IS a `ToolError`, which routes it through the `except ToolError` branch
+        at app/agents/execution.py:981 instead of faulting the agent run -- the
+        defect this type was introduced to fix;
+      * it is NOT a `ToolSpendDenied`, so it carries no `defer_to_human` and can
+        never be routed to a human approval queue as though a ceiling had been
+        breached. A repeated idempotency key is a CALLER fault.
+    """
+    from skylize.tools.base import (
+        ToolError,
+        ToolSpendDenied,
+        ToolSpendHardDenied,
+        ToolSpendKeyConflict,
+    )
+
+    exc = ToolSpendKeyConflict("idempotency_key 'k' already held for 1000, not 2500")
+
+    assert isinstance(exc, ToolError)
+    assert isinstance(exc, ToolPermissionDenied)
+    assert not isinstance(exc, ToolSpendDenied)
+    assert not hasattr(exc, "defer_to_human")
+    assert exc.failed_stage == "reservation"
+
+    # Its own stage, not shoehorned into the ceiling's -- the audit trail has to
+    # tell a key collision from an exhausted budget.
+    assert exc.failed_stage != ToolSpendHardDenied("x").failed_stage
