@@ -75,10 +75,69 @@ _FILES_URL = "https://www.googleapis.com/drive/v3/files"
 #: quota numbers were NOT fetched in this pass, so nothing here encodes a specific
 #: requests-per-second figure invented from memory. The shape (retry 429/5xx,
 #: exponential backoff, small bounded attempt count, `reraise=True`) mirrors the
-#: HubSpot precedent (`hubspot_tools.py:95-100`). Retrying is safe for BOTH verbs
-#: below only because each is attempted at most once per call and a failed attempt
-#: performs no partial write — see `_is_retryable`.
+#: HubSpot precedent (`hubspot_tools.py:95-100`).
+#:
+#: AN EARLIER REVISION OF THIS COMMENT CLAIMED RETRYING WAS SAFE "because each is
+#: attempted at most once per call and a failed attempt performs no partial write".
+#: THAT WAS FALSE, and it is the bug this module now fixes. The case it missed is a
+#: 5xx or a dropped connection AFTER Drive has already committed the write: the
+#: attempt performed a COMPLETE write and merely lost the response, so a blind
+#: retry created a SECOND file. Recorded as gap D.5 in
+#: `docs/audits/audit_gdrive_readiness.md:392`, and named from the outside by
+#: `notion_tools.py:71-79`, which declined to inherit it.
+#:
+#: What changed, per verb:
+#:   * `create_file` now carries a PRE-GENERATED file id, so DRIVE itself rejects a
+#:     duplicate with 409 — see `_PREGENERATED_ID_DOC` and `create_file`. This verb
+#:     is fixed.
+#:   * `create_permission` retries UNCHANGED, and its residual risk is stated rather
+#:     than papered over. `[UNVERIFIED]` 2026-09-09: Google does NOT document what a
+#:     repeated identical `permissions.create` does — whether it adds a second
+#:     permission entry or updates the one that exists. The reference page documents
+#:     only that "Concurrent permissions operations on the same file aren't
+#:     supported; only the last update is applied", which is a statement about
+#:     concurrency, not about duplicate-grant semantics, and it must not be read as
+#:     an idempotency guarantee it does not make.
+#:
+#:     WHY THAT IS TOLERATED HERE, deliberately and narrowly: the worst case is a
+#:     SECOND permission row granting THE SAME principal THE SAME role that the
+#:     governance gate already authorized. It cannot widen access beyond the grant —
+#:     `_share_handler` sends `grant.grantee`/`grant.role`, never the raw input — so
+#:     a duplicate is untidy, not a confidentiality event. Contrast `create_file`,
+#:     where a duplicate is a second real document delivered to a client. Closing
+#:     this would need a `permissions.list` read-before-write, which `drive.file`
+#:     can perform but which costs a round trip on every share to remove an effect
+#:     with no security consequence. Left open ON PURPOSE, and recorded so a future
+#:     author decides it with the same facts rather than rediscovering them.
 _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+
+#: Google's own statement of the guarantee `create_file` relies on
+#: (`https://developers.google.com/workspace/drive/api/guides/manage-uploads`,
+#: `[LIVE-VERIFIED]` 2026-09-09): "You can safely retry uploads with pre-generated
+#: IDs if there's an indeterminate server error or timeout", and "If the file
+#: action is successful, subsequent retries return a `409 Conflict` HTTP status
+#: code response and duplicate files aren't created."
+#:
+#: WHY PRE-GENERATED IDS AND NOT A RESUMABLE UPLOAD SESSION. Both are real Drive
+#: mechanisms and both were evaluated. A resumable session solves a DIFFERENT
+#: problem — an interrupted transfer of a large body, resumed by querying
+#: `Content-Range: bytes */size` against a session URI. This connector posts small
+#: UTF-8 text documents in a single multipart request; the body is never the thing
+#: that fails halfway. A session would add a second round trip per call and a
+#: week-long server-side session to every file creation, and would still not by
+#: itself stop a re-initiated session from producing a second file. The
+#: pre-generated id addresses the actual failure mode — a lost RESPONSE to a
+#: completed write — at one extra request, and makes DRIVE the arbiter of
+#: duplication rather than any state this process would have to keep.
+#:
+#: LIMIT, carried honestly: Google excludes Workspace-format creation (other than
+#: `drive-sdk` and `folder` MIME types) and conversions from this guarantee. This
+#: connector creates neither — it writes `text/plain` / `text/markdown` bodies
+#: (`DriveCreateFileIn.mime_type`) — so the exclusion does not reach it. A future
+#: author adding Workspace-format conversion here must revisit this.
+_PREGENERATED_ID_DOC = "https://developers.google.com/workspace/drive/api/guides/manage-uploads"
+
+_GENERATE_IDS_URL = "https://www.googleapis.com/drive/v3/files/generateIds"
 
 
 def _is_retryable(exc: BaseException) -> bool:
@@ -170,6 +229,39 @@ class DriveClient:
         wait=wait_exponential(multiplier=1, min=1, max=10),
         reraise=True,
     )
+    async def generate_id(self) -> str:
+        """Reserve ONE file id from Drive, to be spent by the next `create_file`.
+
+        Retryable in its own right and safely so: this endpoint reserves ids and
+        performs no write, so a lost response costs an unused id and nothing else.
+        Unused ids are not billed, not visible to the customer, and expire on their
+        own — the failure mode of retrying here is waste, not duplication.
+        """
+        response = await self._client.post(
+            _GENERATE_IDS_URL, params={"count": "1", "space": "drive"}
+        )
+        if response.status_code in _RETRYABLE_STATUS:
+            response.raise_for_status()
+        if response.status_code != 200:
+            raise _drive_error(response, "file id generation")
+        try:
+            ids = response.json().get("ids")
+        except ValueError:
+            ids = None
+        if not isinstance(ids, list) or not ids or not isinstance(ids[0], str):
+            raise ToolExecutionError(
+                "Google Drive returned no pre-generated file id; refusing to create "
+                "a file without one, because an un-keyed create cannot be retried "
+                "safely (a lost response would duplicate the file)"
+            )
+        return ids[0]
+
+    @retry(
+        retry=retry_if_exception(_is_retryable),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        reraise=True,
+    )
     async def create_file(
         self,
         *,
@@ -177,14 +269,23 @@ class DriveClient:
         content: str,
         mime_type: str,
         parent_folder_id: str | None,
+        file_id: str,
     ) -> httpx.Response:
         """Multipart upload: one request carrying metadata + content.
 
         Built by hand rather than with `httpx`'s `files=` helper because Drive
         requires `multipart/related` with a JSON first part, which the standard
         form-data encoder does not produce.
+
+        `file_id` is the PRE-GENERATED id from `generate_id`, sent as the metadata
+        `id`. It is what makes the surrounding `@retry` safe: this coroutine is the
+        unit tenacity re-invokes, so every attempt — including the one after a 5xx
+        that Drive had already committed — carries the SAME id, and Drive answers
+        the second one with 409 instead of creating another file. Passing a fresh
+        id per attempt, or generating it inside this method, would silently restore
+        the duplication bug; generate it once in the handler and pass it in.
         """
-        metadata: dict[str, Any] = {"name": name}
+        metadata: dict[str, Any] = {"name": name, "id": file_id}
         if parent_folder_id:
             metadata["parents"] = [parent_folder_id]
 
@@ -291,22 +392,47 @@ def build_drive_create_file_tool(oauth: OAuthCredentialService) -> ToolDefinitio
         token = await _resolve_token(oauth, ctx.org_id, ctx.correlation_id)
         client = DriveClient(token)
         try:
+            # Reserve the id ONCE, outside the create's retry loop. Every attempt
+            # then spends the same id, which is the whole basis of the 409 below.
+            file_id = await client.generate_id()
             response = await client.create_file(
                 name=inp.name, content=inp.content,
                 mime_type=inp.mime_type, parent_folder_id=inp.parent_folder_id,
+                file_id=file_id,
             )
+        except httpx.HTTPStatusError as exc:
+            raise _drive_error(exc.response, "file creation (retries exhausted)") from exc
         finally:
             await client.aclose()
+
+        # 409 IS A SUCCESS, and this branch is the point of the whole change.
+        # Drive returns it when the pre-generated id is already taken — which, since
+        # this id was minted moments ago for this call alone, can only mean an
+        # EARLIER ATTEMPT OF THIS SAME CALL already committed the file and lost its
+        # response to a 5xx or a dropped connection. Reporting the id we reserved is
+        # therefore accurate: that file exists, and there is exactly one of it.
+        # Treating 409 as an error would leave the caller believing the delivery
+        # failed and inviting the very duplicate this avoids.
+        if response.status_code == 409:
+            log.info(
+                "drive.file_create_deduplicated",
+                org_id=ctx.org_id, agent_id=ctx.agent_id, file_id=file_id,
+                detail=(
+                    "409 on a pre-generated id: an earlier attempt of this call "
+                    "already created the file; no duplicate was created"
+                ),
+            )
+            return DriveCreateFileOut(file_id=file_id, name=inp.name, web_view_link=None)
 
         if response.status_code not in (200, 201):
             raise _drive_error(response, "file creation")
         body = response.json()
         log.info(
             "drive.file_created",
-            org_id=ctx.org_id, agent_id=ctx.agent_id, file_id=body.get("id"),
+            org_id=ctx.org_id, agent_id=ctx.agent_id, file_id=body.get("id", file_id),
         )
         return DriveCreateFileOut(
-            file_id=body["id"],
+            file_id=body.get("id") or file_id,
             name=body.get("name", inp.name),
             web_view_link=body.get("webViewLink"),
         )

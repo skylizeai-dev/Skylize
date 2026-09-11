@@ -385,6 +385,28 @@ create, comment create) has the same timeout-then-retry duplication hazard as Dr
 `files.create`, and the same non-fix. Not a new finding, but it is not fixed either, and it
 now applies to two more providers.
 
+**RESOLVED for Asana at `828c432` (2026-09-09); the shared premise was wrong.** As with
+Drive's D.5, the blocker was never `ToolProxy.invoke`'s signature. Asana, however, has
+**no** native idempotency mechanism at all -- `[LIVE-VERIFIED]` 2026-09-09: no
+`X-Idempotency-Key`, no `requestId`, no client-supplied request id, and the docs are
+silent on POST retry semantics -- so unlike Drive there was nothing native to adopt, and
+the three verbs are handled differently rather than given one shared fix:
+
+* `create_task` / `create_project`: **5xx is no longer retried**, following the Notion
+  precedent (`notion_tools.py:71-79`). A check-before-create was evaluated and
+  **rejected** for these verbs: a name is not unique in Asana, two identical tasks are
+  legitimate, so a name-match query would suppress real work as often as it caught a
+  duplicate. Silently losing a customer's task is worse than a spurious failure.
+* `add_project_member`: **5xx still retries**, made safe by a check-before-create --
+  `GET /memberships?parent=<project>&member=<user>` (`[LIVE-VERIFIED]` 2026-09-09,
+  `developers.asana.com/reference/getmemberships`). Authoritative rather than heuristic
+  because membership is a UNIQUE relation. The check fails SAFE: if it cannot complete
+  it reports the original failure rather than claiming an unproven grant.
+
+429 is still retried on every verb -- it is refused before Asana does any work.
+
+**Notion needs no change**: it already declined to inherit the hazard.
+
 ---
 
 ## D. Decision Engine hook point — review item 5

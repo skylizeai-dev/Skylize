@@ -72,9 +72,15 @@ RETRY POLICY DIVERGES FROM DRIVE AND ASANA, on Notion's own written instruction.
 `[LIVE-VERIFIED]` 2026-09-03, https://developers.notion.com/reference/request-limits:
 Notion says to "Retry 500, 502, 503, 504 only for idempotent requests (GET,
 DELETE)". Every verb in this module is a non-idempotent POST, so 5xx is NOT
-retried here — a timeout-then-success retry would create a SECOND page. Drive and
-Asana do retry 5xx; that is a real (and pre-existing, see 2.5 Q2.5's idempotency
-note) duplication hazard which this connector declines to inherit. Only 429 and
+retried here — a timeout-then-success retry would create a SECOND page.
+
+Drive and Asana DID retry 5xx and carried a real duplication hazard, which this
+connector declined to inherit. Both were fixed on 2026-09-09 and neither is an
+outstanding hazard any more: Drive keys `files.create` with a pre-generated id
+(`drive_tools.py`, gap D.5), and Asana dropped the 5xx retry from its two creation
+verbs — adopting exactly the reasoning below — while guarding its membership verb with
+a check-before-create (`asana_tools.py`, gap C.3). This paragraph is kept rather than
+deleted because the REASON still stands and is the precedent Asana followed. Only 429 and
 529 are retried, honouring `Retry-After`, with jittered backoff capped at 30s and
 a bounded attempt count — Notion's own published recommendation.
 
