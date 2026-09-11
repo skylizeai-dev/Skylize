@@ -476,6 +476,41 @@ class ToolSpendUnavailable(ToolSpendDenied):
         super().__init__(reason, defer_to_human=False)
 
 
+class ToolSpendKeyConflict(ToolPermissionDenied):
+    """The reservation KEY was refused, not the amount. The spend did not happen.
+
+    Raised when the ledger reports `ReservationConflict`
+    (app/principal/errors.py:116): the `(org_id, idempotency_key)` pair already
+    backs a reservation recorded for a DIFFERENT amount
+    (app/principal/spend.py:316-318). A repeat with a MATCHING amount is not this
+    error -- that is an ordinary idempotent retry and returns the original hold.
+
+    Its own branch with `failed_stage="reservation"`, deliberately NOT a
+    `ToolSpendDenied`, on exactly the reasoning `ToolCredentialDenied` records. A
+    key collision and an exhausted ceiling are unrelated conditions with
+    unrelated remedies -- the ceiling wants a limit raised or a human approval,
+    this wants the CALLER to stop reusing one key for a changed amount -- and
+    collapsing them would make both unactionable in the audit trail.
+
+    Subclassing `ToolSpendDenied` would also hand this a `defer_to_human` flag it
+    has no business carrying. Routing a caller-side idempotency fault into a
+    human approval queue as though it were an overspend is precisely the
+    misrouting that flag was split into three types to prevent. For the same
+    reason the containment auto-hook does NOT fire for it (tools/proxy.py): a
+    repeated key is not a customer overspending, and acting on an unverified
+    signal is how a safety control starts stopping healthy machines.
+
+    That it is a `ToolError` at all is the substance of the fix. Until this type
+    existed the underlying `ReservationConflict` left `ToolProxy.invoke` as a
+    bare `BudgetError`, missed the `except ToolError` branch that turns a refused
+    call into an error `tool_result` (app/agents/execution.py:981), and faulted
+    the entire agent run over one bad key.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason, failed_stage="reservation")
+
+
 class ToolCredentialDenied(ToolPermissionDenied):
     """A tool requiring a live OAuth grant was refused on CREDENTIAL STATE.
 

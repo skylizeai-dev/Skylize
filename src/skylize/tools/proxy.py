@@ -37,7 +37,11 @@ from ..app.permissions.gate import (
     PermissionGate,
     PermissionUnavailableError,
 )
-from ..app.principal.errors import CeilingExceeded, EnvelopeNotFound
+from ..app.principal.errors import (
+    CeilingExceeded,
+    EnvelopeNotFound,
+    ReservationConflict,
+)
 from ..app.principal.models import Reservation
 from ..app.principal.spend import SpendLedger
 from ..contracts.base import AgentContract, GovernanceToken
@@ -64,6 +68,7 @@ from .base import (
     ToolResult,
     ToolSpendDeferredToHuman,
     ToolSpendHardDenied,
+    ToolSpendKeyConflict,
     ToolSpendUnavailable,
 )
 from .registry import ToolRegistry
@@ -892,6 +897,9 @@ class ToolProxy:
             # any `ToolSpendUnavailable` below: those mean "we could not check",
             # not "the customer is overspending", and acting on an unverified
             # signal is how a safety control starts stopping healthy machines.
+            # `ReservationConflict` below is excluded on the same ground: a
+            # repeated key is a CALLER fault, and nothing about the
+            # customer's spending is known to be wrong.
             self._schedule_containment(
                 org_id=org_id,
                 reason=f"spend ceiling breached on {tool.tool_id}: {exc}",
@@ -901,6 +909,20 @@ class ToolProxy:
                 ToolSpendDeferredToHuman(str(exc)) if exc.defer_to_human
                 else ToolSpendHardDenied(str(exc))
             ) from exc
+        except ReservationConflict as exc:
+            # Its OWN type, not a `ToolSpendDenied`. The ledger refused the
+            # KEY, not the amount (app/principal/spend.py:316-318), so the
+            # remedy is a caller that stopped reusing one idempotency key for
+            # a changed amount - not a raised ceiling and not a human
+            # approval. Before this clause it escaped `invoke` as a bare
+            # `BudgetError`, missed `except ToolError`
+            # (app/agents/execution.py:981), and faulted the whole run.
+            #
+            # Unreachable through `invoke` while the idempotency key above is
+            # a fresh uuid4 per call, and wired anyway: the key becomes
+            # caller-supplied the moment replay keying lands, and a handler
+            # that goes live by faulting agent runs is not a handler.
+            raise await deny(ToolSpendKeyConflict(str(exc))) from exc
         except EnvelopeNotFound as exc:
             raise await deny(ToolSpendUnavailable(str(exc))) from exc
 
