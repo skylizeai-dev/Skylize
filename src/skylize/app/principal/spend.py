@@ -49,8 +49,9 @@ wiring prompt, which will also decide whether `SpendRepository` moves to
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 from uuid import UUID, uuid4
 
 from .errors import (
@@ -61,6 +62,20 @@ from .errors import (
 from .models import Reservation, SpendEnvelope
 
 DEFAULT_HOLD_TTL = timedelta(minutes=15)
+
+
+def _loads(raw: Any) -> dict[str, Any] | None:
+    """Decode a JSONB column that asyncpg hands back as text.
+
+    Tolerates an already-decoded mapping so the helper keeps working if a JSON
+    type codec is ever registered on the pool.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        return raw
+    decoded = json.loads(raw)
+    return decoded if isinstance(decoded, dict) else None
 
 
 @runtime_checkable
@@ -82,13 +97,30 @@ class SpendRepository(Protocol):
         governance_token_id: UUID | None,
         now: datetime,
         expires_at: datetime,
+        replay_key: UUID | None = None,
     ) -> Reservation | None:
         """Atomically place a hold. Returns None iff the ceiling would be breached.
         Raises `EnvelopeNotFound` if no active envelope exists."""
 
     async def commit(
-        self, *, org_id: str, reservation_id: UUID, actual_minor: int, now: datetime
+        self,
+        *,
+        org_id: str,
+        reservation_id: UUID,
+        actual_minor: int,
+        now: datetime,
+        result_snapshot: dict[str, Any] | None = None,
     ) -> None: ...
+
+    async def find_by_replay_key(
+        self, *, org_id: str, replay_key: UUID
+    ) -> Reservation | None:
+        """The LIVE-or-SETTLED reservation for this replay key, or None.
+
+        At most one can exist: migration 0028's partial unique index covers
+        exactly `held` and `committed`. A `released` or `expired` predecessor is
+        deliberately NOT returned -- those states free the key, and a replay that
+        finds nothing here must place a real hold and spend for real."""
 
     async def release(
         self, *, org_id: str, reservation_id: UUID, now: datetime
@@ -123,6 +155,7 @@ class SpendLedger:
         correlation_id: UUID,
         governance_token_id: UUID | None = None,
         now: datetime | None = None,
+        replay_key: UUID | None = None,
     ) -> Reservation:
         if amount_minor <= 0:
             raise ValueError("amount_minor must be > 0")
@@ -137,6 +170,7 @@ class SpendLedger:
             governance_token_id=governance_token_id,
             now=now,
             expires_at=now + self._hold_ttl,
+            replay_key=replay_key,
         )
         if held is not None:
             return held
@@ -165,6 +199,7 @@ class SpendLedger:
         reservation_id: UUID,
         actual_minor: int,
         now: datetime | None = None,
+        result_snapshot: dict[str, Any] | None = None,
     ) -> None:
         """Settle a hold with the real cost.
 
@@ -179,7 +214,18 @@ class SpendLedger:
             reservation_id=reservation_id,
             actual_minor=actual_minor,
             now=now or datetime.now(timezone.utc),
+            result_snapshot=result_snapshot,
         )
+
+    async def find_replay(self, *, org_id: str, replay_key: UUID) -> Reservation | None:
+        """The reservation already standing for this replay key, if any.
+
+        Returns a row only in `held` or `committed` -- the two states that must
+        block a replay (docs/architecture/spend_reservation_replay_semantics.md
+        section 6). `released` and `expired` free the key, so they read as None
+        here and the caller proceeds to a real reservation.
+        """
+        return await self._repo.find_by_replay_key(org_id=org_id, replay_key=replay_key)
 
     async def release(
         self, *, org_id: str, reservation_id: UUID, now: datetime | None = None
@@ -230,9 +276,10 @@ WITH target AS (
 ins AS (
     INSERT INTO spend_reservation (
         reservation_id, envelope_id, org_id, idempotency_key, amount_minor,
-        correlation_id, governance_token_id, state, created_at, expires_at
+        correlation_id, governance_token_id, state, created_at, expires_at,
+        replay_key
     )
-    SELECT $4, t.envelope_id, $1, $5, $3, $8, $9, 'held', $6, $7
+    SELECT $4, t.envelope_id, $1, $5, $3, $8, $9, 'held', $6, $7, $10
       FROM target t
      WHERE t.spent_minor + t.reserved_minor + $3 <= t.ceiling_minor
     ON CONFLICT (org_id, idempotency_key) DO NOTHING
@@ -278,6 +325,7 @@ class PostgresSpendRepository:
         governance_token_id: UUID | None,
         now: datetime,
         expires_at: datetime,
+        replay_key: UUID | None = None,
     ) -> Reservation | None:
         reservation_id = uuid4()
         async with self._pool.acquire() as conn:  # type: ignore[attr-defined]
@@ -296,6 +344,7 @@ class PostgresSpendRepository:
                     expires_at,
                     correlation_id,
                     governance_token_id,
+                    replay_key,
                 )
                 if row is None:
                     # Either the ceiling blocked it, or the idempotency key already
@@ -304,7 +353,8 @@ class PostgresSpendRepository:
                     existing = await conn.fetchrow(
                         """
                         SELECT reservation_id, envelope_id, amount_minor, state,
-                               created_at, expires_at, committed_minor
+                               created_at, expires_at, committed_minor,
+                               replay_key, result_snapshot
                           FROM spend_reservation
                          WHERE org_id = $1 AND idempotency_key = $2
                         """,
@@ -330,6 +380,8 @@ class PostgresSpendRepository:
                         created_at=existing["created_at"],
                         expires_at=existing["expires_at"],
                         committed_minor=existing["committed_minor"],
+                        replay_key=existing["replay_key"],
+                        result_snapshot=_loads(existing["result_snapshot"]),
                     )
                 return Reservation(
                     reservation_id=row["reservation_id"],
@@ -342,10 +394,17 @@ class PostgresSpendRepository:
                     state="held",
                     created_at=row["created_at"],
                     expires_at=row["expires_at"],
+                    replay_key=replay_key,
                 )
 
     async def commit(
-        self, *, org_id: str, reservation_id: UUID, actual_minor: int, now: datetime
+        self,
+        *,
+        org_id: str,
+        reservation_id: UUID,
+        actual_minor: int,
+        now: datetime,
+        result_snapshot: dict[str, Any] | None = None,
     ) -> None:
         async with self._pool.acquire() as conn:  # type: ignore[attr-defined]
             async with conn.transaction():
@@ -357,7 +416,11 @@ class PostgresSpendRepository:
                     UPDATE spend_reservation
                        SET state = 'committed',
                            committed_minor = LEAST($3, amount_minor),
-                           settled_at = $4
+                           settled_at = $4,
+                           -- COALESCE, not assignment: commit is idempotent and
+                           -- must never blank a snapshot a first settlement
+                           -- already recorded.
+                           result_snapshot = COALESCE($5::jsonb, result_snapshot)
                      WHERE reservation_id = $1 AND org_id = $2 AND state = 'held'
                     RETURNING envelope_id, amount_minor, committed_minor
                     """,
@@ -365,6 +428,8 @@ class PostgresSpendRepository:
                     org_id,
                     actual_minor,
                     now,
+                    None if result_snapshot is None
+                    else json.dumps(result_snapshot, default=str),
                 )
                 if row is None:
                     return  # already settled — commit is idempotent
@@ -379,6 +444,52 @@ class PostgresSpendRepository:
                     row["amount_minor"],
                     row["committed_minor"],
                 )
+
+    async def find_by_replay_key(
+        self, *, org_id: str, replay_key: UUID
+    ) -> Reservation | None:
+        """Read the live-or-settled reservation for a replay key.
+
+        The `state IN ('held','committed')` filter is the SAME predicate as
+        migration 0028's partial unique index, which is what guarantees this
+        returns at most one row. `released` and `expired` rows are intentionally
+        invisible here: those states free the key for a genuine re-attempt.
+        """
+        async with self._pool.acquire() as conn:  # type: ignore[attr-defined]
+            async with conn.transaction():
+                await conn.execute(
+                    "SELECT set_config($1, $2, true)", self._rls_guc, org_id
+                )
+                row = await conn.fetchrow(
+                    """
+                    SELECT reservation_id, envelope_id, idempotency_key,
+                           amount_minor, correlation_id, governance_token_id,
+                           state, created_at, expires_at, committed_minor,
+                           replay_key, result_snapshot
+                      FROM spend_reservation
+                     WHERE org_id = $1 AND replay_key = $2
+                       AND state IN ('held', 'committed')
+                    """,
+                    org_id,
+                    replay_key,
+                )
+        if row is None:
+            return None
+        return Reservation(
+            reservation_id=row["reservation_id"],
+            envelope_id=row["envelope_id"],
+            org_id=org_id,
+            idempotency_key=row["idempotency_key"],
+            amount_minor=row["amount_minor"],
+            correlation_id=row["correlation_id"],
+            governance_token_id=row["governance_token_id"],
+            state=row["state"],
+            created_at=row["created_at"],
+            expires_at=row["expires_at"],
+            committed_minor=row["committed_minor"],
+            replay_key=row["replay_key"],
+            result_snapshot=_loads(row["result_snapshot"]),
+        )
 
     async def release(self, *, org_id: str, reservation_id: UUID, now: datetime) -> None:
         async with self._pool.acquire() as conn:  # type: ignore[attr-defined]

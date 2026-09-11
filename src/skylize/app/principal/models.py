@@ -37,7 +37,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -239,6 +239,17 @@ class Reservation(BaseModel):
     created_at: datetime
     expires_at: datetime
     committed_minor: int | None = None
+    #: `ToolContext.replay_key()` (tools/base.py:88) when this reservation backs a
+    #: tool call dispatched from a human-approved turn replayed VERBATIM from
+    #: storage; None on every ordinary call, which is most of them. Migration 0028
+    #: makes it unique per org across `held` and `committed` ONLY, so a replay
+    #: cannot place a second hold while a released or expired key stays free for a
+    #: genuine re-attempt.
+    replay_key: UUID | None = None
+    #: The tool output this reservation paid for, written at commit. Read INSTEAD
+    #: of re-executing when a replay finds this row `committed`. None until
+    #: settled, and on every reservation carrying no `replay_key`.
+    result_snapshot: dict[str, Any] | None = None
 
 
 # --------------------------------------------------------------------------- #

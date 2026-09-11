@@ -511,6 +511,63 @@ class ToolSpendKeyConflict(ToolPermissionDenied):
         super().__init__(reason, failed_stage="reservation")
 
 
+class ToolSpendReplayBlocked(ToolPermissionDenied):
+    """A replayed spend call was STOPPED because the original already stands.
+
+    `failed_stage="replay"`, its own branch for the same reason
+    `ToolSpendKeyConflict` has one: this is not a budget outcome. The ceiling was
+    never consulted. What happened is that `ToolContext.replay_key()` matched a
+    reservation already sitting in `held` or `committed`, and re-running the tool
+    would perform a second real-world action for one approved intent.
+
+    Both subclasses below are FAIL-CLOSED refusals, and the closing is the point.
+    The alternative to refusing is re-executing a spend whose predecessor may
+    have already moved money, which is the exact double-count this machinery
+    exists to prevent (docs/architecture/spend_reservation_replay_semantics.md
+    section 6: `held` and `committed` must never re-execute).
+
+    Never raised directly -- always one of the two below, so a caller can branch
+    on the TYPE rather than parsing a reason string.
+    """
+
+    def __init__(self, reason: str, *, retryable: bool) -> None:
+        super().__init__(reason, failed_stage="replay")
+        self.retryable = retryable
+
+
+class ToolSpendReplayInFlight(ToolSpendReplayBlocked):
+    """The original call is still `held` -- in flight, outcome unknown.
+
+    `retryable=True`: the hold is either about to settle or about to be released
+    or swept at `expires_at`, and each of those resolves this. Once the row
+    leaves `held` the replay either reads the recorded result (committed) or
+    places a real hold of its own (released/expired), so waiting is genuinely
+    productive here in a way it is not for the sibling below.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason, retryable=True)
+
+
+class ToolSpendReplayResultUnavailable(ToolSpendReplayBlocked):
+    """The original `committed` but its result was never recorded.
+
+    `retryable=False`: the money moved and no snapshot exists to hand back, so
+    neither re-executing nor waiting can produce a correct answer -- only a human
+    reading the audit row can. Reachable for reservations settled before
+    migration 0028 added `result_snapshot`, and for any commit that recorded
+    none.
+
+    Its own type rather than a `None` return for the reason `ToolSpendUnavailable`
+    has one: "we cannot produce the original result" must never be collapsed into
+    "there was no original", which would re-execute a spend that already
+    happened.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason, retryable=False)
+
+
 class ToolCredentialDenied(ToolPermissionDenied):
     """A tool requiring a live OAuth grant was refused on CREDENTIAL STATE.
 
