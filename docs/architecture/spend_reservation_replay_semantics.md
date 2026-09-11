@@ -1,8 +1,15 @@
 # Spend-reservation replay semantics — state enumeration and open decisions
 
-Status: **DESIGN NOTE / BLOCKED ON OWNER DECISIONS.** No replay behaviour is
-implemented. This note records what the code actually does today, so the decision
-is made against the real state model rather than an assumed one.
+Status: **RESOLVED AND IMPLEMENTED** (see sections 7 and 8). This began as a
+design note recording a blockage, and sections 1-6 are kept as the evidence the
+decision was made on rather than rewritten after the fact. The blockers they
+enumerate are now closed; each carries a RESOLVED marker saying how.
+
+The one thing that changed everything: **section 3B's missing call identity now
+exists**. `feat/hitl-approval-resumption` made an approval REPLAY the reviewed
+turn verbatim instead of re-sampling it -- option 1 of section 7 -- and that made
+`tool_use.id` stable across an approval retry. `ToolContext.replay_key()`
+(`src/skylize/tools/base.py:88`) is built on it.
 
 Context: `03e7081` fixed the reserve CTE's phantom-hold leak and `ee34bd2` made
 `ToolProxy` settle for actual spend. Neither closes the HITL replay double-count
@@ -91,6 +98,25 @@ database rather than by application logic that can be forgotten. **It requires a
 migration**: a new nullable `replay_key` column plus that index. `idempotency_key`
 would keep its current meaning and its current unconditional index.
 
+> **RESOLVED -- migration 0028.** Built as described: a nullable `replay_key`
+> column plus
+> `UNIQUE (org_id, replay_key) WHERE replay_key IS NOT NULL AND state IN ('held','committed')`.
+> Verified against the live database. Note it is a partial unique INDEX, not a
+> table constraint: Postgres constraints cannot carry a `WHERE`. The same table
+> already used that pattern for `spend_reservation_sweep ... WHERE (state = 'held')`.
+>
+> **A trap this section predicted, then walked into anyway.** The obvious wiring
+> -- derive `idempotency_key` from `replay_key` -- reintroduces exactly the
+> problem described above. The unconditional index still spans all four states, so
+> a re-attempt after a `released` or `expired` predecessor collides with the
+> settled row, and `try_reserve`'s re-read branch hands that SETTLED reservation
+> back as though it were a fresh hold. `commit` matches only `state = 'held'`, so
+> the re-attempt settles to nothing and UNDER-counts a real spend. So
+> `idempotency_key` stays unique per ATTEMPT and `replay_key` carries the replay
+> identity in its own column; the two answer different questions and must not be
+> collapsed. Caught by `tests/integration/test_tool_proxy_replay_states_pg.py`,
+> not by review.
+
 ### B. There is no stable identity for "this logical tool call"
 
 A single agent run makes many tool calls. `app/agents/execution.py:933-940`
@@ -114,6 +140,15 @@ A correct key needs a call identity that is both stable across replays and
 distinct across calls. Nothing in the current execution path produces one. This
 is the core unsolved problem, and it is an architecture decision, not wiring.
 
+> **RESOLVED -- `ToolContext.replay_key()`** (`src/skylize/tools/base.py:88`).
+> The architecture decision was taken: approval now resumes the reviewed turn
+> instead of re-sampling it, so a `tool_use` id read back from storage IS stable
+> across retries. The key is `uuid5(_REPLAY_KEY_NS, f"{hitl_id}:{tool_use_id}")`,
+> returned only when all three of `is_hitl_resumption`, `hitl_id` and
+> `tool_use_id` are present and `None` everywhere else -- which is most calls.
+> `hitl_id` binds it to a ticket and a tenant; `tool_use_id` distinguishes the
+> calls within that turn, which is what this section said was missing.
+
 ### C. Nothing stores the original result for a `committed` replay
 
 The brief requires a `committed` replay to "return the recorded actual amount /
@@ -130,6 +165,26 @@ therefore cannot find its predecessor's output.
 Returning a prior result idempotently needs a result store keyed by whatever §B
 settles on. That is a second migration and a second subsystem.
 
+> **RESOLVED -- `spend_reservation.result_snapshot`** (migration 0028). Not a
+> second subsystem in the end: a JSONB column on the row whose `state` already
+> decides the replay, written at commit and read instead of re-executing.
+>
+> Deliberately NOT 0027's `hitl_queue.resumption_json`, which was checked first
+> precisely to avoid building a parallel mechanism. The two hold opposite halves
+> of a call and have different lifetimes: `resumption_json` is the PRE-execution
+> action (message prefix, pending `tool_use` ids), bounded by the ticket's 48h
+> `expires_at` and rejected once expired; `result_snapshot` is the POST-execution
+> result and must OUTLIVE the ticket, because a replay arriving after expiry still
+> must not re-execute a committed spend.
+>
+> `runtime/exec_fingerprint.py`'s `DedupCache` was also considered and rejected:
+> content-addressed on `(org_id, tool_name, args)` with a 60s TTL, and wired
+> nowhere in production. Content-addressing is option 3 below, rejected there.
+>
+> A `committed` row with NO snapshot refuses rather than falling through: "we
+> cannot produce the original result" must never collapse into "there was no
+> original" and re-run a spend that already happened.
+
 ### D. `ReservationConflict` is raised but caught nowhere
 
 `errors.py:116` defines it; `spend.py:317` raises it when a repeated key arrives
@@ -145,6 +200,15 @@ Latent today only because the proxy never repeats a key. It goes live with the
 first caller-supplied key. This is the abandoned half-built path the
 re-read branch at `spend.py:314-332` was written to serve.
 
+> **RESOLVED -- `ToolSpendKeyConflict`** (`src/skylize/tools/base.py`), mapped in
+> `_reserve_spend`. Its own branch with `failed_stage="reservation"`, deliberately
+> NOT a `ToolSpendDenied`: a key collision and an exhausted ceiling are unrelated
+> conditions with unrelated remedies, and subclassing would hand it a
+> `defer_to_human` flag that could route a caller-side idempotency fault into a
+> human approval queue as though it were an overspend. It IS a `ToolError`, which
+> is the substance of the fix -- that is what stops it faulting the agent run. The
+> containment auto-hook does not fire for it.
+
 ## 4. `hitl_id` is not universally available
 
 Asked directly by the brief. It is not.
@@ -159,6 +223,14 @@ spend-gated tool invoked on the ordinary path gets no replay protection from it
 and needs its own strategy — or an explicit decision that it does not get one,
 justified by the fact that ordinary runs have no automatic retry loop
 (the release-to-pending retry at `app/hitl/service.py:240-246` is HITL-specific).
+
+> **RESOLVED -- HITL-only is the accepted limit**, on the justification above.
+> `replay_key()` returns `None` on the ordinary path and the reservation gets a
+> fresh per-attempt `idempotency_key`, which is the pre-existing behaviour and is
+> correct there: no platform replay exists for a stable key to protect against.
+> The real ordinary-path vector is a CLIENT retrying the HTTP request, which needs
+> a client-supplied request idempotency key that `/agents/execute` does not
+> accept. That remains separate, open work.
 
 ## 5. What needs deciding before any of this is built
 
@@ -177,6 +249,14 @@ justified by the fact that ordinary runs have no automatic retry loop
 Items 1–3 are each a migration or a subsystem. None should be chosen by whoever
 happens to write the patch.
 
+> **ALL FIVE DECIDED.** 1 -- `ToolContext.replay_key()`, via option 1 in section
+> 7. 2 -- the `replay_key` column plus the partial unique index, migration 0028.
+> 3 -- `spend_reservation.result_snapshot`, same migration. 4 -- HITL-only is the
+> accepted limit (section 4). 5 -- `expired` is treated as `released`: the key is
+> freed and a re-attempt spends for real, because settling it to zero would
+> under-count a spend that then succeeds, and the handler remains the authority on
+> provider-side deduplication.
+
 ## 6. What IS safe to state now
 
 Independent of the decisions above:
@@ -193,12 +273,37 @@ Independent of the decisions above:
 These three are not in dispute. What blocks them is that none can be *keyed*
 until §B is answered.
 
-## 7. Rejected candidate identity: `tool_use.id` (LLM tool-call block id)
+> **IMPLEMENTED.** Section 3B is answered, so all three are now enforced rather
+> than merely agreed. `held` and `committed` are blocked by
+> `ToolProxy._replay_guard` and, underneath it, by migration 0028's partial unique
+> index; `released` and `expired` fall through to a real reservation because that
+> same index does not cover them, so `find_by_replay_key` cannot see them. Each
+> state has a live-Postgres test in
+> `tests/integration/test_tool_proxy_replay_states_pg.py`.
+>
+> The in-flight concurrency gap noted above closes as a side effect: a second
+> same-key call now meets either the guard or the unique index.
+
+## 7. Call identity: `tool_use.id` -- rejected, then MADE valid by option 1
 
 Proposed as the answer to §B: key the reservation on `(hitl_id, tool_use.id)`,
 where `tool_use.id` is the Anthropic Messages API's per-tool-call block id.
 **Verified and rejected — it is not stable across the retry it exists to
 protect.**
+
+> **OUTCOME: option 1 was chosen and shipped** (`feat/hitl-approval-resumption`,
+> merged to main). Approval no longer re-samples the run; it replays the reviewed
+> turn verbatim from `hitl_queue.resumption_json` (migration 0027). The block id is
+> therefore READ FROM STORAGE rather than re-minted, which is precisely the
+> property the analysis below found missing. `ToolContext.replay_key()` combines it
+> with `hitl_id` and an explicit `is_hitl_resumption` flag and returns `None`
+> unless all three hold, so the key exists only on the one path where it is
+> trustworthy.
+>
+> The rejection below was correct on the code as it stood, and is kept in full
+> because its reasoning is what identified the only change that could make the
+> idea work. Read it as "why this is true only on a resumed turn", not as a live
+> objection.
 
 ### Why it fails
 
@@ -292,3 +397,29 @@ model — so it needs a *client-supplied* request idempotency key, which
    which is worse than the double-count being fixed.
 
 Option 1 or 2. Not 3.
+
+> **Option 1 was taken**, and on its own merits as much as for spend: it also
+> closes the gap where an approved run could execute different actions than the
+> ones a human reviewed. Option 2's once-per-run rule proved unnecessary and would
+> have blocked a legitimate two-refunds-in-one-run. Option 3 stays rejected.
+
+## 8. What was built
+
+| Section | Blocker | Closed by |
+|---|---|---|
+| 3B | no stable call identity | `ToolContext.replay_key()` (`tools/base.py:88`), via HITL resumption |
+| 3A | idempotency key consumed across all four states | migration 0028: `replay_key` column + partial unique index over `held`/`committed` |
+| 3C | no store for a committed replay's result | migration 0028: `spend_reservation.result_snapshot` |
+| 3D | `ReservationConflict` caught nowhere | `ToolSpendKeyConflict`, mapped in `_reserve_spend` |
+| 6 | the three rules could not be keyed | `ToolProxy._replay_guard` + the partial index |
+
+End to end: a resumed HITL turn derives a `replay_key`; a `held` or `committed`
+predecessor stops the call before dispatch, returning the recorded result in the
+`committed` case; a `released` or `expired` predecessor is invisible to the
+lookup, so the call reserves and spends for real. Ordinary non-HITL calls derive
+no key and are unaffected.
+
+What deliberately did NOT change: `idempotency_key` keeps its meaning and its
+unconditional index (see the trap in 3A), ordinary-path replay protection stays
+out of scope (section 4), and `sweep_expired`'s missing RLS GUC is a separate
+defect owned by `fix/sweep-expired-rls-org-binding`.
