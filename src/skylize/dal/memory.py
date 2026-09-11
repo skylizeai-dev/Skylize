@@ -250,6 +250,9 @@ class InMemoryHitlQueueRepository:
             trigger_reason=e.trigger_reason,
             proposal_json=dict(e.proposal_json),
             request_json=dict(e.request_json) if e.request_json is not None else None,
+            resumption_json=(
+                dict(e.resumption_json) if e.resumption_json is not None else None
+            ),
             status=status,
             verdict_by=verdict_by,
             verdict_json=verdict_json,

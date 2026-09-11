@@ -429,6 +429,13 @@ class HitlEscalation:
     # executes (owner decisions K4/K6). None = no replayable execution (the
     # OPA-side writer never sets it).
     request_json: dict[str, Any] | None = None
+    # Serialized HitlResumptionPoint (schemas/hitl.py, migration 0027) — the
+    # exact model turn a human reviewed, replayed VERBATIM on approval. None =
+    # a request-level ticket whose approval re-runs the agent from
+    # `request_json.input`: every stage-2.5 defer, every pre-0027 row, and every
+    # OPA-side row. Its own column rather than a key inside `request_json`,
+    # because the two have different lifecycles (migration 0027's docstring).
+    resumption_json: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -449,6 +456,9 @@ class HitlQueueItem:
     verdict_at: datetime | None
     expires_at: datetime | None
     created_at: datetime
+    # See HitlEscalation.resumption_json. Defaulted so every construction site
+    # written before migration 0027 still builds an item unchanged.
+    resumption_json: dict[str, Any] | None = None
 
 
 class HitlQueueRepository(Protocol):

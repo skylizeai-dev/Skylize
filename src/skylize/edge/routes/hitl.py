@@ -14,7 +14,7 @@ this queue exists to act.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -48,6 +48,23 @@ class HitlItemResponse(BaseModel):
     proposal_summary: dict[str, Any]
     # … and WHAT WOULD EXECUTE if approved (the replay envelope's input).
     request_input: dict[str, Any] | None
+    # WHAT APPROVAL MEANS for this row. The two shapes mean materially different
+    # things and coexist on this queue permanently, because the request-level
+    # gate is not going away:
+    #   "rerun_request" — the agent is re-run on `request_input` and THE MODEL
+    #                     MAY DECIDE DIFFERENTLY. Every stage-2.5 deferral, and
+    #                     every row written before migration 0027.
+    #   "resume_action" — exactly the calls in `pending_tool_calls` execute,
+    #                     verbatim, with the ids and inputs shown here. Turns
+    #                     AFTER this one are still sampled fresh, so the honest
+    #                     claim is "approving executes THIS call", never
+    #                     "approving executes only this call".
+    # Serving them as one undifferentiated queue is the disclosure gap the
+    # resumption work exists to close, so the distinction is stated, not implied.
+    approval_semantics: Literal["rerun_request", "resume_action"]
+    # The reviewed calls themselves, on a "resume_action" row only. Read out of
+    # the stored assistant turn, so this is literally what will be dispatched.
+    pending_tool_calls: list[dict[str, Any]] | None
 
 
 class PaginationMeta(BaseModel):
@@ -109,6 +126,7 @@ async def approve(
 ) -> HitlApproveResponse:
     from ...app.hitl.service import (
         HitlAlreadyActioned,
+        HitlDeferredAgain,
         HitlExecutionFailed,
         HitlExpired,
         HitlNotFound,
@@ -140,6 +158,16 @@ async def approve(
         # status, not released to 'pending'. Nothing executed; a retry is
         # impossible by design (it would fail identically forever).
         raise HTTPException(status_code=422, detail=f"replay invalid: {exc}") from exc
+    except HitlDeferredAgain as exc:
+        # 202, the same code /agents/execute uses to say "a human must decide
+        # this": the approval WAS applied and the run WAS executed, and it then
+        # hit a narrower gate that raised a new row. Not an error, and not a
+        # retry — this row is now 'approved' and a second POST here gets the 409
+        # above. The caller must act on the hitl_id named in the detail.
+        raise HTTPException(
+            status_code=202,
+            detail=f"deferred again: {exc}; act on hitl_id={exc.hitl_id}",
+        ) from exc
     except HitlExecutionFailed as exc:
         # K12: execution failed after the claim for a TRANSIENT reason. The row
         # WAS released back to 'pending' so the approved work is not lost; retry
@@ -187,9 +215,35 @@ async def reject(
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+def _pending_tool_calls(resumption: dict[str, Any] | None) -> list[dict[str, Any]] | None:
+    """The reviewed turn's tool calls, rendered for the reviewer.
+
+    Read out of the STORED assistant message rather than reconstructed, so what
+    the human is shown is the same object the resumed run dispatches. Reads the
+    serialized shape by key (the row is untyped JSON at this seam, as
+    `request_json` already is here) and returns None for a request-level row.
+    """
+    if not resumption:
+        return None
+    messages = resumption.get("messages") or []
+    if not messages:
+        return None
+    tail = messages[-1]
+    return [
+        {
+            "tool_use_id": block.get("tool_use_id"),
+            "tool_name": block.get("tool_name"),
+            "tool_input": block.get("tool_input"),
+        }
+        for block in (tail.get("content") or [])
+        if isinstance(block, dict) and block.get("kind") == "tool_use"
+    ]
+
+
 def _summary(row: HitlQueueItem) -> HitlItemResponse:
     request = row.request_json or {}
     agent_id = request.get("agent_id") or row.proposal_json.get("proposing_agent_id")
+    resuming = row.resumption_json is not None
     return HitlItemResponse(
         hitl_id=row.hitl_id,
         agent_id=str(agent_id) if agent_id else None,
@@ -202,4 +256,6 @@ def _summary(row: HitlQueueItem) -> HitlItemResponse:
             for key in ("action_kind", "department", "proposing_agent_id")
         },
         request_input=request.get("input"),
+        approval_semantics="resume_action" if resuming else "rerun_request",
+        pending_tool_calls=_pending_tool_calls(row.resumption_json),
     )

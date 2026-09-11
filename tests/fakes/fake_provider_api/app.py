@@ -62,6 +62,11 @@ class Behavior:
     # -- success --
     text: str = "ok"
     tool_use: dict[str, Any] | None = None  # {"id","name","input"} -> tool_use block
+    # SEVERAL tool_use blocks in ONE assistant turn, which the provider allows
+    # and the agent tool loop dispatches together. Kept separate from
+    # `tool_use` so every existing caller is untouched; when both are set,
+    # `tool_uses` wins.
+    tool_uses: list[dict[str, Any]] | None = None
     input_tokens: int = 11
     output_tokens: int = 7
     stop_reason: str | None = None  # None -> "tool_use" if tool_use else "end_turn"
@@ -85,6 +90,7 @@ def success(
     *,
     text: str = "ok",
     tool_use: dict[str, Any] | None = None,
+    tool_uses: list[dict[str, Any]] | None = None,
     input_tokens: int = 11,
     output_tokens: int = 7,
     stop_reason: str | None = None,
@@ -96,6 +102,7 @@ def success(
         kind="success",
         text=text,
         tool_use=tool_use,
+        tool_uses=tool_uses,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         stop_reason=stop_reason,
@@ -204,14 +211,16 @@ class FakeProvider:
 def _message_json(behavior: Behavior, req_model: str | None) -> dict[str, Any]:
     model = behavior.model or req_model or "fake-unknown-model"
     content: list[dict[str, Any]]
-    if behavior.tool_use is not None:
+    blocks = behavior.tool_uses or ([behavior.tool_use] if behavior.tool_use else None)
+    if blocks:
         content = [
             {
                 "type": "tool_use",
-                "id": behavior.tool_use["id"],
-                "name": behavior.tool_use["name"],
-                "input": behavior.tool_use.get("input", {}),
+                "id": block["id"],
+                "name": block["name"],
+                "input": block.get("input", {}),
             }
+            for block in blocks
         ]
         stop = behavior.stop_reason or "tool_use"
     else:

@@ -32,7 +32,7 @@ from .ports import HitlEscalation, HitlQueueItem
 
 _ITEM_COLUMNS = (
     "hitl_id, org_id, decision_id, correlation_id, partition_key, "
-    "trigger_reason, proposal_json, request_json, status, "
+    "trigger_reason, proposal_json, request_json, resumption_json, status, "
     "verdict_by, verdict_json, verdict_at, expires_at, created_at"
 )
 
@@ -48,6 +48,7 @@ def _item(rec: Any) -> HitlQueueItem:
         trigger_reason=rec["trigger_reason"],
         proposal_json=rec["proposal_json"] or {},
         request_json=rec["request_json"],
+        resumption_json=rec["resumption_json"],
         status=rec["status"],
         verdict_by=rec["verdict_by"],
         verdict_json=rec["verdict_json"],
@@ -98,14 +99,17 @@ class PgHitlQueueRepository:
             # Same columns + semantics as HITLQueueWriter's INSERT
             # (decision_engine/hitl_writer.py:136-141): status starts 'pending',
             # verdict_* stay NULL until a human acts. request_json (0015, owner
-            # decision K4) is the request-path extra that writer never sets.
+            # decision K4) and resumption_json (0027) are the request-path extras
+            # that writer never sets -- it has no replayable request and no
+            # sampled turn to freeze.
             await conn.execute(
                 """
                 INSERT INTO hitl_queue (
                     hitl_id, org_id, decision_id, correlation_id, partition_key,
                     trigger_reason, proposal_json, score_json,
-                    status, expires_at, created_at, request_json
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                    status, expires_at, created_at, request_json,
+                    resumption_json
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
                 """,
                 e.hitl_id,
                 e.org_id,
@@ -119,6 +123,11 @@ class PgHitlQueueRepository:
                 e.expires_at,
                 e.created_at,
                 json.dumps(e.request_json, default=str) if e.request_json is not None else None,
+                (
+                    json.dumps(e.resumption_json, default=str)
+                    if e.resumption_json is not None
+                    else None
+                ),
             )
 
     # -- review/approval reads + the exactly-once verdict claim --------------

@@ -207,8 +207,21 @@ check.
 ## 2.1 - Stripe
 
 > **Section status: `[OWNER-DECISION-REQUIRED]` - account model DECIDED (Q2.1e, Q2.1f,
-> 2026-08-28); remainder still open and BLOCKED additionally on 1.1.**
+> 2026-08-28); credential-storage and idempotency mechanics DECIDED (R1, R2, 2026-09-09);
+> remainder still open and BLOCKED additionally on 1.1.**
 > Full design: `docs/06_integrations/stripe_connector_design.md`.
+>
+> **Update 2026-09-09 (design doc revision R1/R2).** Three things below are now stale as
+> written and are corrected in place, each marked inline:
+> - **R1.** Stripe does NOT use `OAuthCredentialService`, `oauth_credentials`, or the
+>   `label`-column proposal in Q2.1a. It gets its own fifth `ToolProxy` gate profile,
+>   `ToolStripeProfile`, mirroring `ToolWifProfile` (`src/skylize/tools/base.py:137-176`).
+>   Design doc **4.5**. Nothing in 3.0's `org_credentials` gap list applies to Stripe.
+> - **R2.** Q2.1d's `proxy.py:322` citation is stale AND the conclusion drawn from it was
+>   wrong. See the corrected bullet below. Design doc **7.0.1**.
+> - **New.** Design doc **7.5** specifies the two per-org refund-limit tables and an
+>   `[INTERIM-RULE]` large-refund review trigger. It does not answer Q2.1c; it specifies
+>   the machinery Q2.1c's answer is configured through.
 
 `[CODE-VERIFIED]` Existing doc position: Stripe is the "payment & subscription
 system of record", integrated by **reference IDs only, never card data**, with PCI
@@ -217,8 +230,14 @@ signature-verified at the edge, outbound only through the adapter (`:21-22`);
 `chief_security_officer` review is already required (`:52`). No code implements any
 of it.
 
-- **Q2.1a `[OWNER-DECISION-REQUIRED]` Test-mode vs live-mode keys.** Does an org
-  connect one credential or two? `[RESEARCH-SUGGESTED]`: store mode in the existing
+- **Q2.1a `[SUPERSEDED 2026-08-28, confirmed 2026-09-09]` Test-mode vs live-mode keys.**
+  **The `[RESEARCH-SUGGESTED]` proposal below is withdrawn.** Mode is a first-class
+  `livemode BOOLEAN` on `org_stripe_accounts` (design doc 4.0.2), not a value smuggled into
+  a `label`, and under R1 there is no `org_credentials` row for Stripe at all. A tool can
+  never name its own mode: `ToolStripeProfile` deliberately carries no `livemode` field, and
+  mode is resolved from the running environment with no fallback in either direction (design
+  doc 4.5.3). Original text kept for the record only:
+  Does an org connect one credential or two? `[RESEARCH-SUGGESTED]`: store mode in the existing
   `label` column (`0007:41`, `''` = default) so `(org_id, 'stripe', 'live')` and
   `(org_id, 'stripe', 'test')` coexist under the existing unique index (`0007:54-57`)
   with no migration. Requires a rule for which mode a given agent run resolves, and
@@ -233,6 +252,11 @@ of it.
   "Refund (small, under threshold, no fraud flag) | Medium | `manager` | no" - but the
   threshold itself is unset, and `policy_inputs.md:227` defines T4 as auto-reject
   before execution. Until 1.1 is resolved neither is enforceable on the tool path.
+  **2026-09-09:** design doc 7.5 now specifies WHERE that number lives and HOW it is checked -
+  `org_refund_authority_limits` (per authority level) and `org_refund_review_thresholds`
+  (org-wide), both in currency MINOR units, both `FORCE ROW LEVEL SECURITY`, both seeded
+  EMPTY so a missing row fails closed. **Q2.1c itself is still open**: the design supplies the
+  mechanism, the owner supplies the number (Q2.1j).
   (The level column read `L2` until the 2026-09-06 reconciliation of that file's
   ladder to the canonical `AUTHORITY_RANK`; `L2` was and is `manager`, so the row's
   meaning is unchanged - only its label is.)
@@ -246,10 +270,27 @@ of it.
   **Note (2026-08-28):** Stripe prunes idempotency keys after **24 hours**
   (https://docs.stripe.com/api/idempotent_requests), so this derivation protects
   in-run retries but NOT a later replay. A durable local dedupe record is what makes
-  replay safe. Separately, the derivation is not implementable through
-  `ToolProxy.invoke` as it stands - `src/skylize/tools/proxy.py:322` hardcodes
-  `f"tool:{tool.tool_id}:{uuid4()}"` and `:314-321` states "Idempotent replay needs a
-  caller-supplied key, which this signature does not accept." Still open.
+  replay safe.
+  **CORRECTED 2026-09-09 (R2).** The sentence that followed here - that the derivation "is not
+  implementable through `ToolProxy.invoke` as it stands" - was wrong on two counts, and both
+  are fixed in design doc 7.0.1:
+    1. **Stale citation.** The hardcoded key is at `src/skylize/tools/proxy.py:788`, with its
+       explanatory comment at `:779-787`, not `:322`/`:314-321`.
+    2. **Wrong conclusion.** That key is the SPEND-LEDGER reservation key, internal to
+       `SpendLedger.try_reserve`. It is not the Stripe `Idempotency-Key` and must never become
+       it - the comment at `proxy.py:779-787` explains why it has to stay unique per
+       invocation. The Stripe key is the handler's to derive, and the handler already has what
+       it needs: `ToolContext.hitl_id` (`src/skylize/tools/base.py:60-72`) is threaded through
+       `ToolProxy.invoke` (`proxy.py:160-167,326-329`) precisely so an externally-mutating
+       handler can build a **retry-stable** key. `correlation_id` cannot serve, because
+       `HitlQueueService.approve` mints a fresh one per approval attempt
+       (`src/skylize/app/hitl/service.py:160`).
+  **Recommended derivation** (design doc 7.0.1):
+  `uuid5(SKYLIZE_NAMESPACE, f"{hitl_id}:{charge_id}:{amount_minor}")` - the same discipline
+  `gcp_wif_killswitch_design.md:1134-1140` adopted for Google's `requestId`. **Q2.1d remains
+  open**, but is no longer blocked on a `ToolProxy.invoke` signature change. What remains is
+  the durable local dedupe record (Stripe prunes keys at 24 hours) and **Q2.1l**, the
+  double-commit residual at `proxy.py:378-382`.
 - **Q2.1e `[DECIDED 2026-08-28]` Connect account model.** **Standard connected accounts
   via the Connect OAuth flow, on the Accounts v1 API.** Deciding constraint: Q2.1f
   requires linking a customer's pre-existing Stripe account; only OAuth does that, and
@@ -279,6 +320,19 @@ of it.
   customer accounts cannot connect via OAuth `read_write` since June 2021 - product answer
   required; **Q2.1i** confirm discarding the deprecated `access_token` / `refresh_token`
   at the callback; **Q3.0b** the RLS circularity in `acct_ -> org_id` webhook resolution.
+- **New questions raised by the 2026-09-09 revision** (design doc): **Q2.1j** the refund cap
+  numbers per authority level and currency (7.5.6) - **not a design blocker**, both tables are
+  seeded empty and fail closed; **Q2.1k** does a human-approved refund still consume the org's
+  spend envelope (7.5.6); **Q2.1l** the double-commit residual - `ToolProxy` commits the full
+  reserved amount unconditionally (`src/skylize/tools/proxy.py:378-382`), so a replay that the
+  local dedupe record short-circuits moves no money at Stripe but still commits a second
+  reservation (7.0.1). **Q2.1l is the only one of the three that cannot be resolved inside
+  the connector.**
+- **Sign-off items added by the revision:** `ToolStripeProfile` (design doc 4.5), the two
+  refund-limit tables and the `[INTERIM-RULE]` review trigger (7.5). The interim rule is
+  **rule-based and explicitly NOT the eventual `fraud_detection_agent` integration** - that
+  contract is declared (`src/skylize/contracts/mvp/security.py:10`) but nothing under `src/`
+  consumes its `FraudVerdictOut` (`:16`), so no fraud signal exists to gate on today.
 
 ---
 
