@@ -128,5 +128,5 @@ class AgentRegistry:
         return AgentContract.model_validate(data)
 
 
-# The default MVP registry — the 15 governed creative + growth contracts.
+# The default MVP registry — the 23 governed creative + growth contracts.
 MVP_REGISTRY = AgentRegistry(ALL_MVP_CONTRACTS)
