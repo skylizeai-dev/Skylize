@@ -69,6 +69,8 @@ from .base import (
     ToolSpendDeferredToHuman,
     ToolSpendHardDenied,
     ToolSpendKeyConflict,
+    ToolSpendReplayInFlight,
+    ToolSpendReplayResultUnavailable,
     ToolSpendUnavailable,
 )
 from .registry import ToolRegistry
@@ -380,19 +382,35 @@ class ToolProxy:
         # hold must be placed as late as possible — after every cheaper denial has
         # had its chance — to minimise the window in which budget is held for a
         # call that was never going to run.
-        reservation: Reservation | None = None
-        if tool.spend is not None:
-            reservation = await self._reserve_spend(
-                tool=tool, validated_input=validated_input, contract=contract,
-                org_id=org_id, correlation_id=correlation_id,
-                governance_token=governance_token,
-            )
-
+        # Built BEFORE the reservation, which is a change of order: the
+        # replay key decides whether this call may reserve AT ALL, so it has to
+        # exist first. Safe to move — constructing a ToolContext is pure, does no
+        # I/O and raises nothing.
         context = ToolContext(
             org_id=org_id, agent_id=contract.agent_id, correlation_id=correlation_id,
             permission_grant=permission_grant, hitl_id=hitl_id,
             tool_use_id=tool_use_id, is_hitl_resumption=is_hitl_resumption,
         )
+        # None on every path but a resumed HITL turn — see ToolContext.replay_key.
+        replay_key = context.replay_key()
+
+        reservation: Reservation | None = None
+        if tool.spend is not None:
+            if replay_key is not None:
+                recorded = await self._replay_guard(
+                    tool=tool, contract=contract, org_id=org_id,
+                    correlation_id=correlation_id,
+                    governance_token=governance_token, replay_key=replay_key,
+                )
+                if recorded is not None:
+                    # The approved call already ran and committed. Hand back what
+                    # it returned; do NOT dispatch the handler again.
+                    return recorded
+            reservation = await self._reserve_spend(
+                tool=tool, validated_input=validated_input, contract=contract,
+                org_id=org_id, correlation_id=correlation_id,
+                governance_token=governance_token, replay_key=replay_key,
+            )
         try:
             output = await tool.handler(validated_input, context)
         except ToolPermissionDenied as exc:
@@ -459,6 +477,15 @@ class ToolProxy:
                 org_id=org_id,
                 reservation_id=reservation.reservation_id,
                 actual_minor=settle_minor,
+                # Recorded ONLY for a replay-keyed reservation. The snapshot
+                # exists to answer a future replay, and only a replay-keyed row
+                # can ever be replayed — storing the output of every ordinary
+                # spend call would put tool payloads in the money ledger for no
+                # reader.
+                result_snapshot=(
+                    output.model_dump(mode="json")
+                    if reservation.replay_key is not None else None
+                ),
             )
 
         return ToolResult(tool_id=tool_id, output=output)
@@ -809,6 +836,7 @@ class ToolProxy:
         org_id: str,
         correlation_id: UUID,
         governance_token: GovernanceToken,
+        replay_key: UUID | None = None,
     ) -> Reservation:
         """Place the hold, or deny. Every exit that is not a `Reservation` denies.
 
@@ -858,30 +886,31 @@ class ToolProxy:
                 org_id=org_id,
                 principal_id=on_behalf_of.principal_id,
                 amount_minor=amount,
-                # Unique per invocation, NOT derived from (correlation, agent,
-                # tool). `try_reserve` treats a repeated idempotency_key as a
-                # retry and returns the ORIGINAL hold, so a key shared by two
-                # distinct calls would let the second spend against the first's
-                # reservation.
+                # STILL unique per attempt, deliberately, even on a replay.
+                # `replay_key` below carries the replay identity; these two keys
+                # answer different questions and must not be collapsed.
                 #
-                # KNOWN GAP, deliberately left open here. An earlier version of
-                # this comment claimed `invoke` has no replay path and cannot
-                # accept a caller-supplied key; both halves are now false —
-                # `invoke` takes `hitl_id` (see its signature) and
-                # agents/execution.py:967-975 passes it. So a HITL replay of the
-                # SAME logical spend reserves a SECOND hold here, the handler
-                # dedupes provider-side on `ctx.hitl_id` and moves no money, and
-                # the ledger still settles both holds. That double-counts spend
-                # that happened once.
+                # Deriving this from `replay_key` was tried and is WRONG. The
+                # UNIQUE (org_id, idempotency_key) index is unconditional across
+                # all four states, so a re-attempt after a `released` or
+                # `expired` predecessor would collide with the settled row, and
+                # `try_reserve`'s re-read branch (app/principal/spend.py:296-320)
+                # would hand back that SETTLED reservation as though it were a
+                # fresh hold. `commit` only matches `state='held'`, so the
+                # re-attempt would then settle to nothing and UNDER-count a spend
+                # that really happened -- worse than the double-count this work
+                # exists to fix (replay semantics section 6). Caught by
+                # tests/integration/test_tool_proxy_replay_states_pg.py, not by
+                # inspection.
                 #
-                # Keying off `hitl_id` is the fix and is NOT applied yet, because
-                # two things must land with it: `try_reserve` returns a reservation
-                # whatever its state (app/principal/spend.py:296-308), so a replay
-                # after the failure path would receive a RELEASED hold and settle
-                # it to nothing — under-counting a real spend, which is worse than
-                # the double-count. Replay semantics per reservation state are an
-                # owner decision, not a cleanup.
+                # The replay rule is enforced by `replay_key` and migration
+                # 0028's partial index instead, which covers exactly `held` and
+                # `committed` and so frees the key on `released`/`expired` --
+                # which is the behaviour those two states require.
                 idempotency_key=f"tool:{tool.tool_id}:{uuid4()}",
+                # The replay identity itself. NULL on ordinary calls, so the
+                # partial index ignores them entirely.
+                replay_key=replay_key,
                 correlation_id=correlation_id,
                 governance_token_id=governance_token.token_id,
             )
@@ -925,6 +954,101 @@ class ToolProxy:
             raise await deny(ToolSpendKeyConflict(str(exc))) from exc
         except EnvelopeNotFound as exc:
             raise await deny(ToolSpendUnavailable(str(exc))) from exc
+
+    async def _replay_guard(
+        self,
+        *,
+        tool: ToolDefinition,
+        contract: AgentContract,
+        org_id: str,
+        correlation_id: UUID,
+        governance_token: GovernanceToken,
+        replay_key: UUID,
+    ) -> ToolResult | None:
+        """What a replay of an already-reserved spend is allowed to do.
+
+        Returns the ORIGINAL result when the prior attempt committed, so the
+        caller returns it without dispatching. Returns None when no prior
+        attempt stands, so the caller reserves and executes normally. Raises
+        when the prior attempt is still in flight.
+
+        The four states, and why each answers as it does
+        (docs/architecture/spend_reservation_replay_semantics.md section 6):
+
+          * `committed` — it happened. Return the recorded result. Re-executing
+            would perform the action twice for one approval.
+          * `held`      — in flight, outcome unknown. Refuse: re-executing risks
+            a double action, and placing a second hold double-counts the budget.
+          * `released`  — the key is FREE. `find_replay` returns None and the
+            caller reserves for real. A release does NOT mean nothing happened
+            (section 2), but the ledger is not the authority on that — the
+            handler dedupes provider-side on `ctx.hitl_id`.
+          * `expired`   — likewise free. A swept hold means a worker died
+            mid-call; the re-attempt must be able to spend for real, because
+            settling it to zero would under-count a spend that then succeeds.
+
+        The `released`/`expired` cases need no branch here: migration 0028's
+        partial unique index covers only `held` and `committed`, so
+        `find_by_replay_key` cannot see them. The rule is enforced by the
+        database rather than by application logic that can be forgotten.
+        """
+        assert self._spend_ledger is not None  # caller checks tool.spend first
+
+        async def deny(exc: ToolPermissionDenied) -> ToolPermissionDenied:
+            await self._audit_call(
+                tool_id=tool.tool_id, contract=contract, org_id=org_id,
+                correlation_id=correlation_id, governance_token=governance_token,
+                result="denied", reason=f"replay: {exc}",
+            )
+            return exc
+
+        prior = await self._spend_ledger.find_replay(
+            org_id=org_id, replay_key=replay_key
+        )
+        if prior is None:
+            return None  # released, expired, or never reserved: spend for real.
+
+        if prior.state == "held":
+            raise await deny(ToolSpendReplayInFlight(
+                f"tool {tool.tool_id!r} is already in flight for replay key "
+                f"{replay_key} (reservation {prior.reservation_id}, held until "
+                f"{prior.expires_at.isoformat()}); refusing to run it a second "
+                f"time for one approval"
+            ))
+
+        if prior.result_snapshot is None:
+            raise await deny(ToolSpendReplayResultUnavailable(
+                f"tool {tool.tool_id!r} already committed "
+                f"{prior.committed_minor} for replay key {replay_key} "
+                f"(reservation {prior.reservation_id}) but recorded no result; "
+                f"re-running it would spend twice, so this needs a human reading "
+                f"the audit row"
+            ))
+
+        # Validated back through the tool's own output schema rather than handed
+        # over raw: a snapshot that no longer satisfies the current schema is a
+        # real incompatibility, and surfacing it as a validation error beats
+        # returning a shape the caller cannot use.
+        try:
+            output = tool.output_schema.model_validate(prior.result_snapshot)
+        except Exception as exc:  # noqa: BLE001 — normalized below
+            raise await deny(ToolSpendReplayResultUnavailable(
+                f"tool {tool.tool_id!r} has a recorded result for replay key "
+                f"{replay_key} that no longer validates against its "
+                f"output_schema: {exc}"
+            )) from exc
+
+        await self._audit_call(
+            tool_id=tool.tool_id, contract=contract, org_id=org_id,
+            correlation_id=correlation_id, governance_token=governance_token,
+            result="success",
+            reason=(
+                f"replayed the recorded result of reservation "
+                f"{prior.reservation_id}; the handler was NOT dispatched"
+            ),
+            outputs=prior.result_snapshot,
+        )
+        return ToolResult(tool_id=tool.tool_id, output=output)
 
     async def _release_spend(
         self, reservation: Reservation | None, *, org_id: str
