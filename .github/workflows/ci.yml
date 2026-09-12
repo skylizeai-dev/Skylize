@@ -35,6 +35,27 @@ jobs:
         run: pytest -q
 
   # ---------------------------------------------------------------------------
+  # Roster gate: the generated console data must match the manifest, and the
+  # manifest must know every agent the runtime can run. Needs BOTH python (to
+  # import MVP_REGISTRY) and node (to re-run the generator), which is why it is
+  # its own job rather than a step in `unit` or `website`.
+  # ---------------------------------------------------------------------------
+  roster:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install
+        run: pip install -e ".[dev]"
+      - name: Generated roster files + runtime/manifest coverage
+        run: python scripts/check_agent_network_data.py
+
+  # ---------------------------------------------------------------------------
   # Website gate: typecheck + unit tests for the Next.js frontend.
   # Mirrors the Python fast gate — no services, must be green on every PR.
   # ---------------------------------------------------------------------------
