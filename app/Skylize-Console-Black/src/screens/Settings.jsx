@@ -64,7 +64,9 @@ export default function Settings({ vm }) {
                   key={i}
                   as="button"
                   onClick={au.pick}
-                  style={sx(`flex:1;height:32px;border-radius:6px;font-family:'Geist Mono',ui-monospace,monospace;font-size:10px;letter-spacing:0.06em;cursor:pointer;transition:border-color .15s,background-color .15s;border:1px solid ${au.bd};background: ${au.bg};color: ${au.c}`)}
+                  title={au.title}
+                  aria-pressed={au.mode === vm.autonomyMode}
+                  style={sx(`flex:1;min-height:32px;padding:5px 4px;border-radius:6px;font-family:'Geist Mono',ui-monospace,monospace;font-size:8.5px;line-height:1.25;letter-spacing:0.04em;white-space:normal;cursor:pointer;transition:border-color .15s,background-color .15s;border:1px solid ${au.bd};background: ${au.bg};color: ${au.c}`)}
                   hoverStyle={sx('border-color:#77809A')}
                 >{au.label}</Interactive>
               ))}

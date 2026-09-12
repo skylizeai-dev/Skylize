@@ -97,8 +97,41 @@ const seedAudit = [
   { time: '20:24:56', actor: 'Approval Manager', action: 'TOOL', target: 'approvals.sync · 14 items', sig: '0xC4E9…20D3' },
 ];
 
+// The five named autonomy modes, in increasing order of what an agent may do
+// without a human. The ORDER is load-bearing: v2 of this store kept autonomy as
+// the integer 0-4 of the old L0-L4 tier labels, and that integer is the index
+// into this array, so an old value migrates by position.
+const AUTONOMY_MODES = [
+  'observe',
+  'propose',
+  'act_within_budget',
+  'act_and_reallocate',
+  'act_governed',
+];
+const DEFAULT_AUTONOMY_MODE = 'act_within_budget';
+
+const STORAGE_KEY = 'skylize.console.v3';
+const LEGACY_STORAGE_KEY = 'skylize.console.v2';
+
+// Accepts a v3 mode string, a v2 integer, or anything at all. Never throws and
+// never returns something outside AUTONOMY_MODES: an unreadable value must not
+// leave the console holding an autonomy setting nothing can interpret.
+function normalizeAutonomy(value) {
+  if (typeof value === 'string' && AUTONOMY_MODES.indexOf(value) >= 0) return value;
+  if (typeof value === 'number' && AUTONOMY_MODES[value]) return AUTONOMY_MODES[value];
+  return DEFAULT_AUTONOMY_MODE;
+}
+
+// v3 first; a v2 blob is read once and migrated on the next persist(). Reading
+// the old key is what stops an existing browser from resetting to defaults.
 function loadPersisted() {
-  try { return JSON.parse(localStorage.getItem('skylize.console.v2') || '{}'); } catch (e) { return {}; }
+  try {
+    const current = localStorage.getItem(STORAGE_KEY);
+    if (current) return JSON.parse(current);
+    const legacy = localStorage.getItem(LEGACY_STORAGE_KEY);
+    if (legacy) return JSON.parse(legacy);
+    return {};
+  } catch (e) { return {}; }
 }
 
 function initialState() {
@@ -129,7 +162,7 @@ function initialState() {
     logFilter: 'all', audit: seedAudit,
     pulse: seedPulse,
     orgName: persisted.orgName || 'Aventra Retail Group', region: persisted.region || 'eu-central',
-    retention: persisted.retention || '365', autonomy: persisted.autonomy != null ? persisted.autonomy : 2,
+    retention: persisted.retention || '365', autonomy: normalizeAutonomy(persisted.autonomy),
     guards: persisted.guards || { cap: true, email: true, pii: true, fallback: false },
     pausedAll: false, pauseArm: false, toast: null,
   };
@@ -152,7 +185,7 @@ export function useConsoleState(props) {
   const persist = useCallback(() => {
     const s = stateRef.current;
     try {
-      localStorage.setItem('skylize.console.v2', JSON.stringify({
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({
         screen: s.screen, sidebarOpen: s.sidebarOpen, netSel: s.netSel, orgName: s.orgName,
         region: s.region, retention: s.retention, autonomy: s.autonomy, guards: s.guards,
       }));
@@ -238,11 +271,11 @@ export function useConsoleState(props) {
     const R = {
       marketing: ['Directive accepted — routed to Marketing & Creative.', 'Campaign brief drafted; Copy and Art directors assigned worker pools.', 'Channel budget allocation proposed within CMO ceiling — no approval required.', 'Brand Guardian gate scheduled before any asset ships.', 'First deliverables land in Deliverables within the hour; launch order will surface in Approvals.'],
       finance: ['Directive accepted — routed to Finance.', 'FP&A is re-running the forecast against the live pipeline.', 'Director, Risk is scanning variance and spend anomalies in parallel.', 'Treasury reconciliation pinned to the new baseline.', 'CFO summary with confidence bands will be posted to Deliverables shortly.'],
-      customer_success: ['Directive accepted — routed to Customer Success.', 'Retention is scoring churn-risk cohorts against the last 90 days.', 'Lifecycle playbooks queued for the top three at-risk segments.', 'Escalations above autonomy tier will surface in your Approvals queue.', 'Expect the cohort report in Deliverables within the hour.'],
+      customer_success: ['Directive accepted — routed to Customer Success.', 'Retention is scoring churn-risk cohorts against the last 90 days.', 'Lifecycle playbooks queued for the top three at-risk segments.', 'Escalations above the current autonomy mode will surface in your Approvals queue.', 'Expect the cohort report in Deliverables within the hour.'],
       security: ['Directive accepted — routed to Security & Legal.', 'Access review sweep started across all 151 agent tool grants.', 'Compliance is re-verifying SOC 2 control evidence.', 'Privacy gate re-checked on the learning pipeline — PASS.', 'Signed report will be attached to the Audit Log on completion.'],
       procurement: ['Directive accepted — routed to Procurement.', 'Vendor Discovery is building a shortlist against your criteria.', 'Pricing Negotiation computing target prices from historical POs.', 'Contract Review will flag risk before anything is committed.', 'Committed spend will pause for your approval — nothing is signed autonomously.'],
-      engineering: ['Directive accepted — routed to Engineering.', 'Pipeline created; DevOps contract gate armed for the change.', 'Canary rollout plan drafted with automatic rollback thresholds.', 'Latency budget checks wired to the observability stream.', 'Deploy order above autonomy tier will surface in Approvals.'],
-      strategy: ['Directive accepted — decomposed by the Orchestrator.', 'Strategy directors are framing options with competitive context.', 'Finance validates the numbers before anything reaches you.', 'Synthesis memo with a recommendation lands in Deliverables.', 'You will only be interrupted if a decision exceeds the autonomy envelope.'],
+      engineering: ['Directive accepted — routed to Engineering.', 'Pipeline created; DevOps contract gate armed for the change.', 'Canary rollout plan drafted with automatic rollback thresholds.', 'Latency budget checks wired to the observability stream.', 'Deploy order above the current autonomy mode will surface in Approvals.'],
+      strategy: ['Directive accepted — decomposed by the Orchestrator.', 'Strategy directors are framing options with competitive context.', 'Finance validates the numbers before anything reaches you.', 'Synthesis memo with a recommendation lands in Deliverables.', 'You will only be interrupted if a decision exceeds the current autonomy mode.'],
     };
     const lines = (R[dept.id] || R.strategy).map((txt, i) => (i === 0 ? { k: 'b', t: txt } : (i < 4 ? { k: 'i', t: txt, m: '0' + i } : { k: 'p', t: txt })));
     const hex = Math.floor(Math.random() * 65535).toString(16).toUpperCase().padStart(4, '0');
@@ -811,14 +844,14 @@ function buildViewModel(ctx) {
   ];
 
   // ── settings ──
-  const autonomyDescs = [
-    'L0 — Observe only. Every action requires human sign-off.',
-    'L1 — Draft. Agents prepare work; humans execute.',
-    'L2 — Execute within budget. HIGH-risk actions escalate to you.',
-    'L3 — Execute + reallocate budgets. Only irreversible actions escalate.',
-    'L4 — Full autonomy inside the governance envelope. Audit everything.',
-  ];
-  const autonomyChips = [0, 1, 2, 3, 4].map((i) => ({ pick: () => set({ autonomy: i }), label: 'L' + i, bd: s.autonomy === i ? 'var(--accent,#3D6BFF)' : '#232939', bg: s.autonomy === i ? 'color-mix(in oklab, var(--accent,#3D6BFF) 18%, transparent)' : 'transparent', c: s.autonomy === i ? '#E9EBF2' : '#8B93A7' }));
+  const autonomyCopy = {
+    observe: 'observe — Observe only. Every action requires human sign-off.',
+    propose: 'propose — Agents prepare work; humans execute it.',
+    act_within_budget: 'act_within_budget — Act within budget. HIGH-risk actions escalate to you.',
+    act_and_reallocate: 'act_and_reallocate — Act and reallocate budgets. Only irreversible actions escalate.',
+    act_governed: 'act_governed — Act inside the governance envelope. Audit everything.',
+  };
+  const autonomyChips = AUTONOMY_MODES.map((mode) => ({ mode, pick: () => set({ autonomy: mode }), label: mode.replace(/_/g, ' ').toUpperCase(), title: autonomyCopy[mode], bd: s.autonomy === mode ? 'var(--accent,#3D6BFF)' : '#232939', bg: s.autonomy === mode ? 'color-mix(in oklab, var(--accent,#3D6BFF) 18%, transparent)' : 'transparent', c: s.autonomy === mode ? '#E9EBF2' : '#8B93A7' }));
   const guardDefs = [
     ['cap', 'Approval above $10,000', 'Any single commitment over the cap escalates to a human'],
     ['email', 'Block external sends', 'Outbound email & posts require the brand gate + approval'],
@@ -910,7 +943,7 @@ function buildViewModel(ctx) {
     isSet: s.screen === 'set', orgName: s.orgName, onOrgName: (e) => set({ orgName: e.target.value }),
     region: s.region, onRegion: (e) => set({ region: e.target.value }),
     retention: s.retention, onRetention: (e) => set({ retention: e.target.value }),
-    autonomyDesc: autonomyDescs[s.autonomy], autonomyChips, guardrails,
+    autonomyMode: s.autonomy, autonomyDesc: autonomyCopy[s.autonomy] || autonomyCopy[DEFAULT_AUTONOMY_MODE], autonomyChips, guardrails,
     pauseTitle: s.pausedAll ? 'Agents paused' : 'Pause all agents',
     pauseLabel: s.pausedAll ? 'RESUME' : (s.pauseArm ? 'CONFIRM PAUSE?' : 'PAUSE ALL'),
     pauseBg: s.pausedAll || s.pauseArm ? 'rgba(225,90,82,0.16)' : 'transparent', pauseC: '#E15A52',
