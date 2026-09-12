@@ -100,7 +100,7 @@ class FakeSpendRepo:
 
     async def try_reserve(
         self, *, org_id, principal_id, amount_minor, idempotency_key,
-        correlation_id, governance_token_id, now, expires_at,
+        correlation_id, governance_token_id, now, expires_at, replay_key=None,
     ) -> Reservation | None:
         if not self._has_envelope:
             return None
@@ -112,11 +112,14 @@ class FakeSpendRepo:
             idempotency_key=idempotency_key, amount_minor=amount_minor,
             correlation_id=correlation_id, governance_token_id=governance_token_id,
             state="held", created_at=now, expires_at=expires_at,
+            replay_key=replay_key,
         )
         self._reservations[res.reservation_id] = res
         return res
 
-    async def commit(self, *, org_id, reservation_id, actual_minor, now) -> None:
+    async def commit(
+        self, *, org_id, reservation_id, actual_minor, now, result_snapshot=None
+    ) -> None:
         res = self._reservations.get(reservation_id)
         if res is None or res.state != "held":
             return
@@ -124,9 +127,30 @@ class FakeSpendRepo:
         self.reserved_minor -= res.amount_minor
         self.spent_minor += actual
         self._reservations[reservation_id] = res.model_copy(
-            update={"state": "committed", "committed_minor": actual}
+            update={
+                "state": "committed",
+                "committed_minor": actual,
+                # COALESCE, mirroring the real commit: an idempotent second
+                # commit must never blank a snapshot the first one recorded.
+                "result_snapshot": (
+                    res.result_snapshot if result_snapshot is None else result_snapshot
+                ),
+            }
         )
         self.commits.append((reservation_id, actual))
+
+    async def find_by_replay_key(self, *, org_id, replay_key) -> Reservation | None:
+        """Mirrors migration 0028's PARTIAL unique index, not a plain lookup.
+
+        The index covers exactly `held` and `committed`, so a `released` or
+        `expired` predecessor is invisible and its key is free again. A fake that
+        returned settled rows here would let a unit test pass while the real
+        database refused, or vice versa.
+        """
+        for res in self._reservations.values():
+            if res.replay_key == replay_key and res.state in ("held", "committed"):
+                return res
+        return None
 
     async def release(self, *, org_id, reservation_id, now) -> None:
         if self.release_raises:

@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 ToolCategory = Literal["memory", "search", "integration", "compute"]
 
@@ -134,12 +134,33 @@ class ToolSpendProfile(BaseModel):
     Deliberately NOT a callable estimator: the amount a tool is about to spend has
     to be inspectable and auditable before dispatch, and a lambda in a registry
     entry is neither.
+
+    `actual_amount_field` is the settlement half of the same idea, read off the
+    tool's VALIDATED OUTPUT instead of its input. A tool whose actual spend can
+    come in BELOW what it asked to reserve — a refund the provider partially
+    approves, an order the provider fills short — names the output field carrying
+    what really moved, and `ToolProxy` settles the hold with THAT rather than with
+    the reservation. Leaving it None declares the opposite and equally explicitly:
+    this tool always spends what it reserved, so the reservation IS the actual.
+
+    Not inferred from a conventional field name, and not discovered by probing the
+    output for a plausible attribute. Either would make a tool that forgot to
+    report a lower actual indistinguishable from one that correctly has none, and
+    the ledger would over-commit without anything to notice it. Declaring it puts
+    that difference in the registry entry, where `ToolDefinition` can — and does —
+    check it against `output_schema` before the tool is ever registered.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     currency: str = Field(min_length=3, max_length=3)
     amount_field: str = Field(min_length=1)
+    #: Field on the VALIDATED OUTPUT carrying the amount that actually moved, in
+    #: the same integer MINOR units as `amount_field`. None means "actual always
+    #: equals reserved"; see the class docstring. Validated against the tool's
+    #: `output_schema` in `ToolDefinition`, so a typo here fails at registration
+    #: rather than silently over-committing a real spend.
+    actual_amount_field: str | None = Field(default=None, min_length=1)
 
 
 class ToolPermissionProfile(BaseModel):
@@ -308,6 +329,39 @@ class ToolDefinition(BaseModel):
     #: AgentExecutionService._govern_tool_turn.
     approval: ToolApprovalProfile | None = None
 
+    @model_validator(mode="after")
+    def _spend_fields_exist_on_their_schemas(self) -> ToolDefinition:
+        """Reject a spend profile naming a field its schemas do not have.
+
+        Runs at CONSTRUCTION, which is the whole point. `ToolProxy` reads
+        `amount_field` off the validated input and `actual_amount_field` off the
+        validated output; a typo in either is a silent money bug at the moment it
+        finally matters, and `actual_amount_field` is the worse of the two — a
+        declared-but-absent output field would send the proxy back to committing
+        the reservation, over-committing a spend that came in lower, which is
+        exactly the failure declaring the field was meant to prevent.
+
+        Checking here rather than in `ToolRegistry.validate_schemas` is
+        deliberate: a `ToolDefinition` that never reaches a registry (a test
+        fixture, a directly-dispatched tool) is just as capable of moving money.
+        """
+        if self.spend is None:
+            return self
+        for field_name, schema, which in (
+            (self.spend.amount_field, self.input_schema, "input_schema"),
+            (self.spend.actual_amount_field, self.output_schema, "output_schema"),
+        ):
+            if field_name is None:
+                continue
+            if field_name not in schema.model_fields:
+                raise ValueError(
+                    f"tool_id={self.tool_id!r} declares a spend field "
+                    f"{field_name!r} that {which} {schema.__name__!r} does not "
+                    f"define; a spend field the proxy cannot read is a silent "
+                    f"money bug, so registration fails closed"
+                )
+        return self
+
 
 @dataclass(frozen=True, slots=True)
 class ToolResult:
@@ -420,6 +474,98 @@ class ToolSpendUnavailable(ToolSpendDenied):
 
     def __init__(self, reason: str) -> None:
         super().__init__(reason, defer_to_human=False)
+
+
+class ToolSpendKeyConflict(ToolPermissionDenied):
+    """The reservation KEY was refused, not the amount. The spend did not happen.
+
+    Raised when the ledger reports `ReservationConflict`
+    (app/principal/errors.py:116): the `(org_id, idempotency_key)` pair already
+    backs a reservation recorded for a DIFFERENT amount
+    (app/principal/spend.py:316-318). A repeat with a MATCHING amount is not this
+    error -- that is an ordinary idempotent retry and returns the original hold.
+
+    Its own branch with `failed_stage="reservation"`, deliberately NOT a
+    `ToolSpendDenied`, on exactly the reasoning `ToolCredentialDenied` records. A
+    key collision and an exhausted ceiling are unrelated conditions with
+    unrelated remedies -- the ceiling wants a limit raised or a human approval,
+    this wants the CALLER to stop reusing one key for a changed amount -- and
+    collapsing them would make both unactionable in the audit trail.
+
+    Subclassing `ToolSpendDenied` would also hand this a `defer_to_human` flag it
+    has no business carrying. Routing a caller-side idempotency fault into a
+    human approval queue as though it were an overspend is precisely the
+    misrouting that flag was split into three types to prevent. For the same
+    reason the containment auto-hook does NOT fire for it (tools/proxy.py): a
+    repeated key is not a customer overspending, and acting on an unverified
+    signal is how a safety control starts stopping healthy machines.
+
+    That it is a `ToolError` at all is the substance of the fix. Until this type
+    existed the underlying `ReservationConflict` left `ToolProxy.invoke` as a
+    bare `BudgetError`, missed the `except ToolError` branch that turns a refused
+    call into an error `tool_result` (app/agents/execution.py:981), and faulted
+    the entire agent run over one bad key.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason, failed_stage="reservation")
+
+
+class ToolSpendReplayBlocked(ToolPermissionDenied):
+    """A replayed spend call was STOPPED because the original already stands.
+
+    `failed_stage="replay"`, its own branch for the same reason
+    `ToolSpendKeyConflict` has one: this is not a budget outcome. The ceiling was
+    never consulted. What happened is that `ToolContext.replay_key()` matched a
+    reservation already sitting in `held` or `committed`, and re-running the tool
+    would perform a second real-world action for one approved intent.
+
+    Both subclasses below are FAIL-CLOSED refusals, and the closing is the point.
+    The alternative to refusing is re-executing a spend whose predecessor may
+    have already moved money, which is the exact double-count this machinery
+    exists to prevent (docs/architecture/spend_reservation_replay_semantics.md
+    section 6: `held` and `committed` must never re-execute).
+
+    Never raised directly -- always one of the two below, so a caller can branch
+    on the TYPE rather than parsing a reason string.
+    """
+
+    def __init__(self, reason: str, *, retryable: bool) -> None:
+        super().__init__(reason, failed_stage="replay")
+        self.retryable = retryable
+
+
+class ToolSpendReplayInFlight(ToolSpendReplayBlocked):
+    """The original call is still `held` -- in flight, outcome unknown.
+
+    `retryable=True`: the hold is either about to settle or about to be released
+    or swept at `expires_at`, and each of those resolves this. Once the row
+    leaves `held` the replay either reads the recorded result (committed) or
+    places a real hold of its own (released/expired), so waiting is genuinely
+    productive here in a way it is not for the sibling below.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason, retryable=True)
+
+
+class ToolSpendReplayResultUnavailable(ToolSpendReplayBlocked):
+    """The original `committed` but its result was never recorded.
+
+    `retryable=False`: the money moved and no snapshot exists to hand back, so
+    neither re-executing nor waiting can produce a correct answer -- only a human
+    reading the audit row can. Reachable for reservations settled before
+    migration 0028 added `result_snapshot`, and for any commit that recorded
+    none.
+
+    Its own type rather than a `None` return for the reason `ToolSpendUnavailable`
+    has one: "we cannot produce the original result" must never be collapsed into
+    "there was no original", which would re-execute a spend that already
+    happened.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason, retryable=False)
 
 
 class ToolCredentialDenied(ToolPermissionDenied):
