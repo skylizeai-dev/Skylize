@@ -56,6 +56,41 @@ jobs:
         run: python scripts/check_agent_network_data.py
 
   # ---------------------------------------------------------------------------
+  # Console-Black gate: the ops console is a STATIC bundle, so every byte of it
+  # is served to every visitor. Its vite config refuses to build when a VITE_*
+  # variable is named like a credential (vite.config.js
+  # `assertNoInlinedSecrets`), because a key baked into this bundle would ship
+  # to the public -- the console's backend calls go through the server-side BFF
+  # at website/src/app/api/console/* instead, which is where the service API key
+  # lives. That guard is only worth having if it runs on every PR, so the build
+  # runs here. Own job: this app has its own lockfile and no python side.
+  # ---------------------------------------------------------------------------
+  console-black:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app/Skylize-Console-Black
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: app/Skylize-Console-Black/package-lock.json
+      - name: Install
+        run: npm ci
+      - name: Build (also runs the inlined-credential guard)
+        run: npm run build
+      - name: Assert no credential-shaped string reached the bundle
+        # Belt and braces: the guard above is name-based, this is content-based.
+        run: |
+          if grep -rniE 'x-api-key|sk_live_|serviceApiKey' dist/; then
+            echo "::error::A credential-shaped string reached the static bundle."
+            exit 1
+          fi
+          echo "OK: no credential-shaped string in dist/."
+
+  # ---------------------------------------------------------------------------
   # Website gate: typecheck + unit tests for the Next.js frontend.
   # Mirrors the Python fast gate — no services, must be green on every PR.
   # ---------------------------------------------------------------------------

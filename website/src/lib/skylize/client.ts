@@ -56,7 +56,13 @@ export class SkylizeApiError extends Error {
 }
 
 export interface SkylizeFetchOptions {
-  method?: "GET" | "POST";
+  /**
+   * PUT joins GET/POST for the autonomy route's idempotent write
+   * (backend PUT /api/v1/autonomy). Like POST it is never auto-retried --
+   * `canRetry` below stays GET-only, so adding PUT cannot introduce a
+   * duplicate write even though the backend's PUT happens to be idempotent.
+   */
+  method?: "GET" | "POST" | "PUT";
   /** JSON-serialized as the request body when provided. */
   body?: unknown;
   timeoutMs?: number;

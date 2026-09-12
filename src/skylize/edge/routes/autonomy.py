@@ -16,9 +16,22 @@ FAIL CLOSED (ruling 7): the GET reports `observe` whenever no row resolves. The
 `configured` flag tells the console whether that came from a choice or from the
 absence of one; `mode` is safe to act on either way.
 
-NOT WIRED TO THE CONSOLE UI. The console's autonomy setting is still backed by
-localStorage. Connecting the two is deliberate follow-up work, once this backend
-is tested and merged.
+WIRED TO THE CONSOLE UI, through a proxy and never directly. Console-Black
+(`app/Skylize-Console-Black`) is a static bundle and can hold no credential, so
+its Settings screen calls the server-side BFF at
+`website/src/app/api/console/autonomy/route.ts`, which attaches a service API
+key and calls these two verbs. The console no longer keeps autonomy in
+localStorage.
+
+The BFF authenticates with an API key whose scopes include `owner`, because a
+key's scopes become its roles (`app/auth/service.py:95`) and the PUT below is
+owner-only. That needed NO change to `get_context` or `require_role` -- proven
+end-to-end in `tests/unit/test_autonomy_api_key_auth.py`.
+
+Note the deliberate asymmetry between the two verbs: the GET's
+`require_any_role_or_user` also accepts a human's Skylize access JWT, while the
+PUT's `require_role` resolves through `get_context`, which does not decode one.
+An API key clears both, which is why the proxy path works unchanged.
 """
 
 from __future__ import annotations

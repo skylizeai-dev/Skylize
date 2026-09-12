@@ -56,8 +56,21 @@ export default function Settings({ vm }) {
         </div>
         <div style={sx('display:flex;flex-direction:column;gap:12px')}>
           <div style={sx('background:#0C0F16;border:1px solid #1B2130;border-radius:10px;padding:15px 16px')}>
-            <div style={sx("font-family:'Geist Mono',ui-monospace,monospace;font-size:9.5px;letter-spacing:0.13em;color:#77809A;margin-bottom:4px")}>DEFAULT AUTONOMY</div>
-            <div style={sx('font-size:11px;color:#8B93A7;margin-bottom:11px')}>{vm.autonomyDesc}</div>
+            <div style={sx("font-family:'Geist Mono',ui-monospace,monospace;font-size:9.5px;letter-spacing:0.13em;color:#77809A;margin-bottom:4px")}>ORG AUTONOMY</div>
+            <div style={sx('font-size:11px;color:#8B93A7;margin-bottom:5px')}>{vm.autonomyDesc}</div>
+            {/* Where the displayed value came from: the org's stored posture,
+                the fail-closed default, or a read that failed. Without this the
+                three are indistinguishable on screen. */}
+            <div style={sx('font-size:10.5px;color:#77809A;margin-bottom:11px')} aria-live="polite">{vm.autonomyStatus}</div>
+            {vm.autonomyError ? (
+              <div
+                role="alert"
+                style={sx('display:flex;gap:8px;align-items:flex-start;margin-bottom:11px;padding:8px 10px;border-radius:6px;border:1px solid rgba(225,90,82,0.5);background:rgba(225,90,82,0.1)')}
+              >
+                <span style={sx("font-family:'Geist Mono',ui-monospace,monospace;font-size:9px;letter-spacing:0.08em;color:#E15A52;flex-shrink:0;padding-top:1px")}>{vm.autonomyErrorLabel}</span>
+                <span style={sx('font-size:11px;color:#E9A9A4;line-height:1.4')}>{vm.autonomyError}</span>
+              </div>
+            ) : null}
             <div style={sx('display:flex;gap:5px')}>
               {vm.autonomyChips.map((au, i) => (
                 <Interactive
@@ -65,9 +78,11 @@ export default function Settings({ vm }) {
                   as="button"
                   onClick={au.pick}
                   title={au.title}
+                  disabled={au.disabled}
                   aria-pressed={au.mode === vm.autonomyMode}
-                  style={sx(`flex:1;min-height:32px;padding:5px 4px;border-radius:6px;font-family:'Geist Mono',ui-monospace,monospace;font-size:8.5px;line-height:1.25;letter-spacing:0.04em;white-space:normal;cursor:pointer;transition:border-color .15s,background-color .15s;border:1px solid ${au.bd};background: ${au.bg};color: ${au.c}`)}
-                  hoverStyle={sx('border-color:#77809A')}
+                  aria-busy={vm.autonomyBusy || undefined}
+                  style={sx(`flex:1;min-height:32px;padding:5px 4px;border-radius:6px;font-family:'Geist Mono',ui-monospace,monospace;font-size:8.5px;line-height:1.25;letter-spacing:0.04em;white-space:normal;cursor:${au.cursor};opacity:${au.opacity};transition:border-color .15s,background-color .15s,opacity .15s;border:1px solid ${au.bd};background: ${au.bg};color: ${au.c}`)}
+                  hoverStyle={au.disabled ? undefined : sx('border-color:#77809A')}
                 >{au.label}</Interactive>
               ))}
             </div>

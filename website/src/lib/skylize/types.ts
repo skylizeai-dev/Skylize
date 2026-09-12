@@ -5,6 +5,7 @@
 //   src/skylize/edge/routes/tenants.py     -> GET  /api/v1/tenants/me (TenantResponse)
 //   src/skylize/edge/routes/workflows.py   -> POST /api/v1/workflows/creative (WorkflowResponse)
 //   src/skylize/edge/routes/kill_switch.py -> POST /api/v1/kill-switch/engage
+//   src/skylize/edge/routes/autonomy.py   -> GET/PUT /api/v1/autonomy
 //
 // Pydantic serializes UUID -> string and None -> null, so optional-with-default
 // backend fields appear here as `... | null`, always present in the JSON.
@@ -65,6 +66,46 @@ export interface KillSwitchEngageResponse {
   scope_id: string;
 }
 
+/**
+ * The five named autonomy modes, least to most autonomous
+ * (src/skylize/contracts/base.py `AutonomyMode`). A CLOSED set: the backend
+ * rejects anything else at the Pydantic boundary, in the DAL, and at the
+ * table's CHECK constraint. The ORDER is meaningful and matches the backend's
+ * AUTHORITY ladder -- do not re-sort it.
+ */
+export const AUTONOMY_MODES = [
+  "observe",
+  "propose",
+  "act_within_budget",
+  "act_and_reallocate",
+  "act_governed",
+] as const;
+
+export type AutonomyMode = (typeof AUTONOMY_MODES)[number];
+
+/**
+ * The fail-closed resolution of an org that has never set a mode
+ * (`DEFAULT_AUTONOMY_MODE`, contracts/base.py:55). Ruling 7: absence of a
+ * choice means the mode where every action needs a human.
+ */
+export const DEFAULT_AUTONOMY_MODE: AutonomyMode = "observe";
+
+/** GET|PUT /api/v1/autonomy response (AutonomyModeResponse). */
+export interface BackendAutonomyResponse {
+  mode: AutonomyMode;
+  /**
+   * False when no row resolves for the org, i.e. `mode` is the fail-closed
+   * default rather than a choice. DISPLAY ONLY -- enforcement acts on `mode`
+   * either way (autonomy.py:43-47).
+   */
+  configured: boolean;
+}
+
+/** PUT /api/v1/autonomy request body (SetAutonomyModeRequest). */
+export interface SetAutonomyModeInput {
+  mode: AutonomyMode;
+}
+
 // ---------------------------------------------------------------------------
 // BFF response shapes exposed to the browser (FROZEN CONTRACT — the console UI
 // is built against these exact names; do not rename).
@@ -92,6 +133,16 @@ export interface ConsoleCreativeResponse {
 /** POST /api/console/kill-switch */
 export interface ConsoleKillSwitchResponse {
   status: string;
+}
+
+/**
+ * GET|PUT /api/console/autonomy. Passed through unchanged from the backend --
+ * both fields are already exactly what the console needs, so there is nothing
+ * to project away.
+ */
+export interface ConsoleAutonomyResponse {
+  mode: AutonomyMode;
+  configured: boolean;
 }
 
 // ---------------------------------------------------------------------------

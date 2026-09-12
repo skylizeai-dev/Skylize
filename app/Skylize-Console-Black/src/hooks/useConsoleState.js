@@ -1,5 +1,11 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { DEPARTMENTS, AGENTS } from '../data/agentNetworkData.js';
+import {
+  AUTONOMY_MODES,
+  DEFAULT_AUTONOMY_MODE,
+  fetchAutonomyMode,
+  putAutonomyMode,
+} from '../lib/autonomyClient.js';
 
 const byId = {};
 AGENTS.forEach((a) => { byId[a.id] = a; });
@@ -97,30 +103,20 @@ const seedAudit = [
   { time: '20:24:56', actor: 'Approval Manager', action: 'TOOL', target: 'approvals.sync · 14 items', sig: '0xC4E9…20D3' },
 ];
 
-// The five named autonomy modes, in increasing order of what an agent may do
-// without a human. The ORDER is load-bearing: v2 of this store kept autonomy as
-// the integer 0-4 of the old L0-L4 tier labels, and that integer is the index
-// into this array, so an old value migrates by position.
-const AUTONOMY_MODES = [
-  'observe',
-  'propose',
-  'act_within_budget',
-  'act_and_reallocate',
-  'act_governed',
-];
-const DEFAULT_AUTONOMY_MODE = 'observe';
+// AUTONOMY_MODES / DEFAULT_AUTONOMY_MODE now come from ../lib/autonomyClient.js,
+// which is the one place this app states the five modes, next to the calls that
+// exchange them with the server. The ORDER is still load-bearing (least to most
+// autonomous) because the Settings chips render in it.
+//
+// AUTONOMY IS NO LONGER PERSISTED HERE. It is ORG-WIDE state owned by the
+// backend (`org_autonomy_mode`, migration 0028) and read/written through the
+// BFF. A per-browser localStorage copy was a second source of truth for a
+// governance setting: two operators could see different postures, and a fresh
+// browser would silently claim whatever this app last defaulted to. The other
+// persisted keys below are per-operator UI preference and stay local.
 
 const STORAGE_KEY = 'skylize.console.v3';
 const LEGACY_STORAGE_KEY = 'skylize.console.v2';
-
-// Accepts a v3 mode string, a v2 integer, or anything at all. Never throws and
-// never returns something outside AUTONOMY_MODES: an unreadable value must not
-// leave the console holding an autonomy setting nothing can interpret.
-function normalizeAutonomy(value) {
-  if (typeof value === 'string' && AUTONOMY_MODES.indexOf(value) >= 0) return value;
-  if (typeof value === 'number' && AUTONOMY_MODES[value]) return AUTONOMY_MODES[value];
-  return DEFAULT_AUTONOMY_MODE;
-}
 
 // v3 first; a v2 blob is read once and migrated on the next persist(). Reading
 // the old key is what stops an existing browser from resetting to defaults.
@@ -162,7 +158,19 @@ function initialState() {
     logFilter: 'all', audit: seedAudit,
     pulse: seedPulse,
     orgName: persisted.orgName || 'Aventra Retail Group', region: persisted.region || 'eu-central',
-    retention: persisted.retention || '365', autonomy: normalizeAutonomy(persisted.autonomy),
+    retention: persisted.retention || '365',
+    // Fail closed until the server answers (ruling 7). A persisted value is
+    // deliberately NOT read here -- see the note above STORAGE_KEY.
+    autonomy: DEFAULT_AUTONOMY_MODE,
+    autonomyConfigured: false,
+    autonomyLoading: true,
+    autonomySaving: false,
+    autonomyError: null,
+    // 'read' | 'write' | null. A failed READ means the value on screen is the
+    // fail-closed default; a failed WRITE means it is still the stored posture,
+    // just not the one that was asked for. Saying "fail-closed default" for a
+    // write failure would misreport the org's actual setting.
+    autonomyErrorKind: null,
     guards: persisted.guards || { cap: true, email: true, pii: true, fallback: false },
     pausedAll: false, pauseArm: false, toast: null,
   };
@@ -187,7 +195,7 @@ export function useConsoleState(props) {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify({
         screen: s.screen, sidebarOpen: s.sidebarOpen, netSel: s.netSel, orgName: s.orgName,
-        region: s.region, retention: s.retention, autonomy: s.autonomy, guards: s.guards,
+        region: s.region, retention: s.retention, guards: s.guards,
       }));
     } catch (e) {}
   }, []);
@@ -471,6 +479,74 @@ export function useConsoleState(props) {
     if (chatElRef.current) chatElRef.current.scrollTop = chatElRef.current.scrollHeight;
   }, [state.messages, state.chatBusy]);
 
+  // ── org autonomy mode: read from the server on mount ──
+  //
+  // FAIL CLOSED on any read failure (ruling 7). `observe` is already the
+  // initial value, so a failure leaves the console showing the mode where
+  // every action needs a human -- and `autonomyError` makes it clear that is
+  // the fallback rather than the org's actual posture, so nobody reads a
+  // network failure as "we are set to observe".
+  const autonomyAliveRef = useRef(true);
+  useEffect(() => {
+    autonomyAliveRef.current = true;
+    fetchAutonomyMode().then(
+      (result) => {
+        if (!autonomyAliveRef.current) return;
+        setState({
+          autonomy: result.mode,
+          autonomyConfigured: result.configured,
+          autonomyLoading: false,
+          autonomyError: null,
+          autonomyErrorKind: null,
+        });
+      },
+      (error) => {
+        if (!autonomyAliveRef.current) return;
+        setState({
+          autonomy: DEFAULT_AUTONOMY_MODE,
+          autonomyConfigured: false,
+          autonomyLoading: false,
+          autonomyError: error.message || 'Could not read the autonomy mode.',
+          autonomyErrorKind: 'read',
+        });
+      },
+    );
+    return () => { autonomyAliveRef.current = false; };
+  }, [setState]);
+
+  // Write the org-wide mode. NOT optimistic: `autonomy` is only ever assigned
+  // from a server response, so a failed PUT cannot leave the UI showing a
+  // posture the backend never stored. The chips render server truth throughout.
+  const setAutonomy = useCallback((mode) => {
+    const s = stateRef.current;
+    if (s.autonomySaving) return;               // one write at a time
+    if (mode === s.autonomy && !s.autonomyError) return;  // nothing to change
+    setState({ autonomySaving: true, autonomyError: null, autonomyErrorKind: null });
+    putAutonomyMode(mode).then(
+      (result) => {
+        if (!autonomyAliveRef.current) return;
+        setState({
+          // The mode the backend PERSISTED, not the one requested.
+          autonomy: result.mode,
+          autonomyConfigured: result.configured,
+          autonomySaving: false,
+          autonomyError: null,
+          autonomyErrorKind: null,
+        });
+      },
+      (error) => {
+        if (!autonomyAliveRef.current) return;
+        // The selection stays where the server last put it, and the error says
+        // so out loud. Never swallowed, never a silent no-op.
+        setState({
+          autonomySaving: false,
+          autonomyError: error.message || 'Could not save the autonomy mode.',
+          autonomyErrorKind: 'write',
+        });
+      },
+    );
+  }, [setState]);
+
   const decide = useCallback((id, ok) => {
     const s = stateRef.current;
     const d = new Date(); const p = (n) => String(n).padStart(2, '0');
@@ -491,7 +567,7 @@ export function useConsoleState(props) {
 
   return buildViewModel({
     state, accent, chatElRef, fileInputElRef, starTiltElRef, starPlaneElRef,
-    setState, set, nav, tiltMove, tiltLeave,
+    setState, set, setAutonomy, nav, tiltMove, tiltLeave,
     onAttachClick, onFileChange, removeAttachment, toggleTagMenu, toggleConnMenu, onTagQ, addTag, removeTag, addConnector, removeConnector,
     doSend, starGeom, starStep, starGo, starTilt, starTiltReset, netGeom, decide, dangerPause, showToast, sparks, spend30,
   });
@@ -500,7 +576,7 @@ export function useConsoleState(props) {
 function buildViewModel(ctx) {
   const {
     state: s, accent: acc, chatElRef, fileInputElRef, starTiltElRef, starPlaneElRef,
-    setState, set, nav, tiltMove, tiltLeave,
+    setState, set, setAutonomy, nav, tiltMove, tiltLeave,
     onAttachClick, onFileChange, removeAttachment, toggleTagMenu, toggleConnMenu, onTagQ, addTag, removeTag, addConnector, removeConnector,
     doSend, starGeom, starStep, starGo, starTilt, starTiltReset, netGeom, decide, dangerPause, showToast, sparks, spend30,
   } = ctx;
@@ -851,7 +927,10 @@ function buildViewModel(ctx) {
     act_and_reallocate: 'act_and_reallocate — Act and reallocate budgets. Only irreversible actions escalate.',
     act_governed: 'act_governed — Act inside the governance envelope. Audit everything.',
   };
-  const autonomyChips = AUTONOMY_MODES.map((mode) => ({ mode, pick: () => set({ autonomy: mode }), label: mode.replace(/_/g, ' ').toUpperCase(), title: autonomyCopy[mode], bd: s.autonomy === mode ? 'var(--accent,#3D6BFF)' : '#232939', bg: s.autonomy === mode ? 'color-mix(in oklab, var(--accent,#3D6BFF) 18%, transparent)' : 'transparent', c: s.autonomy === mode ? '#E9EBF2' : '#8B93A7' }));
+  // `busy` covers both the mount read and an in-flight write: a chip must not
+  // be clickable while the value on screen is not yet known to be server truth.
+  const autonomyBusy = s.autonomyLoading || s.autonomySaving;
+  const autonomyChips = AUTONOMY_MODES.map((mode) => ({ mode, pick: () => setAutonomy(mode), disabled: autonomyBusy, label: mode.replace(/_/g, ' ').toUpperCase(), title: autonomyCopy[mode], bd: s.autonomy === mode ? 'var(--accent,#3D6BFF)' : '#232939', bg: s.autonomy === mode ? 'color-mix(in oklab, var(--accent,#3D6BFF) 18%, transparent)' : 'transparent', c: s.autonomy === mode ? '#E9EBF2' : '#8B93A7', opacity: autonomyBusy ? 0.55 : 1, cursor: autonomyBusy ? 'not-allowed' : 'pointer' }));
   const guardDefs = [
     ['cap', 'Approval above $10,000', 'Any single commitment over the cap escalates to a human'],
     ['email', 'Block external sends', 'Outbound email & posts require the brand gate + approval'],
@@ -944,6 +1023,24 @@ function buildViewModel(ctx) {
     region: s.region, onRegion: (e) => set({ region: e.target.value }),
     retention: s.retention, onRetention: (e) => set({ retention: e.target.value }),
     autonomyMode: s.autonomy, autonomyDesc: autonomyCopy[s.autonomy] || autonomyCopy[DEFAULT_AUTONOMY_MODE], autonomyChips, guardrails,
+    // Org-wide, server-owned: the screen must be able to say whether what it
+    // shows is the org's stored posture, the fail-closed default, or stale.
+    autonomyStatus: s.autonomyLoading
+      ? 'Reading the organization-wide mode...'
+      : s.autonomySaving
+        ? 'Saving...'
+        : s.autonomyErrorKind === 'read'
+          ? 'Could not read the stored posture — showing the fail-closed default.'
+          : s.autonomyErrorKind === 'write'
+            ? 'Unchanged. Still showing the stored posture, not the mode you picked.'
+            : s.autonomyConfigured
+              ? 'Organization-wide, set by the owner.'
+              : 'No mode has been set for this organization yet — failing closed to OBSERVE.',
+    autonomyError: s.autonomyError,
+    // "NOT SAVED" is only true of a failed write. A failed READ never attempted
+    // to save anything, and labelling it that way would describe the wrong event.
+    autonomyErrorLabel: s.autonomyErrorKind === 'read' ? 'NOT READ' : 'NOT SAVED',
+    autonomyBusy: s.autonomyLoading || s.autonomySaving,
     pauseTitle: s.pausedAll ? 'Agents paused' : 'Pause all agents',
     pauseLabel: s.pausedAll ? 'RESUME' : (s.pauseArm ? 'CONFIRM PAUSE?' : 'PAUSE ALL'),
     pauseBg: s.pausedAll || s.pauseArm ? 'rgba(225,90,82,0.16)' : 'transparent', pauseC: '#E15A52',
