@@ -1,8 +1,13 @@
 # Day-1 provisioning inventory
 
-Read-only audit. No secret values, no code changes. Every claim below cites
-`file:line`; where a claim in the source task did not verify against current
-repo state, that is reported explicitly rather than assumed.
+Sections 1-4 are a read-only audit: no secret values, no code changes. Every
+claim cites `file:line`; where a claim in the source task did not verify against
+current repo state, that is reported explicitly rather than assumed.
+
+**Section 5 is a runbook, not an audit** — the operator-facing procedure for
+getting a first working API key out of a freshly migrated database, added
+2026-09-12 alongside the command it documents. It contains no secret values
+either.
 
 **Path note:** the task that requested this doc specified
 `docs/07_ops/DAY1_PROVISIONING.md`. That directory does not exist —
@@ -238,3 +243,154 @@ JSON. The satisfying form is a double-quoted JSON array:
 example already in [.env.example:47](.env.example#L47) and the code comment
 at [config.py:66](src/skylize/config.py#L66)). No fix applied — reporting
 only, per the task's instruction not to fix this item.
+
+---
+
+## 5. First API key on a fresh deployment — runbook
+
+Verified end to end against live Postgres on 2026-09-12 (see "Verification"
+below). This is the procedure that takes a freshly migrated database to a
+working credential; without it the deployment cannot be driven at all.
+
+### 5a. Why a fresh deployment is a deadlock, not just an empty database
+
+Three doors, each locked behind another. Two are foreign keys, one is auth:
+
+| Door | What it needs | Why it fails on an empty DB |
+| --- | --- | --- |
+| `POST /api/v1/tenants` (creates the `tenants` row) | `get_context` | needs an API key or an OIDC token ([edge/deps.py:81-94](src/skylize/edge/deps.py#L81-L94)) |
+| `POST /api/v1/auth/register` (creates the first user) | nothing — it is unauthenticated | its INSERT violates `users_org_id_fkey` → `tenants(org_id)` |
+| `POST /api/v1/api-keys` (mints a key) | `get_context` | needs a key already, *and* violates `api_keys_org_id_fkey` |
+
+`X-Dev-*` headers are not an escape: `build_request_context` only honours them
+when `settings.dev_auth` ([edge/auth.py:39-50](src/skylize/edge/auth.py#L39-L50)),
+and `Settings` refuses to construct with `dev_auth` on any non-memory backend
+([config.py:365-375](src/skylize/config.py#L365-L375)). So on postgres the only
+two accepted credentials are an existing API key or an OIDC JWT.
+
+This blocks all of `website/`'s `/api/console/*` BFF routes, which authenticate
+to the backend with a service API key
+([website/src/lib/skylize/client.ts](website/src/lib/skylize/client.ts)) — not
+just one of them.
+
+### 5b. The command
+
+[`src/skylize/ops/bootstrap_api_key.py`](src/skylize/ops/bootstrap_api_key.py)
+breaks the deadlock from outside HTTP. It is an operational entrypoint, not a
+route: it cannot be probed, hit by accident, or left enabled. It follows the
+same shape as [scripts/gen_governance_key.py](scripts/gen_governance_key.py) and
+[scripts/gen_wif_signing_key.py](scripts/gen_wif_signing_key.py) (§2 above) —
+generate, print once to stdout, persist nothing, never commit the output.
+
+It mints through the ordinary `ApiKeyService.issue`
+([app/auth/service.py:30-72](src/skylize/app/auth/service.py#L30-L72)), so the
+key's rendering, its SHA-256-of-secret storage, and its `apikey.issued` audit row
+are identical to a key issued over HTTP. **There is no second hashing scheme.**
+
+### 5c. Exact commands on a fresh deployment
+
+Run from the repo root (or inside the gateway image, which has the package
+installed), with the database reachable.
+
+**Step 1 — migrate, as the admin role.** Creates the schema and, via migration
+0003, the non-superuser `skylize_app` role the runtime connects as.
+
+```bash
+export SKYLIZE_DB_URL="postgresql://<admin>:<pw>@<host>:5432/skylize"
+export SKYLIZE_APP_DB_PASSWORD="<app-role-password>"
+alembic upgrade head
+```
+
+**Step 2 — mint the bootstrap key, as the app role.** The command connects with
+`SKYLIZE_DB_APP_URL` and refuses to run if that role is SUPERUSER or BYPASSRLS
+(the same interlock the API applies at startup, `verify_app_role_is_rls_subject`,
+[bootstrap.py:288](src/skylize/bootstrap.py#L288)).
+
+```bash
+export SKYLIZE_BACKEND=postgres
+export SKYLIZE_DB_APP_URL="postgresql://skylize_app:<app-role-password>@<host>:5432/skylize"
+
+python -m skylize.ops.bootstrap_api_key \
+    --org-id acme \
+    --create-tenant --display-name "Acme Inc" \
+    --expires-in-days 30
+```
+
+`--create-tenant` provisions the `tenants` row that both foreign keys require.
+It is an explicit flag, not implicit behaviour, because `--org-id` is free text
+and a typo would otherwise create a second permanent empty tenant. Omit it on an
+org that already exists — it is a no-op there, so re-running after a partial
+failure is safe.
+
+The **plaintext key is written to stdout and nothing else**; every status line
+goes to stderr. Pipe it straight into your secrets manager:
+
+```bash
+python -m skylize.ops.bootstrap_api_key --org-id acme --create-tenant \
+  | aws secretsmanager put-secret-value --secret-id skylize/console-api-key --secret-string file:///dev/stdin
+```
+
+It is shown **once**. Only `sha256(secret)` is stored, so a lost key is
+unrecoverable — revoke it and mint another.
+
+**Step 3 — hand the key to the console BFF.** The `website/` deployment reads it
+server-side; it must never reach a browser bundle. Console-Black's vite build
+refuses to compile when a `VITE_*` variable is named like a credential
+([app/Skylize-Console-Black/vite.config.js](app/Skylize-Console-Black/vite.config.js)),
+and CI greps `dist/` for credential-shaped strings.
+
+**Step 4 — replace the bootstrap key with a real one, over HTTP.** This is the
+point of the exercise: the bootstrap key unlocks the key-management surface.
+
+```bash
+curl -X POST https://<api-host>/api/v1/api-keys \
+  -H "X-API-Key: $BOOTSTRAP_KEY" -H 'Content-Type: application/json' \
+  -d '{"name":"console-bff","scopes":["owner"],"expires_in_days":90}'
+```
+
+Then revoke the bootstrap key, which is now surplus:
+
+```bash
+curl -X DELETE https://<api-host>/api/v1/api-keys/<bootstrap-key-id> \
+  -H "X-API-Key: $NEW_KEY"
+```
+
+### 5d. Re-running, and `--force`
+
+The command is idempotent-safe. A second run against an org that already holds a
+**live** key named `bootstrap` refuses with exit code 2 and writes no key.
+
+- A **revoked** or **expired** bootstrap key does not block a re-run. Both are
+  states an operator reaches deliberately, and in both the org is back to having
+  no usable credential — which is exactly what this command exists to fix.
+- `--force` mints an *additional* key. It does **not** revoke the existing one;
+  the command warns about this on stderr, and revoking is a deliberate step.
+
+### 5e. Scopes are roles
+
+`--scopes` defaults to `owner`. A key's scopes become its `roles`
+([app/auth/service.py:88-95](src/skylize/app/auth/service.py#L88-L95)), which is
+what satisfies the owner-only routes (`require_role("owner")`) that the console
+proxy calls. Narrow the scopes for any key that does not need owner.
+
+### 5f. Verification performed (2026-09-12, live Postgres)
+
+Against `infra/docker-compose.yml` Postgres with the gateway running on
+`127.0.0.1:8099`, `SKYLIZE_BACKEND=postgres`, `SKYLIZE_DEV_AUTH=false`:
+
+| Check | Result |
+| --- | --- |
+| No `--create-tenant` on an org with no tenant row | refused, exit 2, **no key on stdout** |
+| `--create-tenant` on an empty org | tenant provisioned, key minted, exit 0 |
+| Second run without `--force` | refused, exit 2, key count stayed 1 |
+| `--force` | second distinct key minted, count 2, warning emitted |
+| Stored `key_hash` vs `sha256(secret)` | equal; plaintext absent from the row |
+| `GET /api/v1/api-keys` no credential / bogus key | 401 / 401 |
+| `GET /api/v1/api-keys` with the printed key | **200** |
+| `POST /api/v1/api-keys` with the printed key | **201** — minted a normal key over HTTP |
+| That route-issued key | 200 — authenticates |
+| Audit trail | `tenant.registered` + `apikey.issued` rows; no plaintext in any row |
+
+All test rows were deleted afterwards. The `audit_log` rows survive by design —
+`skylize_prevent_mutation` makes that table append-only (migration 0001) — and
+carry only hashes.
