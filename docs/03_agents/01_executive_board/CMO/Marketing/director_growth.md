@@ -1,6 +1,6 @@
 # Agent: `director_growth`
 
-**Authority level:** `director` · **Department:** `marketing` · **Escalation path:** `vp_marketing > cmo > human_owner`
+**Authority level:** `director` · **Department:** `growth` · **Escalation path:** `vp_marketing > cmo > human_owner`
 **Related:** [00_organization_chart.md](../../../00_organization_chart.md) · [agent_governance.md](../../../agent_governance.md) · [agent_contract_registry.md](../../../agent_contract_registry.md)
 
 ---
@@ -23,10 +23,10 @@ Escalation path: `vp_marketing > cmo > human_owner`. On a beyond-authority decis
 Incremental ROAS; experiment win-rate; CAC.
 
 ## 6. Inputs
-`skylize.schemas.marketing.DirectorGrowthIn` — the scoped work item it consumes (validated against its contract `input_schema`).
+`skylize.schemas.growth.DirectorGrowthIn` — the scoped work item it consumes (validated against its contract `input_schema`).
 
 ## 7. Outputs
-`skylize.schemas.marketing.DirectorGrowthOut` — its produced artifact, wrapped by the Orchestrator into the correct event.
+`skylize.schemas.growth.DirectorGrowthOut` — its produced artifact, wrapped by the Orchestrator into the correct event.
 
 ## 8. Dependencies
 Decision Engine; ad adapters; scoring.

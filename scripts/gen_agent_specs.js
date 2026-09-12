@@ -80,6 +80,13 @@ function deptOf(p) {
   return "executive_office";
 }
 
+// department override: the CONTRACT's department wins over the disk path.
+// `director_growth` sits under CMO/Marketing/ but its contract declares
+// department="growth" (src/skylize/contracts/mvp/growth.py:17), which is what
+// the decision engine routes on (src/skylize/decision_engine/constants.py:31-36,
+// ADR-0005). Mirror any entry here in scripts/gen_agent_network_data.js.
+const DEPT_OVERRIDE = { director_growth: "growth" };
+
 // canonical agent_id override for manifest-flagged typos (path preserved on disk)
 const CANON_ID = { vc_procurement: "vp_procurement" };
 const KNOWN_ISSUE = {
@@ -137,7 +144,7 @@ function render(p) {
   const diskId = aid(p);
   const id = CANON_ID[diskId] || diskId;
   const lvl = level(diskId);
-  const dept = deptOf(p);
+  const dept = DEPT_OVERRIDE[id] || DEPT_OVERRIDE[diskId] || deptOf(p);
   const esc = chain(p).join(" > ");
   const d = DATA[id] || DATA[diskId] || {};
   const role = d.role || id.replace(/_/g, " ");
