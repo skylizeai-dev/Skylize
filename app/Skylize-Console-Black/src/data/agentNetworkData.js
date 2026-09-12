@@ -3,13 +3,14 @@
 // Source of truth: docs/03_agents/_generation_manifest.csv + scripts/agent_content.js
 // Regenerate:  node scripts/gen_agent_network_data.js
 //
-// 151 agents · 15 departments · 1 root(s)
+// 151 agents · 18 departments · 1 root(s)
 
 
 const DEPARTMENTS = [
   { id: "executive_office", name: "EXECUTIVE", tagline: "strategy · arbitration · oversight", color: "#4D6FE3" },
   { id: "finance", name: "FINANCE", tagline: "capital · FP&A · risk · treasury", color: "#5CAD85" },
   { id: "marketing", name: "MARKETING", tagline: "brand · growth · SEO · email · performance", color: "#8F76C7" },
+  { id: "growth", name: "GROWTH", tagline: "campaigns · budget proposals · SEO", color: "#49AB9B" },
   { id: "creative", name: "CREATIVE", tagline: "copy · art · video · brand · ops", color: "#BC6E86" },
   { id: "operations", name: "OPERATIONS", tagline: "logistics · store · supply · fulfillment", color: "#4F9AA8" },
   { id: "procurement", name: "PROCUREMENT", tagline: "sourcing · contracts · vendors", color: "#BA9A5E" },
@@ -22,6 +23,8 @@ const DEPARTMENTS = [
   { id: "strategy", name: "STRATEGY", tagline: "competitive · M&A · expansion", color: "#B5AC61" },
   { id: "people", name: "PEOPLE", tagline: "performance · training · playbooks", color: "#7BAC84" },
   { id: "legal", name: "LEGAL", tagline: "privacy · contracts · compliance", color: "#8D8AA8" },
+  { id: "agency_ops", name: "AGENCY OPS", tagline: "client requirements · deliverables", color: "#98AB49" },
+  { id: "cowork", name: "CO-WORK", tagline: "human-present sessions · on-behalf-of", color: "#AC5DAC" },
 ];
 
 const AGENTS = [
@@ -86,7 +89,7 @@ const AGENTS = [
   { id: "vp_creative", name: "VP Creative", role: "Direct creative directors; approve creative strategy", authority: "vp", department: "creative", status: "executing", tokenBudget: 80000, tokensUsed: 67822, tasksCompleted: 282, reportsTo: "cmo", escalationPath: ["cmo", "human_owner"], tools: [{ id: "vp_creative__t0", name: "llm.generate", purpose: "language generation & reasoning" }, { id: "vp_creative__t1", name: "memory.search", purpose: "semantic recall over governed memory" }, { id: "vp_creative__t2", name: "bi.query", purpose: "business-intelligence queries" }, { id: "vp_creative__t3", name: "orchestrator.delegate", purpose: "delegate work to reports" }] },
   { id: "director_brand", name: "Director, Brand", role: "Set brand guidelines", authority: "director", department: "marketing", status: "executing", tokenBudget: 40000, tokensUsed: 32975, tasksCompleted: 395, reportsTo: "vp_marketing", escalationPath: ["vp_marketing", "cmo", "human_owner"], tools: [{ id: "director_brand__t0", name: "llm.generate", purpose: "language generation & reasoning" }, { id: "director_brand__t1", name: "memory.search", purpose: "semantic recall over governed memory" }, { id: "director_brand__t2", name: "orchestrator.delegate", purpose: "delegate work to reports" }] },
   { id: "director_email_marketing", name: "Director, Email Marketing", role: "Plan email programs and segments", authority: "director", department: "marketing", status: "idle", tokenBudget: 40000, tokensUsed: 16136, tasksCompleted: 558, reportsTo: "vp_marketing", escalationPath: ["vp_marketing", "cmo", "human_owner"], tools: [{ id: "director_email_marketing__t0", name: "llm.generate", purpose: "language generation & reasoning" }, { id: "director_email_marketing__t1", name: "memory.search", purpose: "semantic recall over governed memory" }, { id: "director_email_marketing__t2", name: "orchestrator.delegate", purpose: "delegate work to reports" }] },
-  { id: "director_growth", name: "Director, Growth", role: "Propose campaigns and budget reallocations", authority: "director", department: "marketing", status: "queued", tokenBudget: 40000, tokensUsed: 6651, tasksCompleted: 719, reportsTo: "vp_marketing", escalationPath: ["vp_marketing", "cmo", "human_owner"], tools: [{ id: "director_growth__t0", name: "llm.generate", purpose: "language generation & reasoning" }, { id: "director_growth__t1", name: "memory.search", purpose: "semantic recall over governed memory" }, { id: "director_growth__t2", name: "orchestrator.delegate", purpose: "delegate work to reports" }] },
+  { id: "director_growth", name: "Director, Growth", role: "Propose campaigns and budget reallocations", authority: "director", department: "growth", status: "queued", tokenBudget: 40000, tokensUsed: 6651, tasksCompleted: 719, reportsTo: "vp_marketing", escalationPath: ["vp_marketing", "cmo", "human_owner"], tools: [{ id: "director_growth__t0", name: "llm.generate", purpose: "language generation & reasoning" }, { id: "director_growth__t1", name: "memory.search", purpose: "semantic recall over governed memory" }, { id: "director_growth__t2", name: "orchestrator.delegate", purpose: "delegate work to reports" }] },
   { id: "director_performance_marketing", name: "Director, Performance Marketing", role: "Propose paid campaigns and budgets", authority: "director", department: "marketing", status: "queued", tokenBudget: 40000, tokensUsed: 4114, tasksCompleted: 283, reportsTo: "vp_marketing", escalationPath: ["vp_marketing", "cmo", "human_owner"], tools: [{ id: "director_performance_marketing__t0", name: "llm.generate", purpose: "language generation & reasoning" }, { id: "director_performance_marketing__t1", name: "memory.search", purpose: "semantic recall over governed memory" }, { id: "director_performance_marketing__t2", name: "orchestrator.delegate", purpose: "delegate work to reports" }] },
   { id: "director_seo", name: "Director, SEO", role: "Plan SEO/content strategy", authority: "director", department: "marketing", status: "executing", tokenBudget: 40000, tokensUsed: 30196, tasksCompleted: 661, reportsTo: "vp_marketing", escalationPath: ["vp_marketing", "cmo", "human_owner"], tools: [{ id: "director_seo__t0", name: "llm.generate", purpose: "language generation & reasoning" }, { id: "director_seo__t1", name: "memory.search", purpose: "semantic recall over governed memory" }, { id: "director_seo__t2", name: "orchestrator.delegate", purpose: "delegate work to reports" }] },
   { id: "vp_marketing", name: "VP Marketing", role: "Operate brand/growth/SEO/email/performance directors", authority: "vp", department: "marketing", status: "error", tokenBudget: 80000, tokensUsed: 18100, tasksCompleted: 372, reportsTo: "cmo", escalationPath: ["cmo", "human_owner"], tools: [{ id: "vp_marketing__t0", name: "llm.generate", purpose: "language generation & reasoning" }, { id: "vp_marketing__t1", name: "memory.search", purpose: "semantic recall over governed memory" }, { id: "vp_marketing__t2", name: "bi.query", purpose: "business-intelligence queries" }, { id: "vp_marketing__t3", name: "orchestrator.delegate", purpose: "delegate work to reports" }] },

@@ -690,7 +690,7 @@ Corroborated by contract source: `src/skylize/contracts/mvp/finance.py:3`
 ("CFO is stateless — no memory read or write access"),
 `src/skylize/contracts/mvp/safety.py:4` ("All safety agents are stateless
 (`memory_read_access=[]`, `memory_write_access=[]`)"), and
-`src/skylize/contracts/definitions/security.py:16`. Enforcement is structural:
+`src/skylize/contracts/definitions/security.py:16`. *(`contracts/definitions/` was deleted 2026-09-12 as production-dead; the statelessness rule it stated now lives only in `contracts/mvp/`.)* Enforcement is structural:
 `src/skylize/memory/gateway.py:6` treats an empty list as "stateless = denied",
 and `src/skylize/memory/service.py:372` / `src/skylize/memory/ports.py:37` expose
 `is_stateless`.

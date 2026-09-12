@@ -1,4 +1,4 @@
-"""`defers_on_trigger_presence` — the opt-out, and the 21 contracts it must not move.
+"""`defers_on_trigger_presence` — the opt-out, and the 22 contracts it must not move.
 
 Stage 2.5 (`_decide_agent_execution`) used to have exactly three outcomes, keyed
 only on which triggers a contract DECLARES:

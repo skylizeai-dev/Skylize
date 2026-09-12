@@ -57,7 +57,7 @@ ceo
 │                          └─ {manager_budgeting, manager_profitability}
 ├─ chro ── {director_performance, director_talent, director_training}
 ├─ chief_legal_officer ── {director_contracts, director_privacy, director_compliance*}
-├─ cmo ── vp_marketing ── {director_brand, director_email_marketing, director_growth,
+├─ cmo ── vp_marketing ── {director_brand, director_email_marketing, director_growth†,
 │   │                        director_performance_marketing, director_seo}
 │   └─ Social_Media ── director_social_media
 │        └─ vp_creative ── {copy_team, art_team, video_team, brand_team,
@@ -76,6 +76,59 @@ ceo
 ```
 
 `*` = manifest-flagged anomaly (see §6).
+`†` = REPORTS to `vp_marketing`, but its **department is `growth`**, not
+`marketing` — see §4.1. Reporting line and department are different axes.
+
+## 4.1 Departments (canonical)
+
+**Eighteen** departments, not fifteen. A department is a real org department if a
+governed `AgentContract` declares it, whether or not `01_executive_board/` has a
+directory for it yet. `agency_ops`, `cowork` and `growth` are the three that have
+contracts but no directory: they are departments, not channel-only slugs.
+
+Two independent things are called "department" in this repo and they must not be
+merged:
+
+- The **contract** `department` field (`src/skylize/contracts/base.py:116`) — what the
+  decision engine routes on. Authoritative.
+- The **disk path** under `01_executive_board/` — what `deptOf()` in
+  `scripts/gen_agent_specs.js` and `scripts/gen_agent_network_data.js` infers a
+  department from, for the 154 manifest rows that have spec files.
+
+Where they disagree, the contract wins and the generators carry an explicit
+`DEPT_OVERRIDE` entry. There is one today: `director_growth`.
+
+| Department | Roster agents | Directory under `01_executive_board/` | Contract-declared |
+|---|---:|---|---|
+| `executive_office` | 2 | (root) | yes |
+| `finance` | 8 | `CFO/` | yes |
+| `marketing` | 7 | `CMO/` | yes |
+| `growth` | 1 | — (`director_growth` sits in `CMO/Marketing/`) | yes |
+| `creative` | 42 | `CMO/.../Creative*` | yes |
+| `operations` | 6 | `COO/` | no |
+| `procurement` | 13 | `COO/Procurement/` | no |
+| `product` | 5 | `CPO/` | no |
+| `sales` | 5 | `CRO/Sales/` | yes |
+| `customer_success` | 5 | `CRO/` | no |
+| `engineering` | 7 | `CTO/` | no |
+| `data` | 5 | `CTO/Data_and_AI/` | no |
+| `security` | 17 | `CSO_Security/` | yes |
+| `strategy` | 20 | `CSO/` | no |
+| `people` | 4 | `CHRO/` | no |
+| `legal` | 4 | `CLO/` | no |
+| `agency_ops` | 0 | — | yes |
+| `cowork` | 0 | — | yes |
+
+"Roster agents" is the count the generated console data carries (151 total; see
+§6 for why 154 manifest rows collapse to 151). A `0` means the department's
+agents are **code-only** — they have `AgentContract`s in
+`src/skylize/contracts/mvp/` but no spec file under `01_executive_board/` yet.
+
+The engine's own department vocabulary is narrower again and is a separate,
+deliberately-gated list: `ALLOWED_EVENT_TYPES_BY_DEPARTMENT`
+(`src/skylize/decision_engine/constants.py:28-45`) admits only `creative`,
+`growth` and `governance`. Adding a department there is a governance decision
+under ADR-0005, not a consequence of adding one to this table.
 
 ## 5. Agent spec template (every agent file)
 
@@ -109,16 +162,52 @@ issue (per [../02_architecture/repository_structure.md §5](../02_architecture/r
 
 - **`vc_procurement`** → canonical `agent_id: vp_procurement` (`vc` typo).
 - **`creative_operations_departmant/`** → "department" misspelling in path.
-- **`director_vendor_management`** appears under both Operations and Procurement —
-  two distinct agents, disambiguated in their specs.
+- **`director_vendor_management`** has a spec file under both Operations and
+  Procurement. It is **one agent**, not two: both files describe the same role
+  from the two organizations it serves, and the generator collapses them to a
+  single `agent_id` (`gen_agent_network_data.js` "duplicate id collapsed"
+  warning). `scripts/agent_content.js` carries **152** entries for 154 files
+  for the same reason (`../_BUILD_LOG.md:83`).
 - **Duplicate CPO** files (`CPO/chief_product_officer.md`, `CPO/Product/cpo.md`) —
   canonical `cpo`; both cross-reference.
-- **Duplicate `director_compliance`** (CLO/Legal and CSO_Security) — two distinct
-  agents (legal compliance vs. security compliance).
+- **`director_compliance`** has a spec file under both CLO/Legal and
+  CSO_Security. Same shape as `director_vendor_management` above: **one agent**
+  under one `agent_id`, with a shared spec covering legal and security
+  compliance. It is collapsed to a single node, not counted twice.
+- **154 manifest rows → 151 roster agents.** Three rows do not become their
+  own node: `chief_product_officer` (dropped as the duplicate CPO file),
+  `director_vendor_management` and `director_compliance` (each collapsed to
+  one `agent_id`). 154 − 3 = **151**, the count the generated console data
+  reports. It is not 153: the two shared-spec roles are one agent each.
 - **Depth contradictions**: several `director_*` sit under a `managers/` directory;
   the **manifest's** `authority_level` is authoritative over the path.
 - **Workers under `managers/workers/`** (Procurement, CSO_Security): path quirk;
   `authority_level: worker` per manifest.
+
+## 6.1 Code-only agents (open, not yet specified)
+
+Eight registered `agent_id`s have an `AgentContract` in
+`src/skylize/contracts/mvp/` but **no** spec file under `01_executive_board/`
+and no manifest row. They are governed at runtime and invisible to this chart:
+
+`agency_deliverable_drafter`, `agency_requirements_analyst`, `cfo_agent`,
+`cowork_agent`, `infrastructure_executor`, `lead_qualifier_agent`,
+`sdr_outreach_agent`, `seo_keyword_agent`.
+
+Writing their specs is open work, deliberately deferred. Until then the CI
+roster gate (`scripts/check_agent_network_data.py`) carries them in a named
+allow-list, so a NEW un-specified agent still fails the build while these eight
+do not.
+
+**`cfo` and `cfo_agent` are the same role under two `agent_id`s.**
+`src/skylize/contracts/mvp/finance.py:13` defines `cfo` ("Chief Financial
+Officer — financial governance & capital allocation"); line 161 defines
+`cfo_agent` ("Chief Financial Officer — financial oversight, spend
+authorisation & departmental budget summaries"). Both are
+`authority_level="executive"`, `department="finance"`. Only `cfo_agent` is in
+`ALL_MVP_CONTRACTS` (`contracts/mvp/__init__.py:35`); the manifest and this
+chart know only `cfo` (`_generation_manifest.csv:9`). Merging them is open work
+and is NOT done here — recorded so the split is not mistaken for two roles.
 
 ## 7. Ownership & evolution
 

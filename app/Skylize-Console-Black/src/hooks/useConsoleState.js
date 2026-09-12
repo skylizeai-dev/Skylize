@@ -1,5 +1,11 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { DEPARTMENTS, AGENTS } from '../data/agentNetworkData.js';
+import {
+  AUTONOMY_MODES,
+  DEFAULT_AUTONOMY_MODE,
+  fetchAutonomyMode,
+  putAutonomyMode,
+} from '../lib/autonomyClient.js';
 
 const byId = {};
 AGENTS.forEach((a) => { byId[a.id] = a; });
@@ -97,8 +103,31 @@ const seedAudit = [
   { time: '20:24:56', actor: 'Approval Manager', action: 'TOOL', target: 'approvals.sync · 14 items', sig: '0xC4E9…20D3' },
 ];
 
+// AUTONOMY_MODES / DEFAULT_AUTONOMY_MODE now come from ../lib/autonomyClient.js,
+// which is the one place this app states the five modes, next to the calls that
+// exchange them with the server. The ORDER is still load-bearing (least to most
+// autonomous) because the Settings chips render in it.
+//
+// AUTONOMY IS NO LONGER PERSISTED HERE. It is ORG-WIDE state owned by the
+// backend (`org_autonomy_mode`, migration 0028) and read/written through the
+// BFF. A per-browser localStorage copy was a second source of truth for a
+// governance setting: two operators could see different postures, and a fresh
+// browser would silently claim whatever this app last defaulted to. The other
+// persisted keys below are per-operator UI preference and stay local.
+
+const STORAGE_KEY = 'skylize.console.v3';
+const LEGACY_STORAGE_KEY = 'skylize.console.v2';
+
+// v3 first; a v2 blob is read once and migrated on the next persist(). Reading
+// the old key is what stops an existing browser from resetting to defaults.
 function loadPersisted() {
-  try { return JSON.parse(localStorage.getItem('skylize.console.v2') || '{}'); } catch (e) { return {}; }
+  try {
+    const current = localStorage.getItem(STORAGE_KEY);
+    if (current) return JSON.parse(current);
+    const legacy = localStorage.getItem(LEGACY_STORAGE_KEY);
+    if (legacy) return JSON.parse(legacy);
+    return {};
+  } catch (e) { return {}; }
 }
 
 function initialState() {
@@ -129,7 +158,19 @@ function initialState() {
     logFilter: 'all', audit: seedAudit,
     pulse: seedPulse,
     orgName: persisted.orgName || 'Aventra Retail Group', region: persisted.region || 'eu-central',
-    retention: persisted.retention || '365', autonomy: persisted.autonomy != null ? persisted.autonomy : 2,
+    retention: persisted.retention || '365',
+    // Fail closed until the server answers (ruling 7). A persisted value is
+    // deliberately NOT read here -- see the note above STORAGE_KEY.
+    autonomy: DEFAULT_AUTONOMY_MODE,
+    autonomyConfigured: false,
+    autonomyLoading: true,
+    autonomySaving: false,
+    autonomyError: null,
+    // 'read' | 'write' | null. A failed READ means the value on screen is the
+    // fail-closed default; a failed WRITE means it is still the stored posture,
+    // just not the one that was asked for. Saying "fail-closed default" for a
+    // write failure would misreport the org's actual setting.
+    autonomyErrorKind: null,
     guards: persisted.guards || { cap: true, email: true, pii: true, fallback: false },
     pausedAll: false, pauseArm: false, toast: null,
   };
@@ -152,9 +193,9 @@ export function useConsoleState(props) {
   const persist = useCallback(() => {
     const s = stateRef.current;
     try {
-      localStorage.setItem('skylize.console.v2', JSON.stringify({
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({
         screen: s.screen, sidebarOpen: s.sidebarOpen, netSel: s.netSel, orgName: s.orgName,
-        region: s.region, retention: s.retention, autonomy: s.autonomy, guards: s.guards,
+        region: s.region, retention: s.retention, guards: s.guards,
       }));
     } catch (e) {}
   }, []);
@@ -238,11 +279,11 @@ export function useConsoleState(props) {
     const R = {
       marketing: ['Directive accepted — routed to Marketing & Creative.', 'Campaign brief drafted; Copy and Art directors assigned worker pools.', 'Channel budget allocation proposed within CMO ceiling — no approval required.', 'Brand Guardian gate scheduled before any asset ships.', 'First deliverables land in Deliverables within the hour; launch order will surface in Approvals.'],
       finance: ['Directive accepted — routed to Finance.', 'FP&A is re-running the forecast against the live pipeline.', 'Director, Risk is scanning variance and spend anomalies in parallel.', 'Treasury reconciliation pinned to the new baseline.', 'CFO summary with confidence bands will be posted to Deliverables shortly.'],
-      customer_success: ['Directive accepted — routed to Customer Success.', 'Retention is scoring churn-risk cohorts against the last 90 days.', 'Lifecycle playbooks queued for the top three at-risk segments.', 'Escalations above autonomy tier will surface in your Approvals queue.', 'Expect the cohort report in Deliverables within the hour.'],
+      customer_success: ['Directive accepted — routed to Customer Success.', 'Retention is scoring churn-risk cohorts against the last 90 days.', 'Lifecycle playbooks queued for the top three at-risk segments.', 'Escalations above the current autonomy mode will surface in your Approvals queue.', 'Expect the cohort report in Deliverables within the hour.'],
       security: ['Directive accepted — routed to Security & Legal.', 'Access review sweep started across all 151 agent tool grants.', 'Compliance is re-verifying SOC 2 control evidence.', 'Privacy gate re-checked on the learning pipeline — PASS.', 'Signed report will be attached to the Audit Log on completion.'],
       procurement: ['Directive accepted — routed to Procurement.', 'Vendor Discovery is building a shortlist against your criteria.', 'Pricing Negotiation computing target prices from historical POs.', 'Contract Review will flag risk before anything is committed.', 'Committed spend will pause for your approval — nothing is signed autonomously.'],
-      engineering: ['Directive accepted — routed to Engineering.', 'Pipeline created; DevOps contract gate armed for the change.', 'Canary rollout plan drafted with automatic rollback thresholds.', 'Latency budget checks wired to the observability stream.', 'Deploy order above autonomy tier will surface in Approvals.'],
-      strategy: ['Directive accepted — decomposed by the Orchestrator.', 'Strategy directors are framing options with competitive context.', 'Finance validates the numbers before anything reaches you.', 'Synthesis memo with a recommendation lands in Deliverables.', 'You will only be interrupted if a decision exceeds the autonomy envelope.'],
+      engineering: ['Directive accepted — routed to Engineering.', 'Pipeline created; DevOps contract gate armed for the change.', 'Canary rollout plan drafted with automatic rollback thresholds.', 'Latency budget checks wired to the observability stream.', 'Deploy order above the current autonomy mode will surface in Approvals.'],
+      strategy: ['Directive accepted — decomposed by the Orchestrator.', 'Strategy directors are framing options with competitive context.', 'Finance validates the numbers before anything reaches you.', 'Synthesis memo with a recommendation lands in Deliverables.', 'You will only be interrupted if a decision exceeds the current autonomy mode.'],
     };
     const lines = (R[dept.id] || R.strategy).map((txt, i) => (i === 0 ? { k: 'b', t: txt } : (i < 4 ? { k: 'i', t: txt, m: '0' + i } : { k: 'p', t: txt })));
     const hex = Math.floor(Math.random() * 65535).toString(16).toUpperCase().padStart(4, '0');
@@ -438,6 +479,74 @@ export function useConsoleState(props) {
     if (chatElRef.current) chatElRef.current.scrollTop = chatElRef.current.scrollHeight;
   }, [state.messages, state.chatBusy]);
 
+  // ── org autonomy mode: read from the server on mount ──
+  //
+  // FAIL CLOSED on any read failure (ruling 7). `observe` is already the
+  // initial value, so a failure leaves the console showing the mode where
+  // every action needs a human -- and `autonomyError` makes it clear that is
+  // the fallback rather than the org's actual posture, so nobody reads a
+  // network failure as "we are set to observe".
+  const autonomyAliveRef = useRef(true);
+  useEffect(() => {
+    autonomyAliveRef.current = true;
+    fetchAutonomyMode().then(
+      (result) => {
+        if (!autonomyAliveRef.current) return;
+        setState({
+          autonomy: result.mode,
+          autonomyConfigured: result.configured,
+          autonomyLoading: false,
+          autonomyError: null,
+          autonomyErrorKind: null,
+        });
+      },
+      (error) => {
+        if (!autonomyAliveRef.current) return;
+        setState({
+          autonomy: DEFAULT_AUTONOMY_MODE,
+          autonomyConfigured: false,
+          autonomyLoading: false,
+          autonomyError: error.message || 'Could not read the autonomy mode.',
+          autonomyErrorKind: 'read',
+        });
+      },
+    );
+    return () => { autonomyAliveRef.current = false; };
+  }, [setState]);
+
+  // Write the org-wide mode. NOT optimistic: `autonomy` is only ever assigned
+  // from a server response, so a failed PUT cannot leave the UI showing a
+  // posture the backend never stored. The chips render server truth throughout.
+  const setAutonomy = useCallback((mode) => {
+    const s = stateRef.current;
+    if (s.autonomySaving) return;               // one write at a time
+    if (mode === s.autonomy && !s.autonomyError) return;  // nothing to change
+    setState({ autonomySaving: true, autonomyError: null, autonomyErrorKind: null });
+    putAutonomyMode(mode).then(
+      (result) => {
+        if (!autonomyAliveRef.current) return;
+        setState({
+          // The mode the backend PERSISTED, not the one requested.
+          autonomy: result.mode,
+          autonomyConfigured: result.configured,
+          autonomySaving: false,
+          autonomyError: null,
+          autonomyErrorKind: null,
+        });
+      },
+      (error) => {
+        if (!autonomyAliveRef.current) return;
+        // The selection stays where the server last put it, and the error says
+        // so out loud. Never swallowed, never a silent no-op.
+        setState({
+          autonomySaving: false,
+          autonomyError: error.message || 'Could not save the autonomy mode.',
+          autonomyErrorKind: 'write',
+        });
+      },
+    );
+  }, [setState]);
+
   const decide = useCallback((id, ok) => {
     const s = stateRef.current;
     const d = new Date(); const p = (n) => String(n).padStart(2, '0');
@@ -458,7 +567,7 @@ export function useConsoleState(props) {
 
   return buildViewModel({
     state, accent, chatElRef, fileInputElRef, starTiltElRef, starPlaneElRef,
-    setState, set, nav, tiltMove, tiltLeave,
+    setState, set, setAutonomy, nav, tiltMove, tiltLeave,
     onAttachClick, onFileChange, removeAttachment, toggleTagMenu, toggleConnMenu, onTagQ, addTag, removeTag, addConnector, removeConnector,
     doSend, starGeom, starStep, starGo, starTilt, starTiltReset, netGeom, decide, dangerPause, showToast, sparks, spend30,
   });
@@ -467,7 +576,7 @@ export function useConsoleState(props) {
 function buildViewModel(ctx) {
   const {
     state: s, accent: acc, chatElRef, fileInputElRef, starTiltElRef, starPlaneElRef,
-    setState, set, nav, tiltMove, tiltLeave,
+    setState, set, setAutonomy, nav, tiltMove, tiltLeave,
     onAttachClick, onFileChange, removeAttachment, toggleTagMenu, toggleConnMenu, onTagQ, addTag, removeTag, addConnector, removeConnector,
     doSend, starGeom, starStep, starGo, starTilt, starTiltReset, netGeom, decide, dangerPause, showToast, sparks, spend30,
   } = ctx;
@@ -811,14 +920,17 @@ function buildViewModel(ctx) {
   ];
 
   // ── settings ──
-  const autonomyDescs = [
-    'L0 — Observe only. Every action requires human sign-off.',
-    'L1 — Draft. Agents prepare work; humans execute.',
-    'L2 — Execute within budget. HIGH-risk actions escalate to you.',
-    'L3 — Execute + reallocate budgets. Only irreversible actions escalate.',
-    'L4 — Full autonomy inside the governance envelope. Audit everything.',
-  ];
-  const autonomyChips = [0, 1, 2, 3, 4].map((i) => ({ pick: () => set({ autonomy: i }), label: 'L' + i, bd: s.autonomy === i ? 'var(--accent,#3D6BFF)' : '#232939', bg: s.autonomy === i ? 'color-mix(in oklab, var(--accent,#3D6BFF) 18%, transparent)' : 'transparent', c: s.autonomy === i ? '#E9EBF2' : '#8B93A7' }));
+  const autonomyCopy = {
+    observe: 'observe — Observe only. Every action requires human sign-off.',
+    propose: 'propose — Agents prepare work; humans execute it.',
+    act_within_budget: 'act_within_budget — Act within budget. HIGH-risk actions escalate to you.',
+    act_and_reallocate: 'act_and_reallocate — Act and reallocate budgets. Only irreversible actions escalate.',
+    act_governed: 'act_governed — Act inside the governance envelope. Audit everything.',
+  };
+  // `busy` covers both the mount read and an in-flight write: a chip must not
+  // be clickable while the value on screen is not yet known to be server truth.
+  const autonomyBusy = s.autonomyLoading || s.autonomySaving;
+  const autonomyChips = AUTONOMY_MODES.map((mode) => ({ mode, pick: () => setAutonomy(mode), disabled: autonomyBusy, label: mode.replace(/_/g, ' ').toUpperCase(), title: autonomyCopy[mode], bd: s.autonomy === mode ? 'var(--accent,#3D6BFF)' : '#232939', bg: s.autonomy === mode ? 'color-mix(in oklab, var(--accent,#3D6BFF) 18%, transparent)' : 'transparent', c: s.autonomy === mode ? '#E9EBF2' : '#8B93A7', opacity: autonomyBusy ? 0.55 : 1, cursor: autonomyBusy ? 'not-allowed' : 'pointer' }));
   const guardDefs = [
     ['cap', 'Approval above $10,000', 'Any single commitment over the cap escalates to a human'],
     ['email', 'Block external sends', 'Outbound email & posts require the brand gate + approval'],
@@ -910,7 +1022,25 @@ function buildViewModel(ctx) {
     isSet: s.screen === 'set', orgName: s.orgName, onOrgName: (e) => set({ orgName: e.target.value }),
     region: s.region, onRegion: (e) => set({ region: e.target.value }),
     retention: s.retention, onRetention: (e) => set({ retention: e.target.value }),
-    autonomyDesc: autonomyDescs[s.autonomy], autonomyChips, guardrails,
+    autonomyMode: s.autonomy, autonomyDesc: autonomyCopy[s.autonomy] || autonomyCopy[DEFAULT_AUTONOMY_MODE], autonomyChips, guardrails,
+    // Org-wide, server-owned: the screen must be able to say whether what it
+    // shows is the org's stored posture, the fail-closed default, or stale.
+    autonomyStatus: s.autonomyLoading
+      ? 'Reading the organization-wide mode...'
+      : s.autonomySaving
+        ? 'Saving...'
+        : s.autonomyErrorKind === 'read'
+          ? 'Could not read the stored posture — showing the fail-closed default.'
+          : s.autonomyErrorKind === 'write'
+            ? 'Unchanged. Still showing the stored posture, not the mode you picked.'
+            : s.autonomyConfigured
+              ? 'Organization-wide, set by the owner.'
+              : 'No mode has been set for this organization yet — failing closed to OBSERVE.',
+    autonomyError: s.autonomyError,
+    // "NOT SAVED" is only true of a failed write. A failed READ never attempted
+    // to save anything, and labelling it that way would describe the wrong event.
+    autonomyErrorLabel: s.autonomyErrorKind === 'read' ? 'NOT READ' : 'NOT SAVED',
+    autonomyBusy: s.autonomyLoading || s.autonomySaving,
     pauseTitle: s.pausedAll ? 'Agents paused' : 'Pause all agents',
     pauseLabel: s.pausedAll ? 'RESUME' : (s.pauseArm ? 'CONFIRM PAUSE?' : 'PAUSE ALL'),
     pauseBg: s.pausedAll || s.pauseArm ? 'rgba(225,90,82,0.16)' : 'transparent', pauseC: '#E15A52',

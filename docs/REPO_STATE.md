@@ -114,7 +114,7 @@ Composition root `src/skylize/edge/gateway.py:73-84` mounts 13 routers. Auth dep
 
 ADR staleness below is largely **expected** — ADRs are point-in-time records, and several items are follow-up the ADR itself scheduled, which has since landed. Reported per R2 regardless.
 
-1. `src/skylize/contracts/registry.py:131` — comment "the **15** governed creative + growth contracts". Code: `ALL_MVP_CONTRACTS` has **21** members (runtime count; sibling docstring `contracts/mvp/__init__.py:4` correctly says "21").
+1. **RESOLVED 2026-09-11.** `src/skylize/contracts/registry.py:131` — comment said "the **15** governed creative + growth contracts" and the sibling docstring `contracts/mvp/__init__.py:4` said "22 contracts". Code: `MVP_REGISTRY.all()` returns **23** members (runtime count). Both comments now say 23.
 2. `docs/architecture/adr/0004-...:24` — "No `SKYLIZE_DECISION_ENGINE` flag exists on this branch." Now exists: `config.py:107` `decision_engine: Literal["inline","opa"] = "inline"`; interlock `bootstrap.py:276-280`.
 3. `docs/architecture/adr/0004-...:27` — "No `policy_inputs.md` exists in the repository." Now exists (untracked, DRAFT): `docs/04_decision_engine/policy_inputs.md:3`.
 4. `docs/architecture/adr/0004-...:26` — consumer/`constants.py` "still target placeholder `SUBSCRIBED_STREAMS`". Removed: `decision_engine/constants.py:92` ("the `SUBSCRIBED_STREAMS` alias ... is GONE, as ADR-0005...").

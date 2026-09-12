@@ -27,8 +27,12 @@
     gate, so it is off by default. Pass -Install to reproduce it.
 
     NOT COVERED: CI's `website` job (npm ci / npm run typecheck / npm test, run in
-    website/) and its `integration` job (alembic upgrade head; pytest -q -m
-    integration -rA). Run those separately when you touch those areas.
+    website/), its `integration` job (alembic upgrade head; pytest -q -m
+    integration -rA), and its `roster` job
+    (python scripts/check_agent_network_data.py, which needs node on PATH). Run
+    those separately when you touch those areas -- the roster job whenever you
+    touch the generation manifest, the agent contracts registry, or either
+    generated console data file.
 
 .PARAMETER Install
     Also run CI's `pip install -e ".[dev]"` provisioning step first.

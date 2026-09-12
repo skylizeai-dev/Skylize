@@ -25,6 +25,35 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 # Canonical authority levels — IDENTICAL to agent_governance.md §2.
 AuthorityLevel = Literal["executive", "vp", "director", "manager", "worker"]
 
+# Canonical ORG-WIDE autonomy modes -- how much an agent may do without a human.
+#
+# THIS IS NOT AuthorityLevel, AND THE TWO ARE NOT INTERCHANGEABLE. They answer
+# different questions and are deliberately kept in one file so the difference is
+# visible at the point of use:
+#   * AuthorityLevel is a property of an AGENT, fixed by its contract: how far up
+#     the org tree that agent sits. A worker is a worker in every org.
+#   * AutonomyMode is a property of an ORG, set by its owner and changeable at
+#     any time: how much of what agents are allowed to propose actually executes
+#     without a person. The same agent runs under different modes in two orgs.
+# Nothing maps one onto the other, and no code should accept one where the other
+# is expected -- a `director` is not an autonomy setting and `act_governed` is
+# not a rung on the org chart.
+#
+# Ordered least to most autonomous. Persisted in `org_autonomy_mode` (migration
+# 0028), keyed (org_id, effective_from). A MISSING row resolves to "observe" --
+# fail closed, with no exceptions: an org whose posture nobody has set yet gets
+# the mode where every action needs a human.
+AutonomyMode = Literal[
+    "observe",
+    "propose",
+    "act_within_budget",
+    "act_and_reallocate",
+    "act_governed",
+]
+
+#: The fail-closed resolution of a missing `org_autonomy_mode` row.
+DEFAULT_AUTONOMY_MODE: AutonomyMode = "observe"
+
 # The ONE ordering of those levels. Higher rank == more authority.
 #
 # It lives here, next to the literal it ranks, because two independent consumers

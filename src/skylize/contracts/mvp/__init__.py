@@ -1,7 +1,7 @@
 """
 The MVP agent contract set: the governed creative + growth team.
 
-22 contracts spanning executive, creative, brand, growth, security, seo,
+23 contracts spanning executive, creative, brand, growth, security, seo,
 finance, sdr, agency, and cowork. `ALL_MVP_CONTRACTS` is the authoritative list
 the registry seeds from.
 

@@ -14,7 +14,9 @@ NOT here — those are injected at runtime via the `LiveStateChecker` protocol i
 from __future__ import annotations
 
 from .base import (
+    DEFAULT_AUTONOMY_MODE,
     AgentContract,
+    AutonomyMode,
     FailureMode,
     GovernanceToken,
     HumanInLoopTrigger,
@@ -29,6 +31,8 @@ from .registry import (
 
 __all__ = [
     "AgentContract",
+    "AutonomyMode",
+    "DEFAULT_AUTONOMY_MODE",
     "FailureMode",
     "GovernanceToken",
     "HumanInLoopTrigger",

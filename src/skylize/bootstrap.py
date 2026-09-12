@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .dal.connection import Database
     from .dal.cost_ledger import CostLedgerDAL
+    from .dal.org_autonomy_mode import OrgAutonomyModeDAL
     from .dal.org_spend_ceiling import OrgSpendCeilingDAL
 
 from .adapters.llm.content_gate import GuardedLLMGateway, LLMContentGate
@@ -367,6 +368,10 @@ class Container:
     # the audited OrgSpendCeilingDAL.set_ceiling seam — no route writes it.
     cost_ledger: "CostLedgerDAL | None" = None
     spend_ceiling_dal: "OrgSpendCeilingDAL | None" = None
+    # Org-wide autonomy posture (migration 0028), None on the memory backend.
+    # The autonomy route reads and sets it through this DAL. NOT yet consumed by
+    # any enforcement path -- this ships the capability, not the wiring.
+    autonomy_mode_dal: "OrgAutonomyModeDAL | None" = None
     # GCP Workload Identity Federation issuer key, or None when the feature is
     # off (no SKYLIZE_WIF_ISSUER_BASE_URL). DELIBERATELY NOT REACHABLE FROM
     # `authority`: the governance signing key and this key serve different trust
@@ -718,10 +723,12 @@ async def build_container(settings: Settings | None = None) -> Container:
     # memory — no durable store). Shared by the LLM egress gate below and the
     # read-only spend position route (edge/routes/spend.py) via the Container.
     from .dal.cost_ledger import CostLedgerDAL
+    from .dal.org_autonomy_mode import OrgAutonomyModeDAL
     from .dal.org_spend_ceiling import OrgSpendCeilingDAL
 
     cost_ledger = CostLedgerDAL(db) if db is not None else None
     spend_ceiling_dal = OrgSpendCeilingDAL(db) if db is not None else None
+    autonomy_mode_dal = OrgAutonomyModeDAL(db) if db is not None else None
 
     llm: LLMGateway
     if settings.anthropic_api_key:
@@ -897,6 +904,7 @@ async def build_container(settings: Settings | None = None) -> Container:
         knowledge_ingestion=knowledge_ingestion, decision_engine=decision_engine,
         llm=llm, work_journal=work_journal, _closers=closers, db=db,
         cost_ledger=cost_ledger, spend_ceiling_dal=spend_ceiling_dal,
+        autonomy_mode_dal=autonomy_mode_dal,
         wif_signing_key=wif_signing_key, wif_repo=wif_repo,
         github_app_key=github_app_key, github_app_repo=github_app_repo,
         gcp_containment=gcp_containment,

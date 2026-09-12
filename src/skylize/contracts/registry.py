@@ -52,18 +52,14 @@ def resolve_model(dotted_path: str) -> type[BaseModel]:
 class AgentRegistry:
     """In-memory cache of AgentContracts. Fail-closed on unknown agent_id.
 
-    ``AgentRegistry()`` with no argument default-loads the full contract set from
-    ``contracts/definitions/`` (the exact implementations of the specs in
-    docs/03_agents/). Pass an explicit list to scope the registry — e.g.
-    ``MVP_REGISTRY = AgentRegistry(ALL_MVP_CONTRACTS)`` restricts it to the
-    governed Creative + Growth team that is in MVP scope.
+    The contract list is REQUIRED. There is deliberately no default set: a
+    registry that silently loads "everything" makes the governed surface of a
+    process a side effect of an import rather than an explicit choice.
+    ``MVP_REGISTRY = AgentRegistry(ALL_MVP_CONTRACTS)`` is the governed
+    Creative + Growth team; anything else must name its own list.
     """
 
-    def __init__(self, contracts: list[AgentContract] | None = None) -> None:
-        if contracts is None:
-            from .definitions import ALL_DEFINITION_CONTRACTS
-
-            contracts = ALL_DEFINITION_CONTRACTS
+    def __init__(self, contracts: list[AgentContract]) -> None:
         self._cache: dict[str, AgentContract] = {}
         for contract in contracts:
             if contract.agent_id in self._cache:
@@ -128,5 +124,5 @@ class AgentRegistry:
         return AgentContract.model_validate(data)
 
 
-# The default MVP registry — the 15 governed creative + growth contracts.
+# The default MVP registry — the 23 governed creative + growth contracts.
 MVP_REGISTRY = AgentRegistry(ALL_MVP_CONTRACTS)

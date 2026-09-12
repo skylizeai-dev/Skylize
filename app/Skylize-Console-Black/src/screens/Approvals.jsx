@@ -28,7 +28,7 @@ export default function Approvals({ vm }) {
       </div>
       <div style={sx('background:#0C0F16;border:1px solid #1B2130;border-radius:10px;overflow:hidden')}>
         {vm.apEmpty && (
-          <div style={sx("padding:34px;text-align:center;font-family:'Geist Mono',ui-monospace,monospace;font-size:11px;color:#616A82;letter-spacing:0.06em")}>Queue clear. All actions within autonomy envelope.</div>
+          <div style={sx("padding:34px;text-align:center;font-family:'Geist Mono',ui-monospace,monospace;font-size:11px;color:#616A82;letter-spacing:0.06em")}>Queue clear. All actions within the current autonomy mode.</div>
         )}
         {vm.apRows.map((ap, i) => (
           <Interactive

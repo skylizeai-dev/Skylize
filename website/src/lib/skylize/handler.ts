@@ -11,7 +11,7 @@ import { SkylizeApiError } from "./client";
 import { getConsoleAuthConfig } from "./config";
 import { SESSION_COOKIE_NAME, verifySessionToken } from "./session";
 
-type HttpMethod = "GET" | "POST" | "DELETE";
+type HttpMethod = "GET" | "POST" | "PUT" | "DELETE";
 
 /**
  * The second argument Next.js passes to a dynamic route handler.

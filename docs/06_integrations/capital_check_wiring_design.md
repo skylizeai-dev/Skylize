@@ -693,7 +693,7 @@ agent (`memory_read_access=[]`, `memory_write_access=[]`)."**
 
 The Safety Suite contracts declare empty memory access at
 `src/skylize/contracts/definitions/security.py:38-39`, described at security.py:16 as
-*"All are stateless: memory_read_access and memory_write_access minimal."* Those two
+*"All are stateless: memory_read_access and memory_write_access minimal."* *(`contracts/definitions/` was deleted 2026-09-12 as production-dead; the statelessness rule it stated now lives only in `contracts/mvp/`.)* Those two
 lists are consumed in exactly two places: prompt assembly
 (`src/skylize/app/agent_prompts/service.py:51`) and the `memory.recall` tool's namespace
 filter (`src/skylize/tools/builtin/memory_recall.py:78-79, 97`). They govern **agent
