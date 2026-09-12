@@ -108,7 +108,7 @@ const AUTONOMY_MODES = [
   'act_and_reallocate',
   'act_governed',
 ];
-const DEFAULT_AUTONOMY_MODE = 'act_within_budget';
+const DEFAULT_AUTONOMY_MODE = 'observe';
 
 const STORAGE_KEY = 'skylize.console.v3';
 const LEGACY_STORAGE_KEY = 'skylize.console.v2';
