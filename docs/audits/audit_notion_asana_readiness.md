@@ -427,7 +427,7 @@ only (`:176`) and the comment "only `utility.current_datetime` is invocable, nev
 `chief_security_officer`, `director_ai_safety`, `llm_safety_agent`, and
 `prompt_injection_agent` are covered by `contracts/definitions/security.py:16`: "All are
 stateless: memory_read_access and memory_write_access minimal", and
-`contracts/mvp/safety.py:4` states the same with `memory_read_access=[]`,
+`contracts/mvp/safety.py:4` states the same with `memory_read_access=[]`, *(`contracts/definitions/` was deleted 2026-09-12 as production-dead; the statelessness rule it stated now lives only in `contracts/mvp/`.)*
 `memory_write_access=[]`. `contracts/mvp/cowork.py:13` names `prompt_injection_agent` among
 those declaring empty memory access.
 

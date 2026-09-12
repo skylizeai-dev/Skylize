@@ -1,10 +1,17 @@
 """The co-work contract, and the invariant it must not disturb.
 
-Five agents in this codebase are deliberately STATELESS -- memory_read_access=[]
-and memory_write_access=[] -- because they judge content, and letting them read
-memory their own judgements shaped would close a loop where the system grades its
-own homework. The co-work agent is the first contract with genuinely non-empty
-memory access, so these tests pin that it neither joins that set nor can reach it.
+Agents that JUDGE content are deliberately STATELESS -- memory_read_access=[]
+and memory_write_access=[] -- because letting them read memory their own
+judgements shaped would close a loop where the system grades its own homework.
+The co-work agent is the first contract with genuinely non-empty memory access,
+so these tests pin that it neither joins that set nor can reach it.
+
+Four of the five original members (chief_security_officer, director_ai_safety,
+llm_safety_agent, prompt_injection_agent) lived only in contracts/definitions/,
+which was deleted as production-dead. Their ids stay listed below as the
+routing barrier co-work must never cross -- an id that no longer resolves is
+still an id co-work must not name -- but the empty-memory assertion can only
+run against contracts that exist, which today means cfo_agent.
 """
 
 from __future__ import annotations
@@ -12,7 +19,7 @@ from __future__ import annotations
 import pytest
 
 from skylize.contracts.mvp.cowork import cowork_agent
-from skylize.contracts.registry import MVP_REGISTRY, AgentRegistry
+from skylize.contracts.registry import MVP_REGISTRY, AgentNotRegistered
 
 #: Must stay outside any feedback loop.
 STATELESS_INVARIANT_AGENTS = frozenset(
@@ -31,20 +38,22 @@ def test_cowork_agent_is_not_one_of_the_stateless_agents() -> None:
 
 
 def test_stateless_agents_still_have_empty_memory_access() -> None:
-    """The invariant itself, checked across BOTH registries -- cfo_agent lives in
-    the MVP set, the four safety/security judges in the full definitions set."""
-    full = AgentRegistry()  # default-loads ALL_DEFINITION_CONTRACTS
-    for agent_id in STATELESS_INVARIANT_AGENTS:
-        contract = None
-        for registry in (MVP_REGISTRY, full):
-            try:
-                contract = registry.resolve(agent_id)
-                break
-            except Exception:
-                continue
-        assert contract is not None, f"{agent_id} is in neither registry"
+    """The invariant itself, over every listed agent the registry still carries.
+
+    Skipping the ones that are gone is deliberate, not a hole: a contract that
+    does not exist cannot read memory. The moment any of them is re-added to a
+    registry this test starts enforcing the invariant on it again.
+    """
+    checked = []
+    for agent_id in sorted(STATELESS_INVARIANT_AGENTS):
+        try:
+            contract = MVP_REGISTRY.resolve(agent_id)
+        except AgentNotRegistered:
+            continue
         assert contract.memory_read_access == [], agent_id
         assert contract.memory_write_access == [], agent_id
+        checked.append(agent_id)
+    assert "cfo_agent" in checked, "the MVP stateless judge must still be checked"
 
 
 def test_cowork_escalation_path_cannot_route_into_a_stateless_agent() -> None:

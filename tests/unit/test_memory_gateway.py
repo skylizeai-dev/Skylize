@@ -5,7 +5,8 @@ from __future__ import annotations
 
 import pytest
 
-from skylize.contracts.registry import AgentRegistry
+from skylize.contracts.base import AgentContract, FailureMode, ToolGrant
+from skylize.contracts.registry import MVP_REGISTRY, AgentRegistry
 from skylize.memory.exceptions import MemoryNamespaceViolation, MemoryPermissionDenied
 from skylize.memory.gateway import MemoryGateway
 from skylize.schemas.memory import MemoryEntry, MemoryScope
@@ -161,14 +162,35 @@ async def test_high_importance_score_writes(
 # Tests: per-namespace scope match (0.6 audit gap — non-emptiness is not enough)
 # ---------------------------------------------------------------------------
 
-@pytest.fixture()
-def definitions_registry() -> AgentRegistry:
-    return AgentRegistry()
+#: A narrow cross-department grant, in contract form. `director_risk` used to
+#: supply this shape from contracts/definitions/, which is deleted; the
+#: behaviour under test belongs to the GATEWAY's namespace matcher, not to any
+#: particular agent, so the grant is stated here directly.
+_CROSS_DEPT_READER = AgentContract(
+    agent_id="cross_dept_reader",
+    agent_role="Cross-department reader - narrow grant into another department",
+    authority_level="director",
+    department="finance",
+    input_schema="skylize.schemas.agents.finance.BudgetSummaryExecuteIn",
+    output_schema="skylize.schemas.agents.finance.BudgetSummaryExecuteOut",
+    allowed_tools=[ToolGrant(tool_id="memory.search", purpose="recall")],
+    max_token_budget=10_000,
+    max_execution_time_seconds=60,
+    escalation_path=["human_owner"],
+    failure_mode=FailureMode.FAIL_CLOSED,
+    memory_read_access=["finance:risk:*", "security:fraud:summary"],
+    memory_write_access=["finance:risk:assessments"],
+)
 
 
 @pytest.fixture()
-def definitions_gateway(adapter: _FakeAdapter, definitions_registry: AgentRegistry) -> MemoryGateway:
-    return MemoryGateway(adapter=adapter, registry=definitions_registry)
+def grant_registry() -> AgentRegistry:
+    return AgentRegistry([*MVP_REGISTRY.all(), _CROSS_DEPT_READER])
+
+
+@pytest.fixture()
+def definitions_gateway(adapter: _FakeAdapter, grant_registry: AgentRegistry) -> MemoryGateway:
+    return MemoryGateway(adapter=adapter, registry=grant_registry)
 
 
 @pytest.mark.asyncio
@@ -217,30 +239,30 @@ async def test_exact_grant_matches_exact_namespace(
 
 
 @pytest.mark.asyncio
-async def test_director_risk_cross_department_read_allowed(
+async def test_cross_department_read_allowed(
     definitions_gateway: MemoryGateway, adapter: _FakeAdapter
 ) -> None:
-    """director_risk_contract explicitly grants the cross-dept read security:fraud:summary."""
+    """The contract explicitly grants the cross-dept read security:fraud:summary."""
     scope = _scope(department="security:fraud:summary")
-    result = await definitions_gateway.read("director_risk", scope, caller_org_id="org-1")
+    result = await definitions_gateway.read("cross_dept_reader", scope, caller_org_id="org-1")
     assert result == []
 
 
 @pytest.mark.asyncio
-async def test_director_risk_cannot_read_unrelated_security_namespace(
+async def test_cross_department_grant_does_not_open_the_department(
     definitions_gateway: MemoryGateway,
 ) -> None:
-    """director_risk's cross-dept grant is narrow — it does not open all of security:*."""
+    """The cross-dept grant is narrow — it does not open all of security:*."""
     scope = _scope(department="security:fraud:raw")
-    with pytest.raises(MemoryPermissionDenied, match="director_risk"):
-        await definitions_gateway.read("director_risk", scope, caller_org_id="org-1")
+    with pytest.raises(MemoryPermissionDenied, match="cross_dept_reader"):
+        await definitions_gateway.read("cross_dept_reader", scope, caller_org_id="org-1")
 
 
 @pytest.mark.asyncio
 async def test_zero_scope_agent_still_denied_regardless_of_namespace(
     definitions_gateway: MemoryGateway,
 ) -> None:
-    """Empty memory_read_access must still deny outright (regression, chief_security_officer)."""
+    """Empty memory_read_access must still deny outright, whatever namespace is asked for."""
     scope = _scope(department="security:fraud:summary")
-    with pytest.raises(MemoryPermissionDenied, match="chief_security_officer"):
-        await definitions_gateway.read("chief_security_officer", scope, caller_org_id="org-1")
+    with pytest.raises(MemoryPermissionDenied, match="cfo_agent"):
+        await definitions_gateway.read("cfo_agent", scope, caller_org_id="org-1")

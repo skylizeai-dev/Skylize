@@ -6,7 +6,7 @@ Covers (per spec):
   2. resolve() raises AgentNotRegistered for unknown agent_id (fail closed)
   3. frozen contracts cannot be mutated
   4. register_contract() adds a new contract resolvable immediately
-  5. AgentRegistry() default-loads definitions/ contracts (cfo, etc.)
+  5. MVP_REGISTRY resolves every contract in ALL_MVP_CONTRACTS
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from skylize.contracts import (
     HumanInLoopTrigger,
     ToolGrant,
 )
+from skylize.contracts.registry import MVP_REGISTRY
 
 
 # ---------------------------------------------------------------------------
@@ -30,7 +31,7 @@ from skylize.contracts import (
 
 @pytest.fixture(scope="module")
 def registry() -> AgentRegistry:
-    return AgentRegistry()
+    return MVP_REGISTRY
 
 
 # ---------------------------------------------------------------------------
@@ -38,13 +39,13 @@ def registry() -> AgentRegistry:
 # ---------------------------------------------------------------------------
 
 
-def test_resolve_cfo(registry: AgentRegistry) -> None:
-    contract = registry.resolve("cfo")
-    assert contract.agent_id == "cfo"
+def test_resolve_cfo_agent(registry: AgentRegistry) -> None:
+    contract = registry.resolve("cfo_agent")
+    assert contract.agent_id == "cfo_agent"
     assert contract.authority_level == "executive"
     assert contract.department == "finance"
-    assert contract.escalation_path == ["human_owner"]
-    assert contract.failure_mode == FailureMode.ESCALATE_IMMEDIATELY
+    assert contract.escalation_path == ["ceo", "human_owner"]
+    assert contract.failure_mode == FailureMode.FAIL_CLOSED
     assert contract.governance_token_required is True
 
 
@@ -66,30 +67,30 @@ def test_resolve_hook_generator_agent(registry: AgentRegistry) -> None:
     assert contract.memory_write_access == []
 
 
-def test_resolve_vp_finance(registry: AgentRegistry) -> None:
-    contract = registry.resolve("vp_finance")
-    assert contract.escalation_path == ["cfo", "human_owner"]
+def test_resolve_vp_creative(registry: AgentRegistry) -> None:
+    contract = registry.resolve("vp_creative")
+    assert contract.escalation_path == ["cmo", "ceo", "human_owner"]
     assert contract.max_token_budget == 80_000
     assert contract.max_execution_time_seconds == 420
 
 
-def test_resolve_chief_security_officer(registry: AgentRegistry) -> None:
-    contract = registry.resolve("chief_security_officer")
+def test_resolve_cmo(registry: AgentRegistry) -> None:
+    contract = registry.resolve("cmo")
     assert contract.authority_level == "executive"
-    assert contract.failure_mode == FailureMode.FAIL_CLOSED
+    assert contract.failure_mode == FailureMode.ESCALATE_IMMEDIATELY
     assert contract.escalation_path == ["ceo", "human_owner"]
 
 
-def test_resolve_director_ai_safety(registry: AgentRegistry) -> None:
-    contract = registry.resolve("director_ai_safety")
+def test_resolve_copy_director(registry: AgentRegistry) -> None:
+    contract = registry.resolve("copy_director")
     assert contract.authority_level == "director"
-    assert "chief_security_officer" in contract.escalation_path
+    assert "vp_creative" in contract.escalation_path
     assert "human_owner" in contract.escalation_path
 
 
 def test_resolve_tone_of_voice_agent(registry: AgentRegistry) -> None:
     contract = registry.resolve("tone_of_voice_agent")
-    assert contract.failure_mode == FailureMode.FAIL_CLOSED
+    assert contract.failure_mode == FailureMode.FALLBACK_DEGRADED
     assert contract.memory_write_access == []
     assert contract.human_in_loop_triggers == []
 
@@ -120,13 +121,13 @@ def test_empty_string_raises(registry: AgentRegistry) -> None:
 
 
 def test_contract_is_frozen(registry: AgentRegistry) -> None:
-    contract = registry.resolve("cfo")
+    contract = registry.resolve("cfo_agent")
     with pytest.raises(Exception):
         contract.agent_id = "hacked"  # type: ignore[misc]
 
 
 def test_contract_allowed_tools_tuple_immutable(registry: AgentRegistry) -> None:
-    contract = registry.resolve("cfo")
+    contract = registry.resolve("cfo_agent")
     with pytest.raises(Exception):
         contract.allowed_tools = []  # type: ignore[misc]
 
@@ -137,7 +138,7 @@ def test_contract_allowed_tools_tuple_immutable(registry: AgentRegistry) -> None
 
 
 def test_register_and_resolve_custom_contract() -> None:
-    reg = AgentRegistry()
+    reg = AgentRegistry([])
     custom = AgentContract(
         agent_id="test_custom_agent",
         agent_role="Test Agent",
@@ -162,8 +163,8 @@ def test_register_and_resolve_custom_contract() -> None:
 
 
 def test_register_contract_replaces_existing() -> None:
-    reg = AgentRegistry()
-    original = reg.resolve("cfo")
+    reg = AgentRegistry(list(MVP_REGISTRY.all()))
+    original = reg.resolve("cfo_agent")
     replacement = AgentContract(
         **{
             **original.model_dump(),
@@ -171,35 +172,19 @@ def test_register_contract_replaces_existing() -> None:
         }
     )
     reg.register_contract(replacement)
-    resolved = reg.resolve("cfo")
+    resolved = reg.resolve("cfo_agent")
     assert resolved.max_token_budget == 999
 
 
 # ---------------------------------------------------------------------------
-# 5. Default load covers all expected definitions/ contracts
+# 5. MVP_REGISTRY resolves every contract it was seeded with
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("agent_id", [
-    "cfo",
-    "vp_finance",
-    "director_capital_allocation",
-    "director_fpanda",
-    "director_risk",
-    "director_treasury",
-    "chief_security_officer",
-    "director_ai_safety",
-    "llm_safety_agent",
-    "prompt_injection_agent",
-    "fraud_detection_agent",
-    "hook_generator_agent",
-    "ad_copy_agent",
-    "caption_writer_agent",
-    "script_writer_agent",
-    "cta_optimizer_agent",
-    "tone_of_voice_agent",
-])
-def test_all_definition_contracts_resolvable(
+@pytest.mark.parametrize(
+    "agent_id", sorted(c.agent_id for c in MVP_REGISTRY.all())
+)
+def test_all_mvp_contracts_resolvable(
     registry: AgentRegistry, agent_id: str
 ) -> None:
     contract = registry.resolve(agent_id)
