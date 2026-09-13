@@ -135,7 +135,7 @@ module.exports = { /* exported for tests if needed */ };
 // Keyed by canonical agent_id. Each entry supplies the role-specific substance;
 // structure + governance defaults come from the level. Fields:
 //   role, mission, resp[], kpis, inputs, outputs, deps, consumes, produces,
-//   readMem[], writeMem[], failureNote, (optional) tools, hitl, failure
+//   readMem[], writeMem[], failureNote, (optional) tools, hitl, failure, memoryNote
 const DATA = require("./agent_content.js");
 
 // ---------- render ----------
@@ -174,7 +174,13 @@ function render(p) {
   lines.push(`## 9. Events Consumed`); lines.push(bullets(d.consumes || ["`decision.approved` (work authorized to proceed)", "relevant departmental events on its channel"])); lines.push("");
   lines.push(`## 10. Events Produced`); lines.push(bullets(d.produces || ["its typed output, wrapped as a department event by the Orchestrator", "`audit.action_recorded` for every action"])); lines.push("");
   lines.push(`## 11. OPA Governance Requirements`); lines.push(`\`allowed_tools\`: ${tools}. Token \`scope\` ⊆ \`allowed_tools\`, validated signature → expiry → revocation → scope → budget → delegation. \`governance_token_required = true\`. \`max_token_budget = ${budget}\`, \`max_execution_time_seconds = ${secs}\`. \`human_in_loop_triggers\`: ${hitl.length ? hitl.map(h=>"`"+h+"`").join(", ") : "none (bounded task)"}.`); lines.push("");
-  lines.push(`## 12. Memory Requirements`); lines.push(`**Read:** ${readMem.map(m=>"`"+m+"`").join(", ")}. **Write:** ${writeMem.length ? writeMem.map(m=>"`"+m+"`").join(", ") : "none — proposes via `memory.write_requested`; the Memory service persists (workers do not write stores directly)."}`); lines.push("");
+  // `memoryNote` replaces the whole section-12 body. It exists because an agent
+  // whose contract declares memory_read_access=[] AND memory_write_access=[] is
+  // making a POSITIVE statement (this agent is deliberately stateless), which the
+  // Read:/Write: rendering cannot express -- empty lists there read as "unset".
+  // That authored prose therefore lives in agent_content.js, so a full generator
+  // run reproduces it instead of destroying it.
+  lines.push(`## 12. Memory Requirements`); lines.push(d.memoryNote || `**Read:** ${readMem.map(m=>"`"+m+"`").join(", ")}. **Write:** ${writeMem.length ? writeMem.map(m=>"`"+m+"`").join(", ") : "none — proposes via `memory.write_requested`; the Memory service persists (workers do not write stores directly)."}`); lines.push("");
   lines.push(`## 13. Success Metrics`); lines.push(d.success || "Outputs accepted by its parent/Decision Engine; SLOs met; no scope or budget violations; full audit trail."); lines.push("");
   lines.push(`## 14. Failure Conditions`); lines.push(`\`failure_mode = ${failure}\`. ${d.failureNote || "Failure = invalid/over-scope output, budget/time overrun, or denial; repeated violations trip the circuit breaker ([agent_governance.md §7](" + rel(p,"docs/03_agents/agent_governance.md") + "#7-circuit-breaker-rules)). Kill-switch/suspension state overrides all authority."}`); lines.push("");
   return lines.join("\n");
@@ -187,9 +193,18 @@ function rel(from, to){
 }
 
 // ---------- main ----------
-let written = 0;
+let written = 0, unchanged = 0;
+// Write only when the rendered content actually differs. The comparison ignores
+// line endings because the tree is mixed CRLF/LF (core.autocrlf=true, no
+// .gitattributes), and an EOL-only rewrite is invisible to git but destroys the
+// "these bytes did not move" evidence a reviewer needs after a full run.
+const norm = (t) => t.split(String.fromCharCode(13) + String.fromCharCode(10)).join(String.fromCharCode(10));
 for (const p of files) {
-  fs.writeFileSync(p, render(p), "utf8");
+  const next = render(p);
+  let prev = null;
+  try { prev = fs.readFileSync(p, "utf8"); } catch { /* new file */ }
+  if (prev !== null && norm(prev) === norm(next)) { unchanged++; continue; }
+  fs.writeFileSync(p, next, "utf8");
   written++;
 }
-console.log("Agent specs written:", written);
+console.log("Agent specs written:", written, "| unchanged (not rewritten):", unchanged);
