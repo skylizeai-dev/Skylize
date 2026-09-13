@@ -11,14 +11,14 @@
 >
 > **REVISED 2026-09-09 - owner decisions R1 and R2. Two sections are corrected IN PLACE;
 > the rest of the 2026-08-28 draft stands and is not re-litigated.**
-> - **R1 - fifth profile.** Stripe is NOT forced through `OAuthCredentialService`. A new
+> - **R1 - a profile of its own.** Stripe is NOT forced through `OAuthCredentialService`. A new
 >   `ToolStripeProfile` gates it, mirroring the `ToolWifProfile` precedent
->   (`src/skylize/tools/base.py:137-176`): a trust relationship, not a stored or refreshed
+>   (`src/skylize/tools/base.py:180-219`): a trust relationship, not a stored or refreshed
 >   grant. `OAuthCredentialService`, the `oauth_credentials` table, and
 >   `ensure_fresh` / `evaluate_grant` are **untouched** by this design. **New section 4.5.**
 > - **R2 - HITL-replay-safe idempotency.** 7.0 item 3 predated `ToolContext.hitl_id`
->   (`src/skylize/tools/base.py:72`), which now exists and is threaded through
->   `ToolProxy.invoke` to the handler (`src/skylize/tools/proxy.py:160-167,326-329`).
+>   (`src/skylize/tools/base.py:76`), which now exists and is threaded through
+>   `ToolProxy.invoke` to the handler (`src/skylize/tools/proxy.py:160-167,334-337`).
 >   **7.0 item 3 and the derivation that follows it are rewritten.**
 > - **New section 7.5** specifies the per-org refund limit tables and the interim
 >   large-refund review trigger. Its numbers stay `[OWNER-DECISION-REQUIRED]`.
@@ -335,7 +335,7 @@ only if the platform key is held to a higher standard than a vault row would be.
 
 ---
 
-## 4.5 - `ToolStripeProfile` - the fifth declarative gate
+## 4.5 - `ToolStripeProfile` - the sixth profile, the fifth proxy-enforced gate
 
 > **Section status: `[RESEARCH-SUGGESTED]` - schema and gate proposal only. No code, no
 > migration, this pass.**
@@ -344,18 +344,28 @@ only if the platform key is held to a higher standard than a vault row would be.
 > `evaluate_grant`. Those are untouched by this design. This section supersedes any
 > reading of 4.0 that implied otherwise.
 
-### 4.5.1 Why a fifth profile, and not `ToolOAuthProfile`
+### 4.5.1 Why a sixth profile, and not `ToolOAuthProfile`
 
-`[CODE-VERIFIED]` `ToolDefinition` carries four nullable, opt-in gate profiles today
-(`src/skylize/tools/base.py:211,215,221,224`): `spend` (`base.py:78-99`), `oauth`
-(`base.py:179-196`), `permission` (`base.py:102-134`), `wif` (`base.py:137-176`). Each is
-checked in its own stage of `ToolProxy.invoke`, and each fails closed when its backing
-dependency is unwired (`src/skylize/tools/proxy.py:122-141`).
+`[CODE-VERIFIED]` `ToolDefinition` carries **five** nullable, opt-in gate profiles today
+(`src/skylize/tools/base.py:289,292,298,302,309`): `spend` (`base.py:121-142`), `oauth`
+(`base.py:222-239`), `permission` (`base.py:145-177`), `wif` (`base.py:180-219`), and
+`approval` (`base.py:242-274`). The first four are each checked in their own stage of
+`ToolProxy.invoke`, and each fails closed when its backing dependency is unwired
+(`src/skylize/tools/proxy.py:122-141`).
+
+`[CODE-VERIFIED]` **`approval` is the exception: it is NOT proxy-enforced.** The gate that
+reads it lives in the agent tool loop (`AgentExecutionService._govern_tool_turn`), because
+only there does the whole turn - and the conversation prefix a resumption needs - exist at
+once (`base.py:303-309`). `ToolStripeProfile` would therefore be the **sixth profile** on
+`ToolDefinition` but only the **fifth proxy-enforced gate**. The R1 decision of 2026-09-09
+said "fifth profile" because `ToolApprovalProfile` landed with the HITL resumption merge,
+AFTER this document was written. The distinction is recorded rather than silently
+renumbered, because it is the proxy-enforced count that governs where the stage goes (4.5.5).
 
 `ToolOAuthProfile` gates a tool on a **live stored grant**. The proxy's OAuth stage calls
-`_ensure_oauth_credential` (`[CODE-VERIFIED]` `proxy.py:266-270`, defined at `:386`), whose
+`_ensure_oauth_credential` (`[CODE-VERIFIED]` `proxy.py:274-278`, defined at `:394`), whose
 docstring states its job is to establish that a usable grant EXISTS, "refreshing on demand if
-needed" (`proxy.py:395-400`). Every part of that is inapplicable to Stripe:
+needed" (`proxy.py:403-408`). Every part of that is inapplicable to Stripe:
 
 `[CODE-VERIFIED]` + 4.0.1 above - **Skylize stores no Stripe bearer token.** There is nothing
 to hold, nothing to refresh, and no expiry to evaluate. Server-side authentication is the
@@ -365,19 +375,19 @@ this mode, with this scope - not a credential's freshness.
 
 `ToolWifProfile` records exactly this argument for exactly this reason: "a federation trust
 is not a stored grant. There is no token to hold, nothing to refresh, and no expiry"
-(`[CODE-VERIFIED]` `base.py:138-146`), and `gcp_wif_connections` is a separate table from
-`oauth_credentials` on the same grounds (`base.py:142-144`, migration 0024). **Stripe is the
+(`[CODE-VERIFIED]` `base.py:181-189`), and `gcp_wif_connections` is a separate table from
+`oauth_credentials` on the same grounds (`base.py:185-187`, migration 0024). **Stripe is the
 second instance of that shape**, and `org_stripe_accounts` (4.0.2) is the third such table.
 The precedent is followed.
 
 `[RESEARCH-SUGGESTED]` **Rejected alternative: resolve the connection inside the handler.**
 Rejected for the reason `docs/06_integrations/gcp_wif_killswitch_design.md:1083-1088` already
 rejected it for WIF: it puts the check somewhere that is neither inspectable in a registry
-entry nor deny-by-default, and all four existing profiles "refuse callable predicates on
-purpose, so a gate stays inspectable" - the phrasing `ToolWifProfile` itself uses at `base.py:158`, over
-`ToolSpendProfile.:91` ("Deliberately NOT a callable estimator") and
-`ToolPermissionProfile.:120` ("Deliberately NOT a callable predicate")
-(`[CODE-VERIFIED]` `base.py:91,120,158`). A gate
+entry nor deny-by-default, and the proxy-enforced profiles "refuse callable predicates on
+purpose, so a gate stays inspectable" - the phrasing `ToolWifProfile` itself uses at `base.py:201`, over
+`ToolSpendProfile.:134` ("Deliberately NOT a callable estimator") and
+`ToolPermissionProfile.:163` ("Deliberately NOT a callable predicate")
+(`[CODE-VERIFIED]` `base.py:134,163,201`). A gate
 that lives only inside a function body is one refactor from being skipped.
 
 ### 4.5.2 `ToolWifProfile` is NOT extended or generalized - and why that is not a defect
@@ -387,10 +397,10 @@ cheap mistake. `ToolWifProfile` needs **no change** to accommodate Stripe: nothi
 design touches it. The two profiles share a *rationale* - a trust, not a stored grant - and
 share **no fields**:
 
-| | `ToolWifProfile` (`base.py:167-176`) | `ToolStripeProfile` (proposed, 4.5.3) |
+| | `ToolWifProfile` (`base.py:216-219`) | `ToolStripeProfile` (proposed, 4.5.3) |
 |---|---|---|
 | Selector | `label` - which connection, when an org has several | none: mode is environment-derived (4.5.4), and 4.0.2's partial unique index permits at most one live and one test row per org |
-| Per-resource allow-list | `project_field` / `zone_field` / `instance_field`, checked against enabled `gcp_wif_targets` rows (`proxy.py:706-720`) | **none exists.** Stripe has no per-resource allow-list table, and inventing one would be a second allow-list for a question `org_stripe_accounts.scope` already answers |
+| Per-resource allow-list | `project_field` / `zone_field` / `instance_field`, checked against enabled `gcp_wif_targets` rows (`proxy.py:714-728`) | **none exists.** Stripe has no per-resource allow-list table, and inventing one would be a second allow-list for a question `org_stripe_accounts.scope` already answers |
 | Third check | the target is an enabled row | the direct-charge invariant of 2.0, which has no WIF analogue |
 
 The field sets are disjoint, so a shared base class would carry nothing but `model_config`.
@@ -399,16 +409,18 @@ later session does not re-open this as unnoticed duplication.
 
 ### 4.5.3 Proposed profile
 
-`[RESEARCH-SUGGESTED]` Declared alongside the other four in `src/skylize/tools/base.py`, and
-added as a fifth nullable field on `ToolDefinition` (`base.py:211-224`) defaulting to `None`,
+`[RESEARCH-SUGGESTED]` Declared alongside the other five in `src/skylize/tools/base.py`, and
+added as a SIXTH nullable field on `ToolDefinition` (`base.py:277-309`) defaulting to `None`,
 so every tool registered before it existed is unaffected - the additive discipline `wif` used
-(`base.py:221-224`).
+(`base.py:302`).
 
 ```python
 class ToolStripeProfile(BaseModel):
     """Declares a tool DEPENDENT ON A LIVE STRIPE CONNECT TRUST.
 
-    The fifth opt-in gate on `ToolProxy.invoke`. A separate profile from
+    The fifth PROXY-ENFORCED gate on `ToolProxy.invoke` (the sixth profile on
+    `ToolDefinition`; `approval` is enforced in the agent tool loop, not the
+    proxy). A separate profile from
     `ToolOAuthProfile` for the same reason `ToolWifProfile` is one: a Connect
     trust is not a stored grant. No token is held, nothing is refreshed, and
     there is no expiry - every call authenticates with the PLATFORM secret key
@@ -436,19 +448,19 @@ Deliberately **absent**:
   running process, and letting a registry entry override it is how a test-mode tool reaches
   live money.
 - **No amount or charge-id fields.** The amount already belongs to
-  `ToolSpendProfile.amount_field` (`[CODE-VERIFIED]` `base.py:99`), and 7.5's review trigger
+  `ToolSpendProfile.amount_field` (`[CODE-VERIFIED]` `base.py:142`), and 7.5's review trigger
   reads that same validated input. Naming the amount twice invites the two readings to
   diverge, which on a refund path is a money bug.
 
 ### 4.5.4 What the gate checks
 
 `[RESEARCH-SUGGESTED]` `ToolProxy._authorize_stripe`, mirroring `_authorize_wif`
-(`[CODE-VERIFIED]` `proxy.py:637-720`) in structure: every exit that is not a silent return
+(`[CODE-VERIFIED]` `proxy.py:645-728`) in structure: every exit that is not a silent return
 denies, and **each denial is audited before it is raised**, so a refused Stripe call leaves
-the same trail a refused scope check does (`proxy.py:660-667`).
+the same trail a refused scope check does (`proxy.py:668-675`).
 
 0. **The repository is unwired** -> `ToolStripeNotConnected`. Fail closed, exactly as
-   `_authorize_wif` does at `proxy.py:668-676`: a tool that moves a customer's money must
+   `_authorize_wif` does at `proxy.py:676-684`: a tool that moves a customer's money must
    never dispatch because the check itself was not wired.
 1. **No `org_stripe_accounts` row** for `(org_id, livemode = the running environment's mode)`
    with `deauthorized_at IS NULL` -> `ToolStripeNotConnected`, naming "connect Stripe" as the
@@ -470,21 +482,21 @@ the same trail a refused scope check does (`proxy.py:660-667`).
    only. Last check in the stage, and still before the spend reservation. Specified in 7.5.4.
 
 `[RESEARCH-SUGGESTED]` Distinct error types, not one, for the reason `_authorize_wif` gives
-at `proxy.py:652-656`: collapsing them "would hand an operator the wrong fix during an
+at `proxy.py:660-664`: collapsing them "would hand an operator the wrong fix during an
 incident". The remedies genuinely differ - connect the account, re-consent for a wider scope,
 fix the tool registration, route to a human.
 
 ### 4.5.5 Where the stage sits in the chain
 
-`[CODE-VERIFIED]` The existing order in `ToolProxy.invoke` is OAuth (`proxy.py:266`) ->
-permission (`:288`) -> WIF (`:306`) -> spend (`:319`) -> dispatch (`:326-331`).
+`[CODE-VERIFIED]` The existing order in `ToolProxy.invoke` is OAuth (`proxy.py:274`) ->
+permission (`:296`) -> WIF (`:314`) -> spend (`:327`) -> dispatch (`:334-339`).
 
 `[RESEARCH-SUGGESTED]` **The Stripe stage goes after WIF and before spend**, for the reason
-the WIF stage's own comment gives at `proxy.py:294-305`: a broken trust IS a denial, and
+the WIF stage's own comment gives at `proxy.py:302-313`: a broken trust IS a denial, and
 ordering it after the spend hold "would reserve budget against the customer's ceiling only to
 discover the call could never run, leaving a hold to unwind". Every check in 4.5.4 is a
 tenant-scoped DB read or a field inspection - all cheaper than a hold on the shared mutable
-ceiling, which "must be placed as late as possible" (`proxy.py:313-318`).
+ceiling, which "must be placed as late as possible" (`proxy.py:321-326`).
 
 ### 4.5.6 The tripwire that must be edited, deliberately
 
