@@ -1,7 +1,7 @@
 """spend_reservation.replay_key + result_snapshot — replay identity for a spend
 
-Revision ID: 0028
-Revises: 0027
+Revision ID: 0029
+Revises: 0028
 Create Date: 2026-09-11
 
 Design: docs/architecture/spend_reservation_replay_semantics.md sections 3A and
@@ -9,7 +9,9 @@ Design: docs/architecture/spend_reservation_replay_semantics.md sections 3A and
 ``ToolContext.replay_key()`` (src/skylize/tools/base.py:88), which is only
 non-None on a turn resumed from ``hitl_queue.resumption_json`` — the column 0027
 added. Without 0027 there is no stable per-call identity to key on, which is
-exactly why this migration could not be written before it.
+exactly why this migration could not be written before it. It chains onto 0028
+(``org_autonomy_mode``) only because that revision claimed the slot first; the
+substantive dependency is 0027, and 0028 is unrelated to spend accounting.
 
 WHY A PARTIAL UNIQUE INDEX, NOT A TABLE CONSTRAINT. The existing
 ``UNIQUE (org_id, idempotency_key)`` is unconditional: it spans all four states,
@@ -80,8 +82,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0028"
-down_revision: str | None = "0027"
+revision: str = "0029"
+down_revision: str | None = "0028"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -118,7 +120,7 @@ def upgrade() -> None:
 def downgrade() -> None:
     # Dropping these loses the replay identity and the recorded results for any
     # reservation still carrying them, which downgrades a `committed` replay from
-    # "return the original result" back to "re-execute". That is the pre-0028
+    # "return the original result" back to "re-execute". That is the pre-0029
     # behaviour and the defect this migration exists to fix, so a downgrade
     # reintroduces a known double-count rather than merely losing a convenience.
     # Stated plainly here following 0027's practice of saying what a downgrade
