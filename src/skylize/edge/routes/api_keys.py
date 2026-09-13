@@ -5,6 +5,20 @@ Issue / list / revoke programmatic keys for agent-to-agent access. The plaintext
 secret is present in exactly one response — the 201 from issuance — and never
 again: list responses carry metadata only (no secret, no hash). All three
 operations require owner or admin on the calling context.
+
+AUTH PATHS DIFFER BY VERB, deliberately. POST resolves through
+`require_any_role_or_user`, so it additionally accepts a human's Skylize access
+JWT -- the token the console holds after login. Without that, a fresh
+deployment's owner could register and log in through the console and still have
+no way to mint a key, because `get_context` does not decode a Skylize JWT and
+the only other doors need a key that does not exist yet
+(see `skylize.ops.bootstrap_api_key`). GET and DELETE are unchanged and still
+resolve through `get_context`; widening them was not in the approved scope.
+
+The widening is additive and changes no authorization: `require_any_role_or_user`
+is `require_any_role` with a different RESOLVER (deps.py:232-236), so the role
+set is still checked by the same `_checker`, and `get_context_or_user` falls
+back to `get_context` for every X-Dev-*/OIDC/API-key caller.
 """
 
 from __future__ import annotations
@@ -17,7 +31,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ...bootstrap import Container
 from ...schemas.base import RequestContext
-from ..deps import get_container, require_any_role
+from ..deps import get_container, require_any_role, require_any_role_or_user
 
 router = APIRouter(prefix="/api/v1/api-keys", tags=["api-keys"])
 
@@ -53,7 +67,7 @@ class KeyResponse(BaseModel):
 @router.post("", response_model=IssuedKeyResponse, status_code=201)
 async def issue_key(
     body: IssueKeyRequest,
-    ctx: RequestContext = Depends(require_any_role("owner", "admin")),
+    ctx: RequestContext = Depends(require_any_role_or_user("owner", "admin")),
     container: Container = Depends(get_container),
 ) -> IssuedKeyResponse:
     expires_at: datetime | None = None
