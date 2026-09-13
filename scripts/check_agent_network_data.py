@@ -30,6 +30,23 @@ test catches:
    un-specified agent fails the build while these eight do not. Removing a name
    from this list when its spec lands is the point.
 
+3. SPEC DRIFT. The 154 agent specs under
+   `docs/03_agents/01_executive_board/` are emitted by
+   `scripts/gen_agent_specs.js` from `scripts/agent_content.js`. Six of them
+   once carried hand-authored content the generator could not reproduce, so
+   re-running it would have destroyed that content -- and the only thing
+   stopping that was nobody happening to run it. The authored content now
+   lives in `agent_content.js` (the generator's `tools` / `readMem` /
+   `writeMem` / `memoryNote` fields), which is what makes a full run safe.
+
+   This check proves that is still true: it renders every spec into a throw-
+   away copy of the tree and fails if any committed spec differs. It fails
+   on a hand edit to a spec (content belongs in agent_content.js now) AND on
+   a dropped agent_content.js field -- dropping `memoryNote` from the four
+   stateless Safety Suite agents makes their specs differ, which is exactly
+   the data loss this check exists to prevent. The real tree is never
+   written to: the generator runs against the copy.
+
 Run from the repository root:  python scripts/check_agent_network_data.py
 Exit code 0 on success, 1 on any failure.
 """
@@ -46,6 +63,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 MANIFEST = ROOT / "docs" / "03_agents" / "_generation_manifest.csv"
 GENERATOR = ROOT / "scripts" / "gen_agent_network_data.js"
+SPEC_GENERATOR = ROOT / "scripts" / "gen_agent_specs.js"
+SPEC_ROOT = ROOT / "docs" / "03_agents" / "01_executive_board"
 GENERATED = (
     ROOT / "website" / "src" / "components" / "console" / "agent-network.data.ts",
     ROOT / "app" / "Skylize-Console-Black" / "src" / "data" / "agentNetworkData.js",
@@ -124,6 +143,61 @@ def check_generated_files_are_current() -> list[str]:
         shutil.rmtree(backup_dir, ignore_errors=True)
 
 
+def check_agent_specs_are_current() -> list[str]:
+    """Re-render every agent spec in a temp copy and report any that differ."""
+    if shutil.which("node") is None:
+        return ["node is not on PATH; cannot verify the agent spec files"]
+
+    committed = sorted(SPEC_ROOT.rglob("*.md"))
+    if not committed:
+        return [f"no agent specs found under {SPEC_ROOT.relative_to(ROOT)}"]
+
+    # The generator hardcodes its paths relative to the repo root and writes in
+    # place, so it is run against a disposable copy of docs/ + scripts/. The
+    # real tree is never opened for writing by this gate.
+    sandbox = Path(tempfile.mkdtemp(prefix="spec_gate_"))
+    try:
+        shutil.copytree(ROOT / "docs", sandbox / "docs")
+        shutil.copytree(ROOT / "scripts", sandbox / "scripts")
+
+        result = subprocess.run(
+            ["node", str(sandbox / "scripts" / SPEC_GENERATOR.name)],
+            cwd=sandbox,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            return [
+                f"{SPEC_GENERATOR.name} failed:" + chr(10)
+                + (result.stderr or result.stdout).strip()
+            ]
+
+        failures = []
+        for path in committed:
+            rendered = sandbox / path.relative_to(ROOT)
+            if not rendered.exists():
+                failures.append(
+                    f"{path.relative_to(ROOT)} was not produced by "
+                    f"{SPEC_GENERATOR.name}"
+                )
+                continue
+            # Normalised: the tree is mixed CRLF/LF (core.autocrlf, no
+            # .gitattributes) and an EOL difference is not spec drift.
+            if _normalised(rendered) != _normalised(path):
+                failures.append(
+                    f"{path.relative_to(ROOT)} differs from a fresh "
+                    f"{SPEC_GENERATOR.name} run. Agent specs are generated: put "
+                    "the authored content in scripts/agent_content.js (fields: "
+                    "role, mission, resp, kpis, inputs, outputs, deps, consumes, "
+                    "produces, tools, hitl, failure, readMem, writeMem, "
+                    "memoryNote, success, failureNote) and re-run "
+                    "`node scripts/gen_agent_specs.js`. Never hand-edit a spec."
+                )
+        return failures
+    finally:
+        shutil.rmtree(sandbox, ignore_errors=True)
+
+
 def check_every_runtime_agent_has_a_manifest_row() -> list[str]:
     """Report registered agent_ids with no row in the generation manifest."""
     sys.path.insert(0, str(ROOT / "src"))
@@ -163,6 +237,7 @@ def check_every_runtime_agent_has_a_manifest_row() -> list[str]:
 
 def main() -> int:
     failures = check_generated_files_are_current()
+    failures += check_agent_specs_are_current()
     failures += check_every_runtime_agent_has_a_manifest_row()
     if failures:
         print("ROSTER GATE FAILED:\n")
@@ -170,7 +245,8 @@ def main() -> int:
             print(f"  - {failure}\n")
         return 1
     print(
-        "OK: both generated roster files match a fresh generator run, and every "
+        "OK: both generated roster files and all agent specs match a fresh "
+        "generator run, and every "
         "registered agent_id has a manifest row "
         f"({len(KNOWN_CODE_ONLY_AGENTS)} allow-listed code-only agents)."
     )
