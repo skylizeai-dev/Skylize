@@ -1067,13 +1067,32 @@ same pass, so the repo's documented failure mode of stale claims propagating doe
   statement of fact, but should note that the Stripe broker, when built, has no token store and
   no refresh loop, so it is materially smaller than the Faz A-D plan assumed.
 - `integration_inputs.md` 2.1 Q2.1d - the citation `src/skylize/tools/proxy.py:322` is stale
-  in two ways. The line is now `:788`, and the conclusion drawn from it was wrong: that key
-  is the ledger reservation key, not the Stripe `Idempotency-Key` (7.0 item 3). **Corrected
-  in the same 2026-09-09 pass as this revision.**
+  in two ways. The line is now `:796` - it was corrected to `:788` in the 2026-09-09 pass and
+  drifted a further +8 in the HITL resumption merge - and the conclusion drawn from it was
+  wrong: that key is the ledger reservation key, not the Stripe `Idempotency-Key` (7.0 item
+  3). **Corrected in the same 2026-09-09 pass as this revision.**
 - `docs/06_integrations/gcp_wif_killswitch_design.md:1090-1094` describes `ToolWifProfile`
-  as "a fourth opt-in profile". Once 4.5 is ratified there is a fifth, and the count in any
-  doc that enumerates the gates goes stale. `base.py:137-140` carries the same count in a
-  code comment and would need the same edit at implementation time.
+  as "a fourth opt-in profile". That count is **already stale, independently of this
+  design**: `ToolApprovalProfile` (`base.py:242-274`) landed with the HITL resumption merge,
+  so `ToolDefinition` carries five profiles today. `ToolStripeProfile` would make six - but
+  only five PROXY-ENFORCED gates, since `approval` is enforced in the agent tool loop and not
+  in `ToolProxy.invoke` (`base.py:303-309`). `base.py:183` carries the same stale count
+  in a code comment ("The fourth opt-in gate on `ToolProxy.invoke`") and would need the same
+  edit at implementation time.
+- `[CODE-VERIFIED]` **`src/skylize/tools/base.py:99` cites a document that does not exist in
+  `main`.** The `ToolContext` docstring references
+  `docs/architecture/spend_reservation_replay_semantics.md`, which lives only on the unmerged
+  `fix/toolproxy-ledger-commit-accounting` branch. That is a dangling reference in trunk
+  today, not a Stripe-specific defect. It is FLAGGED rather than fixed here because
+  correcting it is a CODE edit and this pass is docs-only. It resolves itself when that
+  branch merges; **if that branch is abandoned, the citation must be removed from
+  `base.py`.**
+- **Citation scope of the 2026-09-13 pass.** Only section 4.5's code citations, the R1/R2
+  preamble's, and the two inside Q2.1l were re-verified against `base.py` / `proxy.py` at
+  this HEAD. Sections 6.0, 7.0 and 7.5 still carry citations taken at `b0abf13`, which
+  PREDATES the HITL resumption merge: `base.py` shifted by **+43** below line ~78 and
+  `proxy.py` by **+8** below line ~168. Treat every citation in those sections
+  as stale until checked - the failure mode this section exists to prevent.
 
 ---
 
