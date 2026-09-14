@@ -41,6 +41,7 @@ from .conftest import (
     REDIS_URL,
     TEST_CREDENTIAL_KEY,
     TEST_JWT_SECRET,
+    purge_tenants,
     requires_app_role,
     requires_redis,
 )
@@ -160,10 +161,12 @@ async def _seed_federation(app_db: Database, org: str) -> GcpWifConnectionRow:
 
 
 async def _cleanup(admin_conn, orgs: list[str]) -> None:
-    for table in ("gcp_wif_targets", "gcp_wif_connections", "spend_reservation",
-                  "spend_envelope"):
-        await admin_conn.execute(
-            f"DELETE FROM {table} WHERE org_id = ANY($1::text[])", orgs)
+    """Drop this suite's orgs, children and all -- including the tenant row.
+
+    Cleaning only the four tables this suite writes left the `hook_*` tenants
+    behind; 66 of them had accumulated in the shared `public` schema.
+    """
+    await purge_tenants(admin_conn, orgs)
 
 
 async def _pending_containments(app_db: Database, org: str) -> int:

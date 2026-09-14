@@ -217,3 +217,84 @@ async def redis_client() -> AsyncIterator["object"]:
     finally:
         await client.flushdb()
         await client.aclose()
+
+
+# --------------------------------------------------------------------------- #
+# Tenant teardown — shared, because getting it wrong silently accumulates rows
+# --------------------------------------------------------------------------- #
+
+#: Every table with a FK to `tenants(org_id)`, ordered so a child is deleted
+#: before the table it points at. All 30 of those FKs are ON DELETE NO ACTION,
+#: so a tenant row survives until *every* referencing row is gone: a suite that
+#: cleans only the tables it wrote leaves the tenant behind. That is exactly how
+#: 1150 test tenants accumulated in the shared `public` schema by 2026-09-14.
+#:
+#: `ai_cost_ledger` and `work_journal` are deliberately absent. Both carry a
+#: BEFORE DELETE row trigger that raises (they are append-only, ADR-0006), so
+#: they cannot be cleaned per-org at all; a suite that writes them must TRUNCATE,
+#: the way `test_autonomous_run_pg._cleanup` does.
+_TENANT_CHILD_TABLES: tuple[str, ...] = (
+    # dependents first — these reference another table in this list
+    "hitl_queue",            # -> decisions
+    "gcp_wif_targets",       # -> gcp_wif_connections
+    "github_app_repos",      # -> github_app_installations
+    "principal_grant",       # -> principal
+    "spend_reservation",     # -> spend_envelope
+    # then their parents, and everything else that only points at `tenants`
+    "decisions",
+    "gcp_wif_connections",
+    "github_app_installations",
+    "principal",
+    "spend_envelope",
+    "api_keys",
+    "budget_ledger",
+    "decision_processed_events",
+    "deliverables",
+    "gcp_containment_claims",
+    "governance_tokens",
+    "journal_cursor",
+    "memory_records",
+    "model_pricing",
+    "oauth_credentials",
+    "org_autonomy_mode",
+    "org_credentials",
+    "org_permission_grants",
+    "org_spend_ceiling",
+    "tenant_integrations",
+    "tenant_users",
+    "users",
+    "workflow_run_steps",
+)
+
+
+async def purge_tenants(
+    admin_conn, orgs: list[str], *, truncate_append_only: bool = False
+) -> None:
+    """Delete `orgs` and every row that references them, children first.
+
+    Call this from a suite's own `_cleanup` in a `finally`, so a failing
+    assertion still tears its tenants down. Safe to call for an org that was
+    never seeded, and safe to call twice.
+
+    `model_pricing` rows with a NULL `org_id` are global defaults and are left
+    alone -- `org_id = ANY(...)` never matches NULL.
+
+    Pass ``truncate_append_only=True`` if the suite drives a real agent run.
+    Those land rows in `ai_cost_ledger` / `work_journal` WITHOUT the test ever
+    naming the tables, and their BEFORE DELETE triggers refuse a per-org delete,
+    so the tenant delete would fail on the FK. TRUNCATE does not fire row
+    triggers -- the same escape `test_autonomous_run_pg._cleanup` takes. It
+    clears every org's rows, which is why it is opt-in rather than the default.
+    """
+    if not orgs:
+        return
+    if truncate_append_only:
+        await admin_conn.execute("TRUNCATE ai_cost_ledger")
+        await admin_conn.execute("TRUNCATE work_journal")
+    for table in _TENANT_CHILD_TABLES:
+        await admin_conn.execute(
+            f"DELETE FROM {table} WHERE org_id = ANY($1::text[])", orgs
+        )
+    await admin_conn.execute(
+        "DELETE FROM tenants WHERE org_id = ANY($1::text[])", orgs
+    )

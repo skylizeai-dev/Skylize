@@ -32,7 +32,7 @@ from skylize.dal.gcp_wif import (
     PgGcpWifRepository,
 )
 
-from .conftest import APP_DB_URL, requires_app_role, requires_pg
+from .conftest import APP_DB_URL, purge_tenants, requires_app_role, requires_pg
 
 pytestmark = pytest.mark.integration
 
@@ -72,12 +72,12 @@ async def _seed_tenant(admin_conn, org: str) -> None:
 
 
 async def _cleanup(admin_conn, orgs: list[str]) -> None:
-    await admin_conn.execute(
-        "DELETE FROM gcp_wif_targets WHERE org_id = ANY($1::text[])", orgs
-    )
-    await admin_conn.execute(
-        "DELETE FROM gcp_wif_connections WHERE org_id = ANY($1::text[])", orgs
-    )
+    """Drop this suite's orgs, children and all -- including the tenant row.
+
+    Deleting only the two gcp_wif tables left the `wif_*` tenants behind; this
+    suite alone had accumulated 110 of them in the shared `public` schema.
+    """
+    await purge_tenants(admin_conn, orgs)
 
 
 def _conn_row(org: str, *, label: str = "", slug: str | None = None,

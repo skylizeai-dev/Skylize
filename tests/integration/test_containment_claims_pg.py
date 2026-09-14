@@ -41,7 +41,7 @@ from skylize.dal.gcp_wif import (
     PgGcpWifRepository,
 )
 
-from .conftest import APP_DB_URL, requires_app_role, requires_pg
+from .conftest import APP_DB_URL, purge_tenants, requires_app_role, requires_pg
 
 pytestmark = pytest.mark.integration
 
@@ -98,11 +98,12 @@ async def _seed_federation(app_db: Database, org: str) -> GcpWifConnectionRow:
 
 
 async def _cleanup(admin_conn, orgs: list[str]) -> None:
-    for table in ("gcp_containment_claims", "hitl_queue", "decisions",
-                  "gcp_wif_targets", "gcp_wif_connections"):
-        await admin_conn.execute(
-            f"DELETE FROM {table} WHERE org_id = ANY($1::text[])", orgs
-        )
+    """Drop this suite's orgs, children and all -- including the tenant row.
+
+    Cleaning only the five tables this suite writes left the `claim_*` tenants
+    behind in the shared `public` schema.
+    """
+    await purge_tenants(admin_conn, orgs)
 
 
 class _FakeExecution:

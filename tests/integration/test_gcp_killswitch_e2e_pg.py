@@ -50,6 +50,7 @@ from .conftest import (
     TEST_CREDENTIAL_KEY,
     TEST_JWT_SECRET,
     install_dev_header_auth,
+    purge_tenants,
     requires_app_role,
     requires_redis,
 )
@@ -249,10 +250,12 @@ async def _seed_federation(app_db: Database, org: str, state: str = "valid"):
 
 
 async def _cleanup_gcp(admin_conn, orgs: list[str]) -> None:
-    await admin_conn.execute(
-        "DELETE FROM gcp_wif_targets WHERE org_id = ANY($1::text[])", orgs)
-    await admin_conn.execute(
-        "DELETE FROM gcp_wif_connections WHERE org_id = ANY($1::text[])", orgs)
+    """Drop this suite's orgs, children and all -- including the tenant row.
+
+    Deleting only the two gcp_wif tables left the `gcpks_*` tenants behind; 88
+    of them had accumulated in the shared `public` schema.
+    """
+    await purge_tenants(admin_conn, orgs, truncate_append_only=True)
 
 
 def _program_tool_call(fake) -> None:
