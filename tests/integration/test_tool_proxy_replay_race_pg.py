@@ -11,7 +11,7 @@ Migration 0029's partial unique index (`spend_reservation_replay_live`, on
 `(org_id, replay_key) WHERE replay_key IS NOT NULL AND state IN ('held',
 'committed')`) still enforces "at most one live row per replay key", so the LOSER
 of that race gets a Postgres unique-violation on its INSERT.
-`PostgresSpendRepository.try_reserve` (app/principal/spend.py) catches that
+`PostgresSpendRepository.try_reserve` (dal/spend_reservation.py) catches that
 `asyncpg.UniqueViolationError` at the repository boundary and raises the domain
 exception `ReplayKeyConflict` (app/principal/errors.py) instead -- the same
 boundary discipline `CeilingExceeded` and `EnvelopeNotFound` already keep, so no
@@ -45,7 +45,8 @@ import asyncio
 
 import pytest
 
-from skylize.app.principal.spend import PostgresSpendRepository, SpendLedger
+from skylize.app.principal.spend import SpendLedger
+from skylize.dal.spend_reservation import PostgresSpendRepository
 from skylize.tools.base import ToolError, ToolSpendReplayInFlight
 
 from .conftest import APP_DB_URL, requires_app_role

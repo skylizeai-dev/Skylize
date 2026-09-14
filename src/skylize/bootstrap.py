@@ -50,7 +50,8 @@ from .app.autonomy.principal import AutonomousPrincipalResolver
 from .app.autonomy.runner import AutonomousRunService
 from .app.principal.journal import JournalRepository, WorkJournal
 from .app.principal.provider import PrincipalAuthorityService, PrincipalRepository
-from .app.principal.spend import PostgresSpendRepository, SpendLedger
+from .app.principal.spend import SpendLedger
+from .dal.spend_reservation import PostgresSpendRepository
 from .app.tenants.service import TenantService
 from .config import Settings, get_settings
 from .contracts.registry import MVP_REGISTRY
@@ -807,11 +808,12 @@ async def build_container(settings: Settings | None = None) -> Container:
     # On the memory backend this stays None and ToolProxy fails spend-capable
     # calls closed rather than letting them run unmetered.
     #
-    # Takes `db.pool` rather than `db`: `PostgresSpendRepository` lives under
-    # `skylize.app`, which the import-linter contract "Application logic contains
-    # no SQL" forbids from importing `skylize.dal.connection` (pyproject.toml).
-    # It therefore accepts an untyped pool. bootstrap is the composition root and
-    # is explicitly allowed to bridge the two.
+    # Takes `db.pool` rather than `db`: `PostgresSpendRepository`
+    # (dal/spend_reservation.py) predates the DAL's `Database.tenant_session`
+    # convention and still acquires a pool and calls `set_config` itself, so it
+    # accepts an untyped pool rather than `dal.connection.Database`. bootstrap is
+    # the composition root and wires the port (`SpendLedger`, app/principal) to
+    # this adapter.
     spend_ledger = (
         SpendLedger(PostgresSpendRepository(db.pool)) if db is not None else None
     )

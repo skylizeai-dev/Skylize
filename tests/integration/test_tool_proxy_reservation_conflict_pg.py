@@ -31,7 +31,8 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from skylize.app.principal.errors import ReservationConflict
-from skylize.app.principal.spend import PostgresSpendRepository, SpendLedger
+from skylize.app.principal.spend import SpendLedger
+from skylize.dal.spend_reservation import PostgresSpendRepository
 
 from .conftest import APP_DB_URL, requires_app_role
 from .test_tool_proxy_spend_pg import (

@@ -34,7 +34,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from skylize.app.principal.spend import PostgresSpendRepository, SpendLedger
+from skylize.app.principal.spend import SpendLedger
+from skylize.dal.spend_reservation import PostgresSpendRepository
 from skylize.tools.base import ToolContext
 
 from .conftest import APP_DB_URL, DB_URL, requires_app_role
@@ -383,11 +384,11 @@ async def test_the_partial_index_blocks_a_second_live_row_but_frees_settled_ones
 
     The collision itself surfaces here as `ReplayKeyConflict`
     (app/principal/errors.py), not the raw `asyncpg.UniqueViolationError`:
-    `PostgresSpendRepository.try_reserve` translates it at the repository
-    boundary, the same discipline `CeilingExceeded`/`EnvelopeNotFound` already
-    keep, so no database-specific detail leaks past this layer. See
-    test_tool_proxy_replay_race_pg.py for what a caller sitting above
-    `ToolProxy.invoke` receives when two concurrent attempts race for real.
+    `PostgresSpendRepository.try_reserve` (dal/spend_reservation.py) translates
+    it at the repository boundary, the same discipline `CeilingExceeded`/
+    `EnvelopeNotFound` already keep, so no database-specific detail leaks past
+    this layer. See test_tool_proxy_replay_race_pg.py for what a caller sitting
+    above `ToolProxy.invoke` receives when two concurrent attempts race for real.
     """
     import asyncpg
 

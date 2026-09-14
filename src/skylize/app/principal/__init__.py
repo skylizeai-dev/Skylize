@@ -46,7 +46,7 @@ from .models import (
     ScopeId,
     SpendEnvelope,
 )
-from .spend import DEFAULT_HOLD_TTL, PostgresSpendRepository, SpendLedger, SpendRepository
+from .spend import DEFAULT_HOLD_TTL, SpendLedger, SpendRepository
 
 __all__ = [
     "DEFAULT_HOLD_TTL",
@@ -65,7 +65,6 @@ __all__ = [
     "JournalEntry",
     "JournalRepository",
     "OnBehalfOf",
-    "PostgresSpendRepository",
     "Principal",
     "PrincipalError",
     "PrincipalSuspended",

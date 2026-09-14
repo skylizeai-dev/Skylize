@@ -960,7 +960,7 @@ class ToolProxy:
             # see `find_replay` return None -- neither's INSERT has committed
             # yet -- and both proceed to `_reserve_spend`. The repository
             # (`PostgresSpendRepository.try_reserve`,
-            # app/principal/spend.py) is where the loser's collision on
+            # dal/spend_reservation.py) is where the loser's collision on
             # migration 0029's partial `spend_reservation_replay_live` index
             # actually happens, and it raises this domain exception rather
             # than leaking the raw `asyncpg.UniqueViolationError` up here --
