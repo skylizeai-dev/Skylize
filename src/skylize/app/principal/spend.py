@@ -55,9 +55,12 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol, runtime_checkable
 from uuid import UUID, uuid4
 
+import asyncpg
+
 from .errors import (
     CeilingExceeded,
     EnvelopeNotFound,
+    ReplayKeyConflict,
     ReservationConflict,
 )
 from .models import Reservation, SpendEnvelope
@@ -336,19 +339,48 @@ class PostgresSpendRepository:
                 await conn.execute(
                     "SELECT set_config($1, $2, true)", self._rls_guc, org_id
                 )
-                row = await conn.fetchrow(
-                    _RESERVE_SQL,
-                    org_id,
-                    principal_id,
-                    amount_minor,
-                    reservation_id,
-                    idempotency_key,
-                    now,
-                    expires_at,
-                    correlation_id,
-                    governance_token_id,
-                    replay_key,
-                )
+                try:
+                    row = await conn.fetchrow(
+                        _RESERVE_SQL,
+                        org_id,
+                        principal_id,
+                        amount_minor,
+                        reservation_id,
+                        idempotency_key,
+                        now,
+                        expires_at,
+                        correlation_id,
+                        governance_token_id,
+                        replay_key,
+                    )
+                except asyncpg.UniqueViolationError as exc:
+                    # THE RACE `ON CONFLICT (org_id, idempotency_key)` does not
+                    # cover. `idempotency_key` is fresh per attempt even on a
+                    # replay, so it never collides here -- but `replay_key` can:
+                    # a concurrent attempt for the SAME replay key (e.g. a
+                    # duplicate delivery of one HITL-approval resume) can insert
+                    # its 'held' row in the gap between this call's
+                    # `find_replay` (which found nothing live) and this INSERT.
+                    # `spend_reservation_replay_live`
+                    # (migrations/versions/0028_spend_reservation_replay_key.py)
+                    # is the only unique index this INSERT can hit that is not
+                    # already handled by `ON CONFLICT`, so any UniqueViolation
+                    # reaching here is that race, not a fresh kind of failure.
+                    #
+                    # Raised rather than swallowed: the caller already lost the
+                    # race, so there is nothing to retry into -- the correct
+                    # answer is to deny this attempt exactly as `find_replay`
+                    # would have if it had run a moment later and seen the
+                    # winner's row. `ToolProxy._reserve_spend` maps this onto
+                    # `ToolSpendReplayInFlight`, the SAME type `_replay_guard`
+                    # raises for a `held` row found by `find_replay` -- from the
+                    # caller's perspective these are one situation (a replay is
+                    # already in flight), only caught at two different points.
+                    raise ReplayKeyConflict(
+                        f"replay_key {replay_key} already backs a live "
+                        f"reservation for org {org_id!r}; lost the race between "
+                        f"find_replay and try_reserve: {exc}"
+                    ) from exc
                 if row is None:
                     # Either the ceiling blocked it, or the idempotency key already
                     # exists. Distinguish, because replaying a retried request must
