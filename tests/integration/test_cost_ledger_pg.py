@@ -355,3 +355,32 @@ async def test_org_period_aggregate_has_its_covering_index(
     normalized = " ".join(definition.lower().split())
     assert "(org_id, billing_period)" in normalized
     assert "include (cost_micros)" in normalized
+
+
+@requires_pg
+async def test_run_total_has_its_correlation_index(
+    migrated_public, admin_conn
+) -> None:
+    """Migration 0029's index must survive.
+
+    ``run_total_micros`` prices ONE run, and every completed autonomous run
+    calls it once to put ``cost_minor`` on its `work_journal` row. Measured on
+    PostgreSQL 16 with 20,000 rows, the planner without this index falls back to
+    a Seq Scan (2.141 ms); with it the same query is an Index Only Scan with
+    ``Heap Fetches: 0`` (0.133 ms), and the gap grows with the ledger.
+
+    ``org_id`` must LEAD: the query names only ``correlation_id``, and it is the
+    RLS policy on this table that contributes the ``org_id`` predicate, so a
+    correlation-only index would not serve the search the planner actually sees.
+    The INCLUDE column is what keeps the SUM off the heap, so dropping it back to
+    a plain two-column index would silently undo the fix.
+    """
+    definition = await admin_conn.fetchval(
+        "SELECT indexdef FROM pg_indexes "
+        "WHERE tablename = 'ai_cost_ledger' AND indexname = $1",
+        "idx_ai_cost_ledger_org_correlation",
+    )
+    assert definition is not None, "migration 0029's covering index is missing"
+    normalized = " ".join(definition.lower().split())
+    assert "(org_id, correlation_id)" in normalized
+    assert "include (cost_micros)" in normalized

@@ -444,10 +444,12 @@ class CostLedgerDAL:
         run that spent nothing totals 0, exact integer micro-currency. Round to
         minor units ONCE, via ``micros_to_minor``, at the call site.
 
-        NOTE: no index covers ``correlation_id`` on ``ai_cost_ledger`` today
-        (migration 0012 indexes idem / reconcile / org_time; 0016 adds org+period).
-        One query per completed autonomous run is negligible at pilot volume; this
-        wants an index before the whole fleet is scheduled.
+        Indexed by ``idx_ai_cost_ledger_org_correlation`` (migration 0029):
+        ``(org_id, correlation_id) INCLUDE (cost_micros)``. ``org_id`` leads
+        because ``tenant_session`` puts the RLS predicate on this table into the
+        search, and INCLUDE keeps the SUM an index-only scan. Before 0029 this
+        read was a sequential scan of the whole ledger -- fine at the pilot's one
+        agent, not fine once the fleet is scheduled.
         """
         async with self._db.tenant_session(org_id) as conn:
             total = await conn.fetchval(
