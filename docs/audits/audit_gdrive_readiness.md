@@ -401,6 +401,38 @@ commit — both still true.** Note this bites Drive even though Drive is not
 spend-capable: the *concept* is unresolved and the proxy signature is the same one a
 Drive tool would use.
 
+**RESOLVED at `bdfec4d` (2026-09-09). The premise above was wrong, and that is why this
+sat open.** The hazard was real -- `drive_tools.py` retried `files.create` on 429/5xx
+and connection failures with a blind re-POST, and the module comment wrongly asserted
+this was safe ("a failed attempt performs no partial write"). But the conclusion that a
+fix requires a caller-supplied key through `ToolProxy.invoke` does **not** follow: the
+proxy signature is irrelevant here, because Drive supplies the key itself.
+
+`files.generateIds` reserves an id which is sent as the metadata `id`; a retry
+re-presenting it gets `409 Conflict` instead of a second file. `[LIVE-VERIFIED]`
+2026-09-09, `developers.google.com/workspace/drive/api/guides/manage-uploads`: "You can
+safely retry uploads with pre-generated IDs ... subsequent retries return a `409
+Conflict` ... and duplicate files aren't created." The id is reserved once OUTSIDE the
+retry loop, and a test asserts exactly one `generateIds` call -- per-attempt generation
+would restore the bug silently.
+
+Resumable upload sessions were evaluated and rejected: they address an interrupted
+transfer of a large body, whereas this connector posts small text files in one request
+and loses the RESPONSE, not the body.
+
+**Note for whoever reads this next:** the fix needed NO `ToolProxy` change and no
+coupling to the spend-ledger idempotency work. `proxy.py:319` reserves only when
+`tool.spend is not None`, and Drive declares no spend profile, so this connector sits
+outside that machinery entirely.
+
+**Still open, deliberately:** `permissions.create` retries unchanged. Google does not
+document repeat-grant semantics (`[UNVERIFIED]` 2026-09-09), but the worst case is a
+duplicate permission for the same principal at the same gate-authorized role, which
+cannot widen access. See the rationale in `drive_tools.py`.
+
+**HubSpot carries the identical unfixed defect** (`hubspot_tools.py:95-126`) -- the
+precedent both connectors copied. Out of scope for `bdfec4d`; not fixed.
+
 ### D.6 Per-verb gating for Drive
 Given §C.6 — no per-action Decision Engine verdict for non-spend external writes —
 which Drive verbs, if any, require a governance verdict or human deferral rather than

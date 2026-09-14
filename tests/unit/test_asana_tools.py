@@ -429,3 +429,143 @@ class TestNotConnected:
         tool = build_asana_create_task_tool(empty)
         with pytest.raises(ToolExecutionError, match="Asana is not connected"):
             await tool.handler(AsanaCreateTaskIn(name="t", workspace_gid="w1"), _ctx())
+
+
+# ---------------------------------------------------------------------------
+# Duplicate-on-5xx — gap C.3 (audit_notion_asana_readiness.md:379)
+# ---------------------------------------------------------------------------
+
+class TestDuplicateOnFivexx:
+    """Asana publishes no idempotency key, so each verb is protected differently.
+
+    Routine creates: 5xx is no longer retried at all (Notion precedent).
+    Membership: 5xx still retries, resolved by a check-before-create.
+    """
+
+    async def test_task_creation_does_not_retry_a_5xx(self, monkeypatch) -> None:
+        """THE REGRESSION TEST. A 5xx after a server-side commit must not re-POST.
+
+        Before this fix the retry created a SECOND task. The proof is the request
+        count: exactly one POST reaches /tasks.
+        """
+        seen = _patch_http(
+            monkeypatch, lambda r: _err(503, "server error")
+        )
+        tool = build_asana_create_task_tool(await _oauth_service())
+        with pytest.raises(ToolExecutionError, match="server error"):
+            await tool.handler(
+                AsanaCreateTaskIn(name="Deliverable", workspace_gid="ws-1"), _ctx()
+            )
+        posts = [r for r in seen if r.url.path.endswith("/tasks")]
+        assert len(posts) == 1, (
+            "a 5xx may arrive AFTER Asana committed the task; re-sending it "
+            "creates a duplicate deliverable"
+        )
+
+    async def test_project_creation_does_not_retry_a_5xx(self, monkeypatch) -> None:
+        seen = _patch_http(monkeypatch, lambda r: _err(500, "boom"))
+        tool = build_asana_create_project_tool(await _oauth_service())
+        with pytest.raises(ToolExecutionError, match="boom"):
+            await tool.handler(
+                AsanaCreateProjectIn(name="P", workspace_gid="ws-1"), _ctx()
+            )
+        posts = [r for r in seen if r.url.path.endswith("/projects")]
+        assert len(posts) == 1
+
+    async def test_a_429_is_still_retried_on_creates(self, monkeypatch) -> None:
+        """Resilience preserved where it is safe: a 429 is refused BEFORE any
+        write, so retrying it cannot duplicate anything."""
+        attempts = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                return _err(429, "rate limited")
+            return _ok({"gid": "task-1", "name": "Deliverable"})
+
+        _patch_http(monkeypatch, handler)
+        tool = build_asana_create_task_tool(await _oauth_service())
+        out = await tool.handler(
+            AsanaCreateTaskIn(name="Deliverable", workspace_gid="ws-1"), _ctx()
+        )
+        assert out.task_gid == "task-1"
+        assert attempts == 2
+
+    async def test_membership_5xx_with_existing_membership_is_not_duplicated(
+        self, monkeypatch
+    ) -> None:
+        """The check-before-create substituting for an idempotency key.
+
+        Asana commits the membership, then loses every response to a 503. Retries
+        exhaust. The handler asks /memberships, finds the grant landed, and reports
+        success instead of failing or re-adding.
+        """
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "GET" and "/memberships" in str(request.url):
+                return httpx.Response(200, json={"data": [
+                    {"gid": "m-1", "resource_type": "project_membership"}
+                ]})
+            return _err(503, "server error")
+
+        seen = _patch_http(monkeypatch, handler)
+        tool = build_asana_add_project_member_tool(await _oauth_service())
+        out = await tool.handler(
+            AsanaAddProjectMemberIn(project_gid="p-1", grantee="alice@example.com"),
+            _ctx(_grant(grantee="alice@example.com")),
+        )
+        assert out.grantee == "alice@example.com"
+        assert out.project_gid == "p-1"
+
+        checks = [r for r in seen if r.method == "GET" and "/memberships" in str(r.url)]
+        assert checks, "expected a check-before-create after retries exhausted"
+        # The check must name BOTH sides of the relation, or it proves nothing.
+        assert "parent=p-1" in str(checks[0].url)
+        assert "member=alice%40example.com" in str(checks[0].url)
+
+    async def test_membership_5xx_without_existing_membership_still_fails(
+        self, monkeypatch
+    ) -> None:
+        """A genuine failure must stay a failure. Claiming a grant that never
+        landed would be a governance lie, not a convenience."""
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "GET" and "/memberships" in str(request.url):
+                return httpx.Response(200, json={"data": []})
+            return _err(503, "server error")
+
+        _patch_http(monkeypatch, handler)
+        tool = build_asana_add_project_member_tool(await _oauth_service())
+        with pytest.raises(ToolExecutionError, match="retries exhausted"):
+            await tool.handler(
+                AsanaAddProjectMemberIn(project_gid="p-1", grantee="alice@example.com"),
+                _ctx(_grant(grantee="alice@example.com")),
+            )
+
+    async def test_membership_check_failing_reports_the_original_failure(
+        self, monkeypatch
+    ) -> None:
+        """Fail-safe direction: if the CHECK cannot be completed either, report the
+        failure rather than assuming the grant landed."""
+        _patch_http(monkeypatch, lambda r: _err(503, "everything is down"))
+        tool = build_asana_add_project_member_tool(await _oauth_service())
+        with pytest.raises(ToolExecutionError, match="retries exhausted"):
+            await tool.handler(
+                AsanaAddProjectMemberIn(project_gid="p-1", grantee="alice@example.com"),
+                _ctx(_grant(grantee="alice@example.com")),
+            )
+
+    async def test_membership_succeeding_normally_makes_no_check_call(
+        self, monkeypatch
+    ) -> None:
+        """The check is a recovery path, not a per-call cost. A clean success must
+        not spend an extra request against Asana's 150 req/min limit."""
+        seen = _patch_http(monkeypatch, lambda r: _ok({"gid": "m-1"}))
+        tool = build_asana_add_project_member_tool(await _oauth_service())
+        out = await tool.handler(
+            AsanaAddProjectMemberIn(project_gid="p-1", grantee="alice@example.com"),
+            _ctx(_grant(grantee="alice@example.com")),
+        )
+        assert out.grantee == "alice@example.com"
+        assert not [r for r in seen if r.method == "GET"], (
+            "no membership check should run when the add already succeeded"
+        )

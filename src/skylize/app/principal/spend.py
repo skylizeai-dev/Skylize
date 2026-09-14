@@ -49,6 +49,7 @@ wiring prompt, which will also decide whether `SpendRepository` moves to
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 from typing import Protocol, runtime_checkable
 from uuid import UUID, uuid4
@@ -98,7 +99,9 @@ class SpendRepository(Protocol):
         self, *, org_id: str, principal_id: str, now: datetime
     ) -> SpendEnvelope | None: ...
 
-    async def sweep_expired(self, *, now: datetime, limit: int = 500) -> int: ...
+    async def sweep_expired(
+        self, *, org_ids: Sequence[str], now: datetime, limit: int = 500
+    ) -> int: ...
 
 
 class SpendLedger:
@@ -418,30 +421,53 @@ class PostgresSpendRepository:
                 )
                 return SpendEnvelope(**dict(row)) if row is not None else None
 
-    async def sweep_expired(self, *, now: datetime, limit: int = 500) -> int:
+    async def sweep_expired(
+        self, *, org_ids: Sequence[str], now: datetime, limit: int = 500
+    ) -> int:
         """Release abandoned holds. Run from Temporal on a schedule, not from a
-        request path. Returns the number of holds reclaimed."""
-        async with self._pool.acquire() as conn:  # type: ignore[attr-defined]
-            async with conn.transaction():
-                rows = await conn.fetch(
-                    """
-                    UPDATE spend_reservation
-                       SET state = 'expired', settled_at = $1
-                     WHERE reservation_id IN (
-                           SELECT reservation_id FROM spend_reservation
-                            WHERE state = 'held' AND expires_at < $1
-                            ORDER BY expires_at LIMIT $2
-                            FOR UPDATE SKIP LOCKED)
-                    RETURNING envelope_id, amount_minor
-                    """,
-                    now,
-                    limit,
-                )
-                for row in rows:
+        request path. Returns the number of holds reclaimed.
+
+        `spend_reservation` is FORCE RLS (migration 0019) with policy
+        `org_id = current_setting('skylize.org_id', true)`. A sweep is
+        cross-tenant by nature, but under the non-superuser `skylize_app` role
+        there is no bypass-RLS path for background jobs (none exists anywhere
+        in this codebase — see DecisionEngineConsumer.run, bootstrap.py:708,
+        which subscribes an explicit `org_ids` list one org at a time rather
+        than reading across tenants in one query). This mirrors that: the GUC
+        is set per org before that org's slice of the sweep runs, same as
+        every other method in this class sets it per call.
+
+        `limit` applies PER ORG, not globally, so one org with many expired
+        holds cannot starve another's sweep within a single call.
+        """
+        total = 0
+        for org_id in org_ids:
+            async with self._pool.acquire() as conn:  # type: ignore[attr-defined]
+                async with conn.transaction():
                     await conn.execute(
-                        "UPDATE spend_envelope SET reserved_minor = reserved_minor - $2 "
-                        "WHERE envelope_id = $1",
-                        row["envelope_id"],
-                        row["amount_minor"],
+                        "SELECT set_config($1, $2, true)", self._rls_guc, org_id
                     )
-                return len(rows)
+                    rows = await conn.fetch(
+                        """
+                        UPDATE spend_reservation
+                           SET state = 'expired', settled_at = $1
+                         WHERE reservation_id IN (
+                               SELECT reservation_id FROM spend_reservation
+                                WHERE org_id = $3 AND state = 'held' AND expires_at < $1
+                                ORDER BY expires_at LIMIT $2
+                                FOR UPDATE SKIP LOCKED)
+                        RETURNING envelope_id, amount_minor
+                        """,
+                        now,
+                        limit,
+                        org_id,
+                    )
+                    for row in rows:
+                        await conn.execute(
+                            "UPDATE spend_envelope SET reserved_minor = reserved_minor - $2 "
+                            "WHERE envelope_id = $1",
+                            row["envelope_id"],
+                            row["amount_minor"],
+                        )
+                    total += len(rows)
+        return total

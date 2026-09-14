@@ -80,15 +80,50 @@ ASANA_ADD_PROJECT_MEMBER_ACTION_CLASS = "asana.project.add_members"
 
 _API_BASE = "https://app.asana.com/api/1.0"
 
-#: Retried statuses. 429 is Asana's documented rate-limit signal and 5xx are
-#: transient. `[LIVE-VERIFIED]` 2026-09-02, developers.asana.com/docs/rate-limits:
-#: 150 req/min free / 1,500 paid, 15 concurrent writes, cost-based accounting on
-#: top, and a `Retry-After` header the docs say to prefer over a fixed wait. This
-#: retry shape (bounded attempts, exponential backoff, `reraise=True`) mirrors the
-#: Drive and HubSpot precedents; it does NOT read `Retry-After`, which is a known
-#: and deliberate simplification carried from those connectors rather than a new
-#: gap introduced here.
-_RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+#: Rate-limit retry, applied to EVERY verb. `[LIVE-VERIFIED]` 2026-09-02,
+#: developers.asana.com/docs/rate-limits: 150 req/min free / 1,500 paid, 15
+#: concurrent writes, cost-based accounting on top, and a `Retry-After` header the
+#: docs say to prefer over a fixed wait. This retry shape (bounded attempts,
+#: exponential backoff, `reraise=True`) mirrors the Drive and HubSpot precedents; it
+#: does NOT read `Retry-After`, which is a known and deliberate simplification
+#: carried from those connectors rather than a new gap introduced here.
+#:
+#: 429 IS SAFE TO RETRY ON ANY VERB and 5xx IS NOT. A 429 is refused BEFORE Asana
+#: does any work — the request never reached the resource — so re-sending it cannot
+#: duplicate anything. A 5xx may be returned AFTER the write committed.
+_RETRYABLE_STATUS = {429}
+
+#: 5xx, retried ONLY by verbs that can survive it without duplicating.
+#:
+#: THE HAZARD, and why the split exists. Every verb here is a non-idempotent POST.
+#: Until this change all three shared one retry policy that included 5xx, so a 5xx
+#: or dropped connection AFTER Asana committed the write caused the retry to create
+#: a SECOND task, project, or membership. Recorded as gap C.3
+#: (`docs/audits/audit_notion_asana_readiness.md:379`) and named from the outside by
+#: `notion_tools.py:71-79`.
+#:
+#: ASANA OFFERS NO IDEMPOTENCY KEY. `[LIVE-VERIFIED]` 2026-09-09: there is no
+#: published `X-Idempotency-Key`, no `requestId` parameter, and no client-supplied
+#: request id anywhere in the API — the docs are silent on retry semantics for
+#: POSTs entirely. So unlike Drive (`drive_tools.py`, pre-generated ids) there is no
+#: native mechanism to adopt, and each verb is handled on its own merits:
+#:
+#:   * `addMembers` (the gated verb) DOES retry 5xx, because membership has an exact
+#:     check-before-create: `GET /memberships?parent=<project>&member=<user>` answers
+#:     definitively whether the grant already landed. See `add_project_member`.
+#:
+#:   * `create_task` / `create_project` DO NOT retry 5xx. Following the Notion
+#:     precedent (`notion_tools.py:71-79`) and for the same reason: no key, and no
+#:     honest check-before-create either. A name is NOT unique in Asana — two tasks
+#:     with one name are legitimate — so a name-match query would suppress a real
+#:     second task as often as it caught a duplicate. A false dedupe silently loses
+#:     a customer's work, which is worse than the spurious failure that dropping the
+#:     retry costs. A 5xx now surfaces as a clean error the caller can act on.
+_RETRY_5XX_STATUS = {500, 502, 503, 504}
+
+#: Every status either policy may retry. Used only to decide whether a response
+#: should be raised for tenacity to see.
+_RETRYABLE_STATUS_ALL = _RETRYABLE_STATUS | _RETRY_5XX_STATUS
 
 #: Grantee values this connector refuses even when the gate authorized them.
 #: Both name no external person, so an address allow-list cannot meaningfully
@@ -105,8 +140,27 @@ _REFUSED_GRANTEES = frozenset({"me", "anyone"})
 
 
 def _is_retryable(exc: BaseException) -> bool:
+    """Rate-limit-only retry: safe for every verb, duplicates nothing.
+
+    Transport failures are deliberately NOT retried here. A `ConnectError` or
+    `TimeoutException` is indistinguishable from a lost response to a COMMITTED
+    write — precisely the duplication case — so only verbs that can verify the
+    outcome afterwards may retry one. See `_is_retryable_with_5xx`.
+    """
     if isinstance(exc, httpx.HTTPStatusError):
         return exc.response.status_code in _RETRYABLE_STATUS
+    return False
+
+
+def _is_retryable_with_5xx(exc: BaseException) -> bool:
+    """Rate-limit AND server/transport failures.
+
+    Used ONLY by `add_project_member`, the one verb with a check-before-create that
+    can tell a lost response from a genuine failure. Applying this to task or
+    project creation would reintroduce gap C.3.
+    """
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in _RETRYABLE_STATUS_ALL
     return isinstance(exc, (httpx.ConnectError, httpx.TimeoutException))
 
 
@@ -244,8 +298,68 @@ class AsanaClient:
         reraise=True,
     )
     async def _post(self, path: str, data: dict[str, Any]) -> httpx.Response:
+        """POST retrying 429 ONLY — the policy for non-idempotent creates.
+
+        5xx is deliberately absent. See `_RETRY_5XX_STATUS`: a 5xx can arrive after
+        Asana committed the write, and neither task nor project creation has a key
+        or an honest check-before-create with which to tell that apart. Retrying
+        them is what produced duplicate tasks (gap C.3).
+        """
         response = await self._client.post(f"{_API_BASE}{path}", json={"data": data})
         if response.status_code in _RETRYABLE_STATUS:
+            response.raise_for_status()
+        return response
+
+    @retry(
+        retry=retry_if_exception(_is_retryable_with_5xx),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        reraise=True,
+    )
+    async def _post_retrying_5xx(
+        self, path: str, data: dict[str, Any]
+    ) -> httpx.Response:
+        """POST retrying 429 AND 5xx/transport failures.
+
+        Reserved for `add_project_member`, whose caller verifies the outcome with
+        `get_project_membership` before concluding anything. Do not reuse this for a
+        verb that cannot check afterwards.
+        """
+        response = await self._client.post(f"{_API_BASE}{path}", json={"data": data})
+        if response.status_code in _RETRYABLE_STATUS_ALL:
+            response.raise_for_status()
+        return response
+
+    @retry(
+        retry=retry_if_exception(_is_retryable_with_5xx),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        reraise=True,
+    )
+    async def get_project_membership(
+        self, *, project_gid: str, member: str
+    ) -> httpx.Response:
+        """Does `member` ALREADY belong to `project_gid`?
+
+        `GET /memberships?parent=<project>&member=<user>` — `[LIVE-VERIFIED]`
+        2026-09-09 against developers.asana.com/reference/getmemberships: `parent`
+        takes the project gid, `member` a user gid, and the pair filters to that one
+        membership relationship. `parent` is REQUIRED for a user membership, which is
+        exactly the shape needed here.
+
+        Freely retryable: a GET performs no write, so a lost response costs a repeat
+        read and nothing more. That asymmetry is the whole reason this check can make
+        the POST beside it safe.
+
+        Asana's `/memberships` supersedes the deprecated
+        `/projects/{gid}/project_memberships`; the newer endpoint is used so this
+        does not ship against a surface Asana has already marked for removal.
+        """
+        response = await self._client.get(
+            f"{_API_BASE}/memberships",
+            params={"parent": project_gid, "member": member, "limit": 1},
+        )
+        if response.status_code in _RETRYABLE_STATUS_ALL:
             response.raise_for_status()
         return response
 
@@ -283,8 +397,12 @@ class AsanaClient:
     async def add_project_member(
         self, *, project_gid: str, grantee: str
     ) -> httpx.Response:
-        """One grantee, wrapped into Asana's array at the wire boundary only."""
-        return await self._post(
+        """One grantee, wrapped into Asana's array at the wire boundary only.
+
+        Uses the 5xx-retrying policy; safe ONLY because the handler resolves an
+        exhausted retry through `get_project_membership` rather than assuming.
+        """
+        return await self._post_retrying_5xx(
             f"/projects/{project_gid}/addMembers", {"members": [grantee]}
         )
 
@@ -369,6 +487,38 @@ def _data(response: httpx.Response) -> dict[str, Any]:
         return {}
     data = payload.get("data")
     return data if isinstance(data, dict) else {}
+
+
+async def _membership_exists(
+    client: AsanaClient, *, project_gid: str, member: str
+) -> bool:
+    """Is `member` already a member of `project_gid`?
+
+    FAIL-SAFE DIRECTION, deliberately chosen. If the check itself cannot be
+    completed — the read also fails, or the envelope is unreadable — this returns
+    False, so the caller reports the FAILURE it already had rather than claiming a
+    grant it cannot prove. The cost of a False that should have been True is a
+    surfaced error on a membership that did land, which a retry then resolves
+    harmlessly because re-adding an existing member is not a duplicate resource.
+    The cost of the opposite mistake is telling a customer access was granted when
+    it was not, which is a governance lie. Only the first is acceptable.
+    """
+    try:
+        response = await client.get_project_membership(
+            project_gid=project_gid, member=member
+        )
+    except (httpx.HTTPStatusError, httpx.ConnectError, httpx.TimeoutException):
+        return False
+    if response.status_code != 200:
+        return False
+    try:
+        payload = response.json()
+    except ValueError:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    data = payload.get("data")
+    return isinstance(data, list) and len(data) > 0
 
 
 def _require_grant(
@@ -551,11 +701,47 @@ def build_asana_add_project_member_tool(
         token = await _resolve_token(oauth, ctx.org_id, ctx.correlation_id)
         client = AsanaClient(token)
         try:
-            response = await client.add_project_member(
-                project_gid=inp.project_gid, grantee=grant.grantee
-            )
-        except httpx.HTTPStatusError as exc:
-            raise _exhausted(exc, "project member addition") from exc
+            try:
+                response = await client.add_project_member(
+                    project_gid=inp.project_gid, grantee=grant.grantee
+                )
+            except (httpx.HTTPStatusError, httpx.ConnectError, httpx.TimeoutException) as exc:
+                # RETRIES EXHAUSTED, OUTCOME UNKNOWN — the case gap C.3 is about.
+                # Asana may have committed the membership and lost every response,
+                # or may have done nothing at all. Do NOT guess: ask.
+                #
+                # This is the check-before-create that substitutes for the
+                # idempotency key Asana does not offer. It is authoritative rather
+                # than heuristic because membership is a UNIQUE relation — a user
+                # either is or is not in a project, there is no legitimate "second"
+                # membership for the same pair — which is precisely what is NOT true
+                # of task or project names, and why those verbs are handled by
+                # dropping the 5xx retry instead.
+                if await _membership_exists(
+                    client, project_gid=inp.project_gid, member=grant.grantee
+                ):
+                    log.info(
+                        "asana.project_member_add_deduplicated",
+                        org_id=ctx.org_id, agent_id=ctx.agent_id,
+                        project_gid=inp.project_gid, grantee=grant.grantee,
+                        role=grant.role, matched_pattern=grant.matched_pattern,
+                        detail=(
+                            "retries exhausted but the membership exists: an earlier "
+                            "attempt committed it; no duplicate was created"
+                        ),
+                    )
+                    return AsanaAddProjectMemberOut(
+                        project_gid=inp.project_gid,
+                        grantee=grant.grantee,
+                        role=grant.role,
+                    )
+                if isinstance(exc, httpx.HTTPStatusError):
+                    raise _exhausted(exc, "project member addition") from exc
+                raise ToolExecutionError(
+                    "Asana project member addition failed (transport failure: "
+                    f"{exc}); the membership was verified NOT to exist, so nothing "
+                    "was granted"
+                ) from exc
         finally:
             await client.aclose()
 
