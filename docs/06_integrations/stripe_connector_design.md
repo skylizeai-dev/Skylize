@@ -700,12 +700,14 @@ mutating connectors in this repo share one idempotency discipline rather than in
 non-deferred request path (`[CODE-VERIFIED]` `base.py:63-64`). Two consequences, and neither
 may be left implicit:
 
-- If Q2.1c resolves to "refunds always defer to a human", every refund executes on the
-  replay path and `hitl_id` is always present. The derivation above is then total.
-- If some refunds may execute without HITL, those calls have no retry-stable seed at all,
-  and a UUID minted per attempt would be worse than useless - it would look like an
-  idempotency key while guaranteeing a duplicate refund on a timeout-then-success. **A
-  refund handler must therefore REFUSE to build a key from anything per-attempt.** The
+- Q2.1c is resolved (see below) to "refunds always defer to a human," so every refund
+  executes on the replay path and `hitl_id` is always present. The derivation above is
+  therefore total; the second bullet's scenario does not arise for refunds.
+- (Retained for the general HITL-replay-safe idempotency pattern, not as an open branch
+  for refunds specifically.) If some tool call may execute without HITL, that call has no
+  retry-stable seed at all, and a UUID minted per attempt would be worse than useless - it
+  would look like an idempotency key while guaranteeing a duplicate on a timeout-then-success.
+  **Such a handler must therefore REFUSE to build a key from anything per-attempt.** The
   durable local dedupe record below is what covers this case.
 
 `[RESEARCH-SUGGESTED]` **The durable local dedupe record is still required, and the 24-hour
@@ -739,10 +741,14 @@ resolvable inside the connector; it is now resolved.
 > That branch's migration also still claims revision `0028`, which trunk has since taken
 > for `0028_org_autonomy_mode.py`; it must renumber before it can land.
 
-`[OWNER-DECISION-REQUIRED]` Q2.1c (the refund ceiling number, or "refunds always defer to a
-human") remains open and is **not** resolved by this document. **7.5 specifies the machinery
-its answer would be configured through; it does not answer it.** Until 1.1 is resolved and a number
-exists, a Stripe refund tool must not be registered as spend-capable.
+**RESOLVED - Q2.1c.** Owner decision: refunds always defer to a human. There is no numeric
+refund ceiling; no such number is coming. Every refund therefore executes on the HITL-replay
+path with `hitl_id` always present (7.0.1 above), and `org_refund_authority_limits` (7.5.2)
+carries no meaning for refunds - a refund is never authorized by authority level alone. This
+is already the fail-closed-empty design: an org with no `org_refund_authority_limits` row
+defers to a human by denying non-human authorization outright, and this decision confirms
+that behavior is final, not an interim default awaiting a number. A Stripe refund tool may
+now be registered as spend-capable on this basis.
 
 `[CODE-VERIFIED]` Registration note: `stripe.refund` already exists as a scope string in the same
 vocabulary as `ToolGrant.tool_id` (`src/skylize/app/principal/models.py:54-56`, used at `:74`,
@@ -756,8 +762,11 @@ Registering the real tool under exactly that id keeps the existing authority fix
 > **Section status: `[RESEARCH-SUGGESTED]` schema + `[INTERIM-RULE]` policy. No code, no
 > migration, this pass. The NUMBERS are `[OWNER-DECISION-REQUIRED]` and the tables are
 > seeded EMPTY, so no number is baked in by this design.**
-> Added 2026-09-09. This is the machinery Q2.1c's answer would be configured through; it
-> does not itself answer Q2.1c.
+> Added 2026-09-09. Q2.1c is now resolved (7.0.1): refunds always defer to a human, no
+> numeric ceiling. `org_refund_authority_limits` (7.5.2) is therefore inert for refunds -
+> it carries no meaning when authority-level authorization never applies to a refund verb.
+> `org_refund_review_thresholds` (7.5.3) remains live machinery: its fail-closed-empty
+> default already routes everything to a human, which is the same answer Q2.1c gives.
 
 ### 7.5.0 UNIT WARNING - read before touching either table
 
@@ -1028,7 +1037,7 @@ set_review_threshold(*, org_id, currency, review_above_minor,
 `[RESEARCH-SUGGESTED]` Superset of `integration_inputs.md` 4.0, Stripe-specific:
 
 1. 1.1 resolved - a spend-capable tool call reaches a synchronous ceiling check before egress.
-2. Q2.1c answered - refund ceiling number, or "always defer to a human."
+2. Q2.1c answered (7.0.1) - "refunds always defer to a human," no numeric ceiling.
 3. Q2.1d approved. **No longer blocked on a `ToolProxy.invoke` change** - `hitl_id` is
    already threaded to the handler (`proxy.py:160-167,334-337`), so the handler can derive
    the Stripe `Idempotency-Key` itself (7.0.1). What remains is the durable local dedupe
