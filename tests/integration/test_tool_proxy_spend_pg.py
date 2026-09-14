@@ -70,6 +70,39 @@ async def _seed_envelope(
     return org
 
 
+async def _seed_expired_hold(*, org: str, amount_minor: int) -> uuid.UUID:
+    """Insert a 'held' reservation already past its expiry, as the admin role,
+    against the org's existing envelope with reserved_minor bumped to match —
+    the state `sweep_expired` is meant to find and reclaim."""
+    import asyncpg
+
+    reservation_id = uuid.uuid4()
+    now = datetime.now(timezone.utc)
+    conn = await asyncpg.connect(DB_URL)
+    try:
+        envelope_id = await conn.fetchval(
+            "SELECT envelope_id FROM spend_envelope WHERE org_id=$1 AND principal_id=$2",
+            org, PRINCIPAL,
+        )
+        await conn.execute(
+            "UPDATE spend_envelope SET reserved_minor = reserved_minor + $2 "
+            "WHERE envelope_id = $1",
+            envelope_id, amount_minor,
+        )
+        await conn.execute(
+            """INSERT INTO spend_reservation (
+                   reservation_id, envelope_id, org_id, idempotency_key,
+                   amount_minor, correlation_id, state, created_at, expires_at
+               ) VALUES ($1,$2,$3,$4,$5,$6,'held',$7,$8)""",
+            reservation_id, envelope_id, org, f"expired-{reservation_id}",
+            amount_minor, uuid.uuid4(),
+            now - timedelta(minutes=30), now - timedelta(minutes=15),
+        )
+    finally:
+        await conn.close()
+    return reservation_id
+
+
 async def _drop_org(org: str) -> None:
     import asyncpg
 
@@ -316,6 +349,51 @@ async def test_release_returns_the_hold_to_the_ceiling() -> None:
     finally:
         await pool.close()
         await _drop_org(org)
+
+
+@requires_app_role
+async def test_sweep_expired_reclaims_holds_across_multiple_orgs() -> None:
+    """`sweep_expired` is a cross-tenant background job, but `spend_reservation`
+    is FORCE RLS (migration 0019): a query with no `skylize.org_id` GUC set
+    matches no rows under the non-superuser `skylize_app` role, not an error.
+    Without setting the GUC per org, this sweeper silently reclaims nothing in
+    every org, forever.
+
+    Two orgs, each with one expired 'held' reservation. A single
+    `sweep_expired(org_ids=[org_a, org_b], ...)` call must reclaim BOTH —
+    proof that the fix iterates and binds RLS per org rather than relying on
+    one unscoped query.
+    """
+    import asyncpg
+
+    org_a = await _seed_envelope(ceiling_minor=10_000)
+    org_b = await _seed_envelope(ceiling_minor=10_000)
+    await _seed_expired_hold(org=org_a, amount_minor=3_000)
+    await _seed_expired_hold(org=org_b, amount_minor=4_000)
+
+    pool = await asyncpg.create_pool(APP_DB_URL, min_size=1, max_size=2)
+    try:
+        repo = PostgresSpendRepository(pool)
+        reclaimed = await repo.sweep_expired(
+            org_ids=[org_a, org_b], now=datetime.now(timezone.utc)
+        )
+        assert reclaimed == 2, (
+            f"expected both orgs' expired holds reclaimed in one sweep, got "
+            f"{reclaimed} — a sweep with no per-org RLS binding reclaims 0 "
+            f"under FORCE RLS, not an error, so this is the regression case"
+        )
+
+        row_a = await _envelope_row(org_a)
+        assert row_a["reserved_minor"] == 0, "org_a's expired hold was not released"
+        row_b = await _envelope_row(org_b)
+        assert row_b["reserved_minor"] == 0, "org_b's expired hold was not released"
+
+        assert (await _reservation_states(org_a)).get("expired") == 1
+        assert (await _reservation_states(org_b)).get("expired") == 1
+    finally:
+        await pool.close()
+        await _drop_org(org_a)
+        await _drop_org(org_b)
 
 
 @requires_app_role
