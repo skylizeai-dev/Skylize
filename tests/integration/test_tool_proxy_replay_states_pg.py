@@ -380,8 +380,18 @@ async def test_the_partial_index_blocks_a_second_live_row_but_frees_settled_ones
     released, a second must be allowed. This is what makes the
     `released`/`expired` behaviour above a property of the schema rather than of
     application code someone can forget to write.
+
+    The collision itself surfaces here as `ReplayKeyConflict`
+    (app/principal/errors.py), not the raw `asyncpg.UniqueViolationError`:
+    `PostgresSpendRepository.try_reserve` translates it at the repository
+    boundary, the same discipline `CeilingExceeded`/`EnvelopeNotFound` already
+    keep, so no database-specific detail leaks past this layer. See
+    test_tool_proxy_replay_race_pg.py for what a caller sitting above
+    `ToolProxy.invoke` receives when two concurrent attempts race for real.
     """
     import asyncpg
+
+    from skylize.app.principal.errors import ReplayKeyConflict
 
     org = await _seed_envelope(ceiling_minor=100_000)
     pool = await asyncpg.create_pool(APP_DB_URL, min_size=1, max_size=3)
@@ -396,7 +406,7 @@ async def test_the_partial_index_blocks_a_second_live_row_but_frees_settled_ones
         )
 
         # A DIFFERENT idempotency key, so only the partial index can stop this.
-        with pytest.raises(asyncpg.UniqueViolationError):
+        with pytest.raises(ReplayKeyConflict):
             await ledger.reserve(
                 org_id=org, principal_id=PRINCIPAL, amount_minor=1_000,
                 idempotency_key=f"tool:test.spend:{replay_key}:b",

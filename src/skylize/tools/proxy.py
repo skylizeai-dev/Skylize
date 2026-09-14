@@ -40,6 +40,7 @@ from ..app.permissions.gate import (
 from ..app.principal.errors import (
     CeilingExceeded,
     EnvelopeNotFound,
+    ReplayKeyConflict,
     ReservationConflict,
 )
 from ..app.principal.models import Reservation
@@ -952,6 +953,40 @@ class ToolProxy:
             # caller-supplied the moment replay keying lands, and a handler
             # that goes live by faulting agent runs is not a handler.
             raise await deny(ToolSpendKeyConflict(str(exc))) from exc
+        except ReplayKeyConflict as exc:
+            # THE RACE `_replay_guard`'s read-then-reserve cannot close on its
+            # own. Two concurrent `invoke()` calls carrying the same
+            # `replay_key` (duplicate delivery of one HITL approval) can both
+            # see `find_replay` return None -- neither's INSERT has committed
+            # yet -- and both proceed to `_reserve_spend`. The repository
+            # (`PostgresSpendRepository.try_reserve`,
+            # app/principal/spend.py) is where the loser's collision on
+            # migration 0029's partial `spend_reservation_replay_live` index
+            # actually happens, and it raises this domain exception rather
+            # than leaking the raw `asyncpg.UniqueViolationError` up here --
+            # the same boundary discipline `CeilingExceeded` and
+            # `EnvelopeNotFound` already keep.
+            #
+            # Mapped onto `ToolSpendReplayInFlight`, NOT a new type: this is
+            # the SAME fact `_replay_guard` raises it for when it finds the
+            # winner's row already `held` on a sequential replay -- "a
+            # replay for this key is already in flight" -- just detected by
+            # the database instead of by the read. A caller branching on
+            # `ToolSpendReplayInFlight` must not have to know which of the
+            # two paths produced it. Deliberately NOT `ToolSpendKeyConflict`:
+            # that type means the CALLER reused an idempotency key for a
+            # different amount, which is not what happened here -- the
+            # idempotency key was unique, the replay key collided.
+            # Collapsing the two would make an in-flight replay collision
+            # unactionable in the audit trail, exactly the reasoning 63a3185
+            # already applied to the ceiling/key distinction.
+            #
+            # Before this clause, `ReplayKeyConflict` was raised by the
+            # ledger and caught nowhere here: it would have escaped `invoke`
+            # as a bare `BudgetError`, missed `except ToolError`
+            # (app/agents/execution.py:981), and faulted the whole agent run
+            # over a race the caller did nothing wrong to trigger.
+            raise await deny(ToolSpendReplayInFlight(str(exc))) from exc
         except EnvelopeNotFound as exc:
             raise await deny(ToolSpendUnavailable(str(exc))) from exc
 
