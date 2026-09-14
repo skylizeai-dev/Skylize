@@ -33,8 +33,26 @@ agree with the code:
   decision: the TERMINAL element is `human_owner` in 100% of rows on BOTH sides,
   and the terminal element is the only thing this module reads. The two sources
   disagree about the middle of the chain and agree about its end, so the owner's
-  decision resolves to the same human either way. The drift is reported for a
-  separate doc-reconciliation decision; it is not silently adopted here.
+  decision resolves to the same human either way.
+
+  RECONCILED 2026-09-14 -- the answer is that there is nothing to reconcile. The
+  CSV's `escalation_path` is not authored, it is GENERATED from directory layout
+  by scripts/gen_manifest.js (`chain()` collects one agent per rank walking up
+  the tree). Regenerating reproduces all 154 rows' first five columns
+  byte-for-byte, so the column is a faithful picture of where a markdown file
+  sits -- not a competing claim about the org that has drifted. Two structural
+  reasons cover all 14 disagreements, neither an error:
+
+    * the generator emits at most one hop per rank, so a peer-rank hop is
+      inexpressible. The contracts put `ceo` between `cmo` and `human_owner`;
+      both are rank `executive`. That accounts for 10 of the 14.
+    * where several agents share a rank in an ancestor directory the generator
+      picks one -- manager_incident_response / director_ai_safety here, where
+      this contract names manager_security_operations / director_cybersecurity.
+
+  So the CSV is not to be hand-corrected toward the contracts: gen_manifest.js
+  would revert it, and the 137 rows with no contract would keep citing the old
+  chains. Resolving from the contract, as this module does, remains correct.
 
 HOW `human_owner` BECOMES A REAL ACCOUNT
 ----------------------------------------
