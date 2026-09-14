@@ -30,7 +30,7 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, NoReturn
+from typing import Any, Callable, NoReturn
 from uuid import UUID, uuid4
 
 from pydantic import ValidationError
@@ -47,7 +47,7 @@ from ...app.audit.service import AuditService
 from ...app.deliverables.service import DeliverableService
 from ...app.governance.authority import GovernanceAuthority, GovernanceDenied
 from ...app.notifications.slack import SlackApprovalNotifier
-from ...contracts.base import AgentContract
+from ...contracts.base import AgentContract, SessionKind
 from ...contracts.registry import AgentRegistry, resolve_model
 from ...contracts.token import ValidationStage, validate_tool_call
 from ...dal.ports import DeliverableRow, HitlEscalation, HitlQueueRepository
@@ -267,6 +267,9 @@ class AgentExecutionService:
         user_id: str,
         hitl_approval: HitlApprovalContext | None = None,
         on_behalf_of_principal: str | None = None,
+        correlation_id: UUID | None = None,
+        session_kind: SessionKind = "cowork",
+        output_sink: "Callable[[Any], None] | None" = None,
     ) -> DeliverableRow:
         """Run one agent.
 
@@ -280,6 +283,32 @@ class AgentExecutionService:
         (contracts/token.py:94-124) writes `token_version` / `on_behalf_of` ONLY
         inside its `token_version != "1.0"` branch, so with no principal the keys
         are ABSENT from the payload rather than present-and-null.
+
+        ``correlation_id`` lets a CALLER own the id that ties this run's decision,
+        mint, LLM spend (`ai_cost_ledger.correlation_id`), audit records and
+        journal entry together. Omitted (every pre-existing caller) it is minted
+        here exactly as before. The autonomous runner supplies one because it must
+        read the run's real cost back out of the cost ledger AFTER execute()
+        returns -- and, on a failure, there is no deliverable to read a token id
+        from (app/autonomy/runner.py).
+
+        ``session_kind`` is forwarded to the mint and lands inside the v1.1
+        `on_behalf_of` claim. It has an effect ONLY alongside
+        ``on_behalf_of_principal`` -- a v1.0 token carries no claim to put it in --
+        and it defaults to mint's own default, so no existing call site changes.
+        "autonomous" is what a scheduled/triggered run passes: the token is bound
+        to a human, but that human was not present.
+
+        ``output_sink``, when given, is called once with the VALIDATED output model
+        (after the deterministic recompute, so it sees the final values) before the
+        deliverable is formatted and persisted. It exists because the return type
+        is a `DeliverableRow`, whose markdown is an agent-specific, lossy rendering
+        -- a caller that has to make a decision from the structured output cannot
+        recover it by parsing that back. The autonomous runner needs exactly this:
+        `requires_attention` is a predicate over the output's own fields
+        (app/autonomy/attention.py), and re-deriving them from prose would be a
+        guess written onto a governance record. It is an OBSERVER: its return value
+        is ignored and it must not raise -- it cannot alter, veto, or retry the run.
         """
         # 1. Resolve contract (raises AgentNotRegistered on unknown id)
         contract = self._registry.resolve(agent_id)
@@ -306,7 +335,7 @@ class AgentExecutionService:
         # gate's resolution, and re-evaluating would defer again forever. The
         # decision events + audit for that resolution are emitted by
         # HitlQueueService before this method is ever called.
-        run_id: UUID = uuid4()
+        run_id: UUID = correlation_id if correlation_id is not None else uuid4()
         if org_id in self._governed_org_ids and hitl_approval is None:
             await self._govern(
                 contract=contract, org_id=org_id, agent_id=agent_id,
@@ -326,6 +355,7 @@ class AgentExecutionService:
                 system_prompt=system_prompt, user_prompt=user_prompt,
                 validated_input=validated_input, user_id=user_id,
                 on_behalf_of_principal=on_behalf_of_principal,
+                session_kind=session_kind,
                 # The approval's ticket id, when this run IS a HITL replay. This
                 # is the ONLY value on this path that is stable across retries of
                 # the same approval, so it is what an externally-mutating tool
@@ -358,6 +388,7 @@ class AgentExecutionService:
                         contract, org_id=org_id, principal_id=on_behalf_of_principal
                     ),
                     on_behalf_of_principal=on_behalf_of_principal,
+                    session_kind=session_kind,
                 )
                 governance_token_id = token.token_id
                 # Pre-egress governance re-validation on the canonical single-shot
@@ -449,6 +480,12 @@ class AgentExecutionService:
         if agent_id == "cfo_agent":
             total, flags = _compute_budget_summary(getattr(validated_input, "line_items", []))
             validated_output = validated_output.model_copy(update={"total": total, "flags": flags})
+
+        # 5.5 Hand the structured output to an observing caller, if any. Ordered
+        # AFTER the cfo_agent recompute so the sink never sees a value the stored
+        # deliverable will contradict.
+        if output_sink is not None:
+            output_sink(validated_output)
 
         # 6. Format as markdown
         content_markdown = _format_markdown(agent_id, validated_input, validated_output)
@@ -1062,6 +1099,8 @@ class AgentExecutionService:
         validated_input: Any,
         user_id: str,
         on_behalf_of_principal: str | None = None,
+        # Forwarded verbatim to the mint; meaningful only alongside a principal.
+        session_kind: SessionKind = "cowork",
         # Threaded to the ToolProxy so an externally-mutating tool can derive a
         # RETRY-STABLE idempotency key. See ToolContext.hitl_id: `correlation_id`
         # is minted fresh per approval attempt (app/hitl/service.py:160), so it
@@ -1087,6 +1126,7 @@ class AgentExecutionService:
                 contract, org_id=org_id, principal_id=on_behalf_of_principal
             ),
             on_behalf_of_principal=on_behalf_of_principal,
+            session_kind=session_kind,
         )
 
         available = []

@@ -424,6 +424,65 @@ class CostLedgerDAL:
             await self.period_total_micros(org_id, provider, billing_period)
         )
 
+    async def run_total_micros(self, org_id: str, correlation_id: UUID) -> int:
+        """SUM of ``cost_micros`` for ONE run (charges net of reversals).
+
+        The money value of every LLM call made under a single correlation id --
+        which is what an autonomous run needs to put a truthful `cost_minor` on
+        its `work_journal` row (app/autonomy/runner.py). Deliberately keyed on
+        ``correlation_id`` rather than ``run_id``:
+
+          * ``run_id`` is the governance TOKEN id (cost_ledger.py:114). A run that
+            fails before the deliverable exists exposes no token id to the caller,
+            so a token-keyed read could not price a failed run at all;
+          * ``correlation_id`` is owned by the caller (execute()'s
+            ``correlation_id`` parameter) and is stamped on every ledger row the
+            run produces, so it prices the success AND failure paths identically.
+
+        Structurally IDENTICAL to ``org_period_total_micros`` -- tenant_session so
+        RLS scopes the SUM, ``cost_micros`` so reversals net out, COALESCE so a
+        run that spent nothing totals 0, exact integer micro-currency. Round to
+        minor units ONCE, via ``micros_to_minor``, at the call site.
+
+        NOTE: no index covers ``correlation_id`` on ``ai_cost_ledger`` today
+        (migration 0012 indexes idem / reconcile / org_time; 0016 adds org+period).
+        One query per completed autonomous run is negligible at pilot volume; this
+        wants an index before the whole fleet is scheduled.
+        """
+        async with self._db.tenant_session(org_id) as conn:
+            total = await conn.fetchval(
+                """
+                SELECT COALESCE(SUM(cost_micros), 0)
+                FROM ai_cost_ledger
+                WHERE correlation_id = $1
+                """,
+                correlation_id,
+            )
+        return int(total)
+
+    async def run_total_minor(self, org_id: str, correlation_id: UUID) -> int:
+        """One run's cost in MINOR units (cents), rounded exactly once.
+
+        The form `skylize.app` consumes (app/autonomy/runner.py writes it to
+        `work_journal.cost_minor`). It exists as a DAL method, rather than the app
+        layer calling ``micros_to_minor`` on ``run_total_micros`` itself, for two
+        reasons that point the same way:
+
+          * the import-linter contract "Application logic contains no SQL" forbids
+            `skylize.app` from importing `skylize.dal.cost_ledger` at all -- that
+            module reaches `dal.connection` and therefore asyncpg. Money helpers
+            are not exportable across that boundary;
+          * ADR-0006 makes the cents conversion "the ONLY rounding to cents in the
+            money path". Keeping it inside the ledger means the app layer cannot
+            grow a second, subtly different copy of it.
+
+        Rounds the AGGREGATE, never per row, exactly as ``micros_to_minor``
+        requires. Returns the signed value: a run whose charges were reversed nets
+        negative, and clamping is the caller's constraint to apply, not a truth the
+        ledger should hide.
+        """
+        return int(micros_to_minor(await self.run_total_micros(org_id, correlation_id)))
+
     async def org_period_total_micros(
         self, org_id: str, billing_period: str
     ) -> int:
