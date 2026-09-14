@@ -16,9 +16,15 @@ The worker therefore requires the postgres backend: a durable orchestrator
 writing its audit trail to a store that forgets on restart would be a lie, so
 ``build_activities`` fails closed on the memory backend instead.
 
-No workflow definitions are registered yet — they land with the LangGraph→
-Temporal engine; this worker already serves the activity task queue those
-workflows will call. Registration is activities-only, which Temporal supports.
+ONE workflow definition is registered: `AutonomousAgentRunWorkflow`
+(`autonomous.py`), the scheduled/triggered agent run. It is registered but NOT
+started — a workflow definition is inert until something starts it, and the only
+thing that does is a Temporal Schedule created by
+`scripts/create_autonomous_schedule.py`, an explicit operator action against a
+named org. Running this worker does not by itself cause any agent to run.
+
+The LangGraph→Temporal engine's own workflow definitions still land later; this
+worker continues to serve the activity task queue they will call.
 """
 
 from __future__ import annotations
@@ -33,6 +39,7 @@ from ....bootstrap import Container, build_container
 from ....config import Settings, get_settings
 from ....dal.workflows import PgWorkflowRepository
 from .activities import WorkflowActivities
+from .autonomous import AutonomousActivities, AutonomousAgentRunWorkflow
 from .judge import LLMJudge
 
 log = logging.getLogger("skylize.temporal_worker")
@@ -56,15 +63,33 @@ def build_activities(container: Container) -> WorkflowActivities:
     )
 
 
-def register_worker(client: Client, activities: WorkflowActivities, settings: Settings) -> Worker:
-    """Bind the activity methods to the task queue. Split from `run` so tests
-    can validate registration against a lazy (unconnected) client."""
+def register_worker(
+    client: Client,
+    activities: WorkflowActivities,
+    settings: Settings,
+    autonomous: AutonomousActivities | None = None,
+) -> Worker:
+    """Bind the workflow + activity methods to the task queue. Split from `run` so
+    tests can validate registration against a lazy (unconnected) client.
+
+    `autonomous` is optional so every pre-existing caller — and every test that
+    asserts the judge/run-step registration — keeps working unchanged. When it is
+    absent the autonomous ACTIVITY is not registered, which means a scheduled
+    workflow would start and then block on an activity nobody serves rather than
+    silently running with a half-built service. Failing visibly beats running
+    wrong.
+    """
+    autonomous_activities = (
+        [autonomous.run_autonomous_agent] if autonomous is not None else []
+    )
     return Worker(
         client,
         task_queue=settings.temporal_task_queue,
+        workflows=[AutonomousAgentRunWorkflow],
         activities=[
             activities.run_judge_verification,
             activities.write_run_step,
+            *autonomous_activities,
         ],
     )
 
@@ -76,10 +101,17 @@ async def run(settings: Settings | None = None) -> None:
     container = await build_container(settings)
     try:
         activities = build_activities(container)
+        # None only if the composition root failed to build it, which cannot
+        # happen on the postgres backend this worker already requires.
+        autonomous = (
+            AutonomousActivities(container.autonomous_runs)
+            if container.autonomous_runs is not None
+            else None
+        )
         client = await Client.connect(
             settings.temporal_address, namespace=settings.temporal_namespace
         )
-        worker = register_worker(client, activities, settings)
+        worker = register_worker(client, activities, settings, autonomous)
         log.info(
             "Temporal worker serving task_queue=%s at %s (namespace=%s)",
             settings.temporal_task_queue,

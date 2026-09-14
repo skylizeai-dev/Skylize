@@ -178,6 +178,21 @@ class AutonomousRunService:
         # missing value dressed up as zero.
         self._cost_source = cost_source
 
+    async def resolve_principal(self, *, org_id: str, agent_id: str) -> str:
+        """The human an autonomous run of `agent_id` in `org_id` would belong to.
+
+        The same resolution `run` performs, exposed so a caller can PRE-FLIGHT it
+        without executing anything. The schedule installer
+        (`scripts/create_autonomous_schedule.py`) uses it to refuse to install a
+        cadence for an org whose `human_owner` resolves to no account: such a
+        schedule would fire forever, fail every time, and write to no brief -- the
+        failure would be invisible exactly because no human is attached to it.
+
+        Raises the same `ContractNotAutonomous` / `PrincipalUnresolvable` as `run`.
+        """
+        contract = self._registry.resolve(agent_id)
+        return await self._resolver.resolve(org_id=org_id, contract=contract)
+
     async def run(self, request: AutonomousRunRequest) -> AutonomousRunOutcome:
         """Execute one triggered run to a terminal, journalled state.
 

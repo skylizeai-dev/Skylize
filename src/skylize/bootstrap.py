@@ -46,6 +46,8 @@ from .app.governance.broadcast import GovernanceBroadcast
 from .app.hitl.service import HitlQueueService
 from .app.notifications.slack import SlackApprovalNotifier
 from .app.orchestrator import LLMStepRunner, Orchestrator
+from .app.autonomy.principal import AutonomousPrincipalResolver
+from .app.autonomy.runner import AutonomousRunService
 from .app.principal.journal import JournalRepository, WorkJournal
 from .app.principal.provider import PrincipalAuthorityService, PrincipalRepository
 from .app.principal.spend import PostgresSpendRepository, SpendLedger
@@ -393,6 +395,12 @@ class Container:
     # None unless GCP is wired. NOT reachable from ToolProxy: see
     # app/gcp/trigger.py for why that edge would close a construction cycle.
     gcp_containment: "SpendCeilingContainmentTrigger | None" = None
+    # Runs an agent with NO human in the request path, and records the run in the
+    # resolved owner's work journal (app/autonomy/runner.py). Always constructed —
+    # it is inert until something TRIGGERS it, and this composition root registers
+    # no trigger. The Temporal worker and the schedule installer are the two
+    # processes that do, and both are explicit operator actions.
+    autonomous_runs: "AutonomousRunService | None" = None
 
     async def aclose(self) -> None:
         # LIFO, like ExitStack: consumers/subscribers are registered after the
@@ -895,6 +903,18 @@ async def build_container(settings: Settings | None = None) -> Container:
         # FIRST - while the database and bus they write through are open.
         closers.append(tool_proxy.drain_containment_tasks)
 
+    # Autonomous runs. Built LAST because it composes agent_execution, and INERT
+    # by construction: it runs only when a trigger calls it, and nothing here
+    # registers one. `cost_source` is the cost ledger on Postgres and None on the
+    # memory backend, where a run genuinely costs nothing to read back.
+    autonomous_runs = AutonomousRunService(
+        registry=registry,
+        execution=agent_execution,
+        resolver=AutonomousPrincipalResolver(user_repo),
+        journal=work_journal,
+        cost_source=cost_ledger,
+    )
+
     return Container(
         settings=settings, bus=bus, audit=audit, authority=authority,
         orchestrator=orchestrator, tenants=tenants, api_keys=api_keys,
@@ -908,4 +928,5 @@ async def build_container(settings: Settings | None = None) -> Container:
         wif_signing_key=wif_signing_key, wif_repo=wif_repo,
         github_app_key=github_app_key, github_app_repo=github_app_repo,
         gcp_containment=gcp_containment,
+        autonomous_runs=autonomous_runs,
     )
