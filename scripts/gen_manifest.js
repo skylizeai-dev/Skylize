@@ -1,3 +1,40 @@
+// Regenerates docs/03_agents/_generation_manifest.csv from the agent docs tree.
+//
+// WHAT `escalation_path` IS, AND WHAT IT IS NOT
+// --------------------------------------------
+// Every column here is DERIVED FROM DIRECTORY LAYOUT. Nothing is authored, and
+// nothing is read from the runtime agent contracts. In particular `chain()`
+// below walks up from a file's directory collecting ONE agent per rank
+// (worker < manager < director < vp < executive) and appends `human_owner`.
+//
+// So `escalation_path` is a picture of where a markdown file SITS. It is NOT
+// the governance load path: the running registry is seeded from the code-level
+// contracts in src/skylize/contracts/mvp/ (contracts/registry.py:23), and
+// nothing imports this CSV at runtime.
+//
+// The two disagree, and as of 2026-09-14 the disagreement is EXPECTED rather
+// than drift to be fixed. Of 23 live contracts, 15 have a row here; of those 15,
+// 14 carry a different escalation_path. Two structural reasons, neither an error:
+//
+//   * this model emits at most one hop per rank, so a peer-rank hop is
+//     inexpressible. The contracts put `ceo` between `cmo` and `human_owner`;
+//     both are rank `executive`, so `chain()` structurally cannot emit it. That
+//     accounts for 10 of the 14;
+//   * where several agents share a rank in an ancestor directory, `chain()`
+//     picks one. For fraud_detection_agent it picks manager_incident_response /
+//     director_ai_safety where the contract names manager_security_operations /
+//     director_cybersecurity. Both pairs are real files in the same tree.
+//
+// What makes the divergence SAFE to leave: the TERMINAL element is `human_owner`
+// in 100% of rows on both sides, and the terminal element is the only thing the
+// runtime reads (app/autonomy/principal.py resolves a run's principal from it).
+// The two sources disagree about the middle of the chain and agree about its end.
+//
+// Do NOT hand-edit the CSV to "reconcile" it with the contracts: this script
+// regenerates the column from the directory tree and would silently revert the
+// edit. Changing the derivation means changing the tree or changing this model,
+// and either is a design decision about the org chart, not a docs fix.
+
 const fs = require("fs"), path = require("path");
 const ROOT = "docs/03_agents";
 const SKIP = new Set([
