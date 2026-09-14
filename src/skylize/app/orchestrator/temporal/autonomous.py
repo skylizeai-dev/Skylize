@@ -21,6 +21,30 @@ do I/O. The agent run is nothing but I/O — LLM calls, Postgres writes. So:
 `AutonomousAgentRunWorkflow` therefore contains no database handle, no container,
 and no clock read other than Temporal's own.
 
+THIS MODULE IMPORTS NO APPLICATION CODE AT MODULE LEVEL, and that is load-bearing
+rather than stylistic. The sandbox re-imports a workflow's entire module tree when
+it validates the definition, and it refuses any module that does non-deterministic
+work at import time. Reaching `skylize.app.autonomy` from here pulls the whole
+application graph in behind it -- which transitively reaches `rich`, whose
+`style.py:22` calls `random.getrandbits(24)` at import. Worker construction then
+fails with RestrictedWorkflowAccessError before a single run happens. This was
+found by running a real worker against a real Temporal server, not by reading.
+
+Two things follow, and BOTH are needed:
+
+  * the application imports live INSIDE the activity method, which runs outside
+    the sandbox;
+  * the worker must be built with `sandbox_runner()` below, which marks `skylize`
+    as a passthrough module. Deferring this module's own imports is not enough on
+    its own, because the sandbox imports a workflow by its full dotted path and so
+    re-executes every PARENT package -- and
+    `app/orchestrator/__init__.py:5-7` imports the orchestrator, the runner and
+    `runtime.agent_runner`, which is the whole graph again.
+
+Passthrough is safe precisely because of the split above: the workflow performs no
+application work, so reusing the already-imported modules rather than re-executing
+them cannot make replay non-deterministic.
+
 WHY THE CORRELATION ID IS DERIVED, NOT MINTED
 ---------------------------------------------
 `uuid4()` inside a workflow is non-deterministic and would change on replay. More
@@ -43,17 +67,13 @@ from __future__ import annotations
 import dataclasses
 import uuid
 from datetime import timedelta
+from typing import TYPE_CHECKING, Any
 
 from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
 
-# Imported under `imports_passed_through` so the workflow sandbox does not
-# re-import (and re-validate) the whole application tree on every replay. Only
-# the activity below touches these; the workflow itself uses none of them.
-with workflow.unsafe.imports_passed_through():
-    from ....app.autonomy.pilot import PILOT_CRON, assert_pilot_agent
+if TYPE_CHECKING:  # never executed, so never seen by the workflow sandbox
     from ....app.autonomy.runner import AutonomousRunService
-    from ....app.autonomy.triggers import run_scheduled
 
 #: Deterministic namespace for `uuid5(NAMESPACE, workflow_id)`. A fixed constant,
 #: never regenerated: changing it would silently re-correlate every future run and
@@ -113,7 +133,7 @@ class AutonomousActivities:
     through a global.
     """
 
-    def __init__(self, service: AutonomousRunService) -> None:
+    def __init__(self, service: "AutonomousRunService") -> None:
         self._service = service
 
     @activity.defn(name=RUN_AUTONOMOUS_AGENT)
@@ -129,6 +149,11 @@ class AutonomousActivities:
         would make Temporal re-run a job that already spent money and already told
         the human it went wrong.
         """
+        # Deferred: see the module docstring. An activity runs outside the
+        # sandbox, so these are ordinary imports here and invisible to it.
+        from ....app.autonomy.pilot import assert_pilot_agent
+        from ....app.autonomy.triggers import run_scheduled
+
         assert_pilot_agent(request.agent_id)
         correlation_id = correlation_for(activity.info().workflow_id)
         outcome = await run_scheduled(
@@ -181,6 +206,29 @@ class AutonomousAgentRunWorkflow:
         )
 
 
+def sandbox_runner() -> "Any":
+    """The workflow runner a worker serving this workflow MUST be built with.
+
+    Marks `skylize` as a passthrough module, which is exactly what the sandbox's
+    own error message prescribes for "code from a module not used in a workflow or
+    known to only be used deterministically from a workflow". Both clauses hold
+    here: the workflow body touches no application module at all.
+
+    Without it, `Worker(...)` raises RestrictedWorkflowAccessError at CONSTRUCTION
+    -- before any run, and with a message that names `random.getrandbits` rather
+    than the import chain that reached it. Wrapped in a named function so every
+    worker gets the same configuration and the reason travels with it.
+    """
+    from temporalio.worker.workflow_sandbox import (
+        SandboxedWorkflowRunner,
+        SandboxRestrictions,
+    )
+
+    return SandboxedWorkflowRunner(
+        restrictions=SandboxRestrictions.default.with_passthrough_modules("skylize")
+    )
+
+
 def schedule_id_for(org_id: str, agent_id: str) -> str:
     """The Schedule's id. One per (org, agent), so re-running the installer is
     an update rather than a duplicate cadence."""
@@ -188,14 +236,19 @@ def schedule_id_for(org_id: str, agent_id: str) -> str:
 
 
 def build_schedule(
-    *, org_id: str, agent_id: str, task_queue: str, cron: str = PILOT_CRON
-) -> "tuple[str, object]":
+    *, org_id: str, agent_id: str, task_queue: str, cron: str | None = None
+) -> "tuple[str, Any]":
     """`(schedule_id, Schedule)` for one agent's cadence.
 
     Built here rather than in the installer script so the cadence, the workflow
     type and the id scheme live next to the workflow they start, and so a test can
     assert the shape without a Temporal connection.
+
+    `cron` defaults to the pilot cadence, resolved lazily for the same reason the
+    activity's imports are deferred — this module must not reach application code
+    at import time.
     """
+    from ....app.autonomy.pilot import PILOT_CRON
     from temporalio.client import (
         Schedule,
         ScheduleActionStartWorkflow,
@@ -204,6 +257,7 @@ def build_schedule(
         ScheduleSpec,
     )
 
+    cron = cron if cron is not None else PILOT_CRON
     sched_id = schedule_id_for(org_id, agent_id)
     return sched_id, Schedule(
         action=ScheduleActionStartWorkflow(

@@ -39,7 +39,11 @@ from ....bootstrap import Container, build_container
 from ....config import Settings, get_settings
 from ....dal.workflows import PgWorkflowRepository
 from .activities import WorkflowActivities
-from .autonomous import AutonomousActivities, AutonomousAgentRunWorkflow
+from .autonomous import (
+    AutonomousActivities,
+    AutonomousAgentRunWorkflow,
+    sandbox_runner,
+)
 from .judge import LLMJudge
 
 log = logging.getLogger("skylize.temporal_worker")
@@ -85,6 +89,9 @@ def register_worker(
     return Worker(
         client,
         task_queue=settings.temporal_task_queue,
+        # REQUIRED whenever a workflow lives under `skylize.app.*` — see
+        # autonomous.sandbox_runner for what breaks without it.
+        workflow_runner=sandbox_runner(),
         workflows=[AutonomousAgentRunWorkflow],
         activities=[
             activities.run_judge_verification,
