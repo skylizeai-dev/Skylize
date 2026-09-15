@@ -38,8 +38,9 @@ Two things follow, and BOTH are needed:
     as a passthrough module. Deferring this module's own imports is not enough on
     its own, because the sandbox imports a workflow by its full dotted path and so
     re-executes every PARENT package -- and
-    `app/orchestrator/__init__.py:5-7` imports the orchestrator, the runner and
-    `runtime.agent_runner`, which is the whole graph again.
+    `app/orchestrator/__init__.py:5` imports the orchestrator, which reaches its
+    runner and `app/deliverables/service.py`'s `import structlog`, which is the
+    whole graph again.
 
 Passthrough is safe precisely because of the split above: the workflow performs no
 application work, so reusing the already-imported modules rather than re-executing
@@ -214,10 +215,15 @@ def sandbox_runner() -> "Any":
     known to only be used deterministically from a workflow". Both clauses hold
     here: the workflow body touches no application module at all.
 
-    Without it, `Worker(...)` raises RestrictedWorkflowAccessError at CONSTRUCTION
-    -- before any run, and with a message that names `random.getrandbits` rather
-    than the import chain that reached it. Wrapped in a named function so every
-    worker gets the same configuration and the reason travels with it.
+    Without it, `Worker(...)` fails at CONSTRUCTION -- before any run -- and WHICH
+    error it fails with depends only on how far the re-import gets. `governance/
+    authority.py:23` reaches `cryptography`'s native `_rust` extension, which
+    CPython cannot re-exec against the sandbox's substituted module dict
+    (`SystemError` out of `exec_dynamic`); past that, the chain reaches
+    `rich.style`'s import-time `random.getrandbits`
+    (`RestrictedWorkflowAccessError`). Neither is a failure the worker recovers
+    from. Wrapped in a named function so every worker gets the same configuration
+    and the reason travels with it.
     """
     from temporalio.worker.workflow_sandbox import (
         SandboxedWorkflowRunner,

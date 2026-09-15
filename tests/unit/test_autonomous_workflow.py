@@ -42,20 +42,39 @@ async def test_the_workflow_passes_sandbox_validation() -> None:
     sandbox_runner().prepare_workflow(_defn())  # must not raise
 
 
-async def test_without_the_passthrough_the_sandbox_rejects_it() -> None:
-    """Pins WHY `sandbox_runner` exists, so nobody deletes it as ceremony.
+async def test_without_the_skylize_passthrough_the_sandbox_rejects_it() -> None:
+    """Pins WHY `sandbox_runner` marks `skylize` passthrough, not as ceremony.
 
-    The default runner re-imports the workflow's parent packages --
-    `app/orchestrator/__init__.py` pulls in the orchestrator, the runner and
-    `runtime.agent_runner`, which transitively reaches a dependency that calls
-    `random.getrandbits` at import time.
+    The sandbox imports a workflow by its full dotted path, so it re-executes every
+    PARENT package. `app/orchestrator/__init__.py:5` reaches, via the orchestrator
+    and its runner, `app/deliverables/service.py:19`'s `import structlog` --
+    and structlog pulls `rich.style`, which runs `count(getrandbits(24))` at module
+    scope. `random` is restricted at IMPORT time (it is not `only_runtime`, unlike
+    `time` and `os`), so re-importing the graph is rejected. That is the rule this
+    test is here to hold.
+
+    WHY `cryptography` IS PASSED THROUGH: to isolate that restriction as the single
+    variable under test. It is not what `sandbox_runner` is for.
+    `app/governance/authority.py:23` imports `cryptography.hazmat.bindings._rust`,
+    a NATIVE extension, and CPython cannot re-exec one against the sandbox's
+    substituted module dict -- `exec_dynamic` raises `SystemError` before any
+    restriction is consulted. Left in the sandbox, this test would assert a CPython
+    implementation accident instead of the determinism rule, which is exactly how
+    it broke: #13 deleted `runtime.agent_runner` from the orchestrator's `__init__`,
+    which reordered the chain so `cryptography` was reached first and the
+    `SystemError` masked the restriction. The restriction never stopped being true.
     """
+    from temporalio.worker.workflow_sandbox import SandboxRestrictions
     from temporalio.worker.workflow_sandbox._restrictions import (
         RestrictedWorkflowAccessError,
     )
 
-    with pytest.raises(RestrictedWorkflowAccessError):
-        SandboxedWorkflowRunner().prepare_workflow(_defn())
+    with pytest.raises(RestrictedWorkflowAccessError, match="random.getrandbits"):
+        SandboxedWorkflowRunner(
+            restrictions=SandboxRestrictions.default.with_passthrough_modules(
+                "cryptography"
+            )
+        ).prepare_workflow(_defn())
 
 
 def test_the_correlation_id_is_stable_across_retries() -> None:
