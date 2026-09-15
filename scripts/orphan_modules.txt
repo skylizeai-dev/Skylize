@@ -11,5 +11,4 @@ skylize.schemas.agents.creative
 skylize.schemas.agents.executive
 skylize.schemas.agents.growth
 skylize.schemas.agents.sdr
-skylize.schemas.agents.security
 skylize.schemas.workflow
