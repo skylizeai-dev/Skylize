@@ -94,19 +94,104 @@ def _fraud_low_confidence(output: Any) -> tuple[bool, str] | None:
     )
 
 
+# --------------------------------------------------------------------------- #
+# brand_guardian_agent
+#
+# Its output is `BrandVerdictOut{brief_id, outcome, violations, confidence}`
+# (schemas/agents/brand.py:22-26) and its contract declares exactly ONE trigger,
+# BRAND_LEGAL_SENSITIVE (contracts/mvp/brand.py:32).
+#
+# ONE TRIGGER, THREE CONDITIONS -- WHY THE PREDICATE IS COMPOSITE. The pilot got
+# one rule per trigger because it declares two. This contract declares one, so
+# the choice is a composite predicate under BRAND_LEGAL_SENSITIVE or inventing
+# triggers the contract never claimed. It is the former, because the contract is
+# the source of truth for WHICH boundaries exist and a rule table must not add to
+# it. Registering LOW_CONFIDENCE_IRREVERSIBLE here instead would be strictly
+# worse: `evaluate_attention` only consults rules whose trigger the contract
+# declares, so it would be DEAD CODE that never fires -- and it would read, to
+# the next person, as calibrated coverage that does not exist.
+#
+# Each condition is genuinely a brand/legal judgement a human adjudicates, which
+# is what the trigger means. Each contributes its own reason string, so the brief
+# says WHICH one fired rather than merely that something did.
+# --------------------------------------------------------------------------- #
+
+#: `outcome` is documented as 'approve' | 'reject' (schemas/agents/brand.py:24).
+#: Only 'approve' is a clean pass. Case-folded for the same reason as the pilot's:
+#: the schema types it `str`, so "Approve" must not read as a flag.
+_BRAND_CLEAR_OUTCOME = "approve"
+
+#: Below this, the verdict is too uncertain to stand unreviewed.
+#:
+#: 0.85, NOT the pilot's 0.7, and the gap is argued rather than inherited:
+#:
+#:  * THE PILOT HAS A PRESSURE VALVE THIS AGENT DOES NOT. `FraudVerdictOut.outcome`
+#:    is 'allow' | 'reject' | 'review' -- three values, one of which IS "a human
+#:    should look". Its 0.7 therefore only governs how certain an `allow` must be,
+#:    with `review` available whenever the model wants to hedge. `BrandVerdictOut`
+#:    is BINARY: approve or reject, no middle. Confidence is the only channel this
+#:    agent has for "I am not sure", so this threshold carries work the pilot's
+#:    does not and has to sit higher to do it.
+#:  * THE CONTRACT'S OWN POSTURE. `failure_mode=FAIL_CLOSED` (contracts/mvp/brand.py:29)
+#:    -- when in doubt, stop. A threshold at or below the pilot's would let this
+#:    agent's uncertainty pass more freely than a contract that fails closed says
+#:    it should.
+#:  * THE COSTS ARE NOT SYMMETRIC. A missed brand/legal violation ships in content
+#:    that goes out to an audience and is slow and expensive to retract. An
+#:    unnecessary flag costs one line in one human's brief. Where the error costs
+#:    differ by that much, the threshold belongs on the cheap side.
+#:
+#: Named here, like the pilot's, so the owner moves it in one place -- and so the
+#: NEXT agent does not inherit 0.85 by accident either.
+_BRAND_LOW_CONFIDENCE = 0.85
+
+
+def _brand_needs_a_human(output: Any) -> tuple[bool, str] | None:
+    """BRAND_LEGAL_SENSITIVE: the verdict is a call a human should confirm."""
+    reasons: list[str] = []
+
+    outcome = getattr(output, "outcome", None)
+    if isinstance(outcome, str) and outcome.strip().lower() != _BRAND_CLEAR_OUTCOME:
+        reasons.append(f"outcome={outcome!r} is not {_BRAND_CLEAR_OUTCOME!r}")
+
+    # Checked INDEPENDENTLY of `outcome`, which is the non-obvious one. An
+    # `approve` that still lists violations is the agent saying "shippable, but
+    # here is what is wrong with it" -- a named brand/legal defect. Letting that
+    # land in `done_while_away` because the verdict was nominally clean would
+    # file the agent's own findings where nobody reads them.
+    violations = getattr(output, "violations", None)
+    if isinstance(violations, (list, tuple)) and violations:
+        shown = ", ".join(str(v) for v in violations[:3])
+        more = f" (+{len(violations) - 3} more)" if len(violations) > 3 else ""
+        reasons.append(f"{len(violations)} violation(s): {shown}{more}")
+
+    confidence = getattr(output, "confidence", None)
+    if isinstance(confidence, (int, float)) and confidence < _BRAND_LOW_CONFIDENCE:
+        reasons.append(f"confidence={confidence} is below {_BRAND_LOW_CONFIDENCE}")
+
+    if not reasons:
+        return None
+    return True, "; ".join(reasons)
+
+
 #: agent_id -> {declared trigger: predicate}.
 #:
-#: PILOT SCOPE, DELIBERATELY. Only `fraud_detection_agent` has rules. An agent
-#: absent from this table, or a declared trigger with no rule, contributes no
-#: attention signal -- `evaluate_attention` returns "no boundary reached" and the
-#: run lands in `done_while_away`. That is the correct posture for a pilot: the
-#: mechanism is generic, the calibration is per-agent, and an uncalibrated agent
-#: must not be silently treated as if it had been calibrated. Registering the
-#: other 22 means adding entries here, not changing any logic.
+#: SCOPED, DELIBERATELY. Only the agents in `pilot.PILOT_AGENT_IDS` have rules,
+#: and `assert_pilot_agent` refuses to trigger one that does not. An agent absent
+#: from this table, or a declared trigger with no rule, contributes no attention
+#: signal -- `evaluate_attention` returns "no boundary reached" and the run lands
+#: in `done_while_away`. That is the correct posture: the mechanism is generic,
+#: the calibration is per-agent, and an uncalibrated agent must not be silently
+#: treated as if it had been calibrated. Registering the other 21 means adding
+#: entries here, not changing any logic -- which is exactly what adding the
+#: second one required.
 ATTENTION_RULES: Mapping[str, Mapping[HumanInLoopTrigger, AttentionRule]] = {
     "fraud_detection_agent": {
         HumanInLoopTrigger.SECURITY_SEVERITY_HIGH: _fraud_outcome_not_clear,
         HumanInLoopTrigger.LOW_CONFIDENCE_IRREVERSIBLE: _fraud_low_confidence,
+    },
+    "brand_guardian_agent": {
+        HumanInLoopTrigger.BRAND_LEGAL_SENSITIVE: _brand_needs_a_human,
     },
 }
 

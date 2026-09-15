@@ -16,8 +16,8 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
-from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Mapping
 
 if TYPE_CHECKING:
     from .dal.connection import Database
@@ -401,6 +401,18 @@ class Container:
     # no trigger. The Temporal worker and the schedule installer are the two
     # processes that do, and both are explicit operator actions.
     autonomous_runs: "AutonomousRunService | None" = None
+    # agent_id -> the READ-ONLY DAL that harvests that agent's scheduled input
+    # (audit_log for the fraud sweep, deliverables for the content review). Empty
+    # on the memory backend, where neither table exists.
+    #
+    # BUILT HERE RATHER THAN IN THE WORKER because the import-linter contract
+    # "Application logic contains no SQL" forbids `skylize.app` from reaching
+    # `dal.connection`, and every signal DAL does transitively. The worker lives
+    # under `skylize.app.orchestrator`, so constructing them there is a boundary
+    # violation the gate catches; this composition root is the layer allowed to
+    # know about both sides. The activity that consumes them depends only on the
+    # `harvest_for` seam, never on these types.
+    signal_sources: "Mapping[str, Any]" = field(default_factory=dict)
 
     async def aclose(self) -> None:
         # LIFO, like ExitStack: consumers/subscribers are registered after the
@@ -730,6 +742,9 @@ async def build_container(settings: Settings | None = None) -> Container:
     # (migration 0014): constructed whenever the postgres pool exists (None on
     # memory — no durable store). Shared by the LLM egress gate below and the
     # read-only spend position route (edge/routes/spend.py) via the Container.
+    from .app.autonomy.pilot import CONTENT_REVIEW_AGENT_ID, PILOT_AGENT_ID
+    from .dal.activity_signals import AuditActivitySignalDAL
+    from .dal.content_signals import DeliverableContentSignalDAL
     from .dal.cost_ledger import CostLedgerDAL
     from .dal.org_autonomy_mode import OrgAutonomyModeDAL
     from .dal.org_spend_ceiling import OrgSpendCeilingDAL
@@ -737,6 +752,19 @@ async def build_container(settings: Settings | None = None) -> Container:
     cost_ledger = CostLedgerDAL(db) if db is not None else None
     spend_ceiling_dal = OrgSpendCeilingDAL(db) if db is not None else None
     autonomy_mode_dal = OrgAutonomyModeDAL(db) if db is not None else None
+    # Read-only signal sources for the scheduled autonomous shapes. Constructed
+    # unconditionally on the postgres backend and EMPTY on memory, which is the
+    # truth there: neither `audit_log` nor `deliverables` exists to read. Holding
+    # them costs nothing while no trigger runs — like `autonomous_runs` itself,
+    # they are inert until the Temporal worker serves the activity.
+    signal_sources: "dict[str, Any]" = (
+        {
+            PILOT_AGENT_ID: AuditActivitySignalDAL(db),
+            CONTENT_REVIEW_AGENT_ID: DeliverableContentSignalDAL(db),
+        }
+        if db is not None
+        else {}
+    )
 
     llm: LLMGateway
     if settings.anthropic_api_key:
@@ -929,4 +957,5 @@ async def build_container(settings: Settings | None = None) -> Container:
         github_app_key=github_app_key, github_app_repo=github_app_repo,
         gcp_containment=gcp_containment,
         autonomous_runs=autonomous_runs,
+        signal_sources=signal_sources,
     )

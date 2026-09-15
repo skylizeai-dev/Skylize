@@ -68,14 +68,13 @@ from __future__ import annotations
 import dataclasses
 import uuid
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Mapping
 
 from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
 
 if TYPE_CHECKING:  # never executed, so never seen by the workflow sandbox
     from ....app.autonomy.runner import AutonomousRunService
-    from ....app.autonomy.signals import ActivitySignalSource
 
 #: Deterministic namespace for `uuid5(NAMESPACE, workflow_id)`. A fixed constant,
 #: never regenerated: changing it would silently re-correlate every future run and
@@ -88,6 +87,15 @@ RUN_AUTONOMOUS_AGENT = "run_autonomous_agent"
 
 #: Workflow type name, pinned for the same reason.
 AUTONOMOUS_AGENT_RUN_WORKFLOW = "AutonomousAgentRunWorkflow"
+
+#: `AutonomousRunResult.status` for a firing that had nothing to act on.
+#:
+#: NOT one of `runner.RunStatus`'s four, and that is the point: those four are
+#: TERMINAL STATES OF A RUN and every one of them writes a journal row. This is
+#: the absence of a run -- no principal resolved, no contract dispatched, no money
+#: spent, no row. Kept distinct so a Temporal history showing hundreds of these
+#: reads as "nothing to review", never as "hundreds of runs completed".
+SKIPPED_NO_SIGNAL = "skipped_no_signal"
 
 
 @dataclasses.dataclass
@@ -138,14 +146,20 @@ class AutonomousActivities:
     def __init__(
         self,
         service: "AutonomousRunService",
-        signals: "ActivitySignalSource | None" = None,
+        signals: "Mapping[str, Any] | None" = None,
     ) -> None:
         self._service = service
-        #: Optional so a worker built without one keeps the previous behaviour
-        #: exactly: `harvest_activity_signal` returns None and `run_scheduled`
-        #: falls back to the declared sweep descriptor. Wiring the source is what
-        #: turns the sweep from a review request into counted evidence.
-        self._signals = signals
+        #: agent_id -> that agent's signal source. A MAP rather than one source,
+        #: because the shape of a signal is a property of the agent's own input
+        #: schema -- the fraud sweep reads `audit_log`, the content review reads
+        #: `deliverables`, and neither could use the other's reader. This class
+        #: never learns which is which: it hands the looked-up source to
+        #: `signals.harvest_for`, the one agent-aware seam.
+        #:
+        #: Optional, and a missing entry is not an error here. What an absent
+        #: signal MEANS is per-agent and is decided by `pilot.fallback_input_for`
+        #: below, not by this transport.
+        self._signals = dict(signals or {})
 
     @activity.defn(name=RUN_AUTONOMOUS_AGENT)
     async def run_autonomous_agent(
@@ -164,22 +178,46 @@ class AutonomousActivities:
         # sandbox, so these are ordinary imports here and invisible to it.
         from datetime import datetime, timezone
 
-        from ....app.autonomy.pilot import assert_pilot_agent
-        from ....app.autonomy.signals import harvest_activity_signal
+        from ....app.autonomy.pilot import assert_pilot_agent, fallback_input_for
+        from ....app.autonomy.signals import harvest_for
         from ....app.autonomy.triggers import run_scheduled
 
         assert_pilot_agent(request.agent_id)
         correlation_id = correlation_for(activity.info().workflow_id)
         # Harvested here rather than inside the workflow: reading a database is
-        # I/O, and the workflow body must stay deterministic for replay. Returns
-        # None when there is no source or the read fails, and `run_scheduled`
-        # then falls back to the declared descriptor -- a sweep that cannot read
-        # its window still runs and still says which input it got.
-        input_data = await harvest_activity_signal(
-            self._signals,
+        # I/O, and the workflow body must stay deterministic for replay.
+        input_data = await harvest_for(
+            request.agent_id,
+            self._signals.get(request.agent_id),
             org_id=request.org_id,
             now=datetime.now(timezone.utc),
         )
+        if input_data is None:
+            # No harvested signal. Whether that is survivable is the AGENT's
+            # property, not this transport's: the fraud sweep declares a
+            # descriptor and still runs on it, the content review declares none
+            # because a verdict about content that does not exist is not a
+            # verdict. Only the second case reaches the branch below.
+            input_data = fallback_input_for(request.agent_id)
+        if input_data is None:
+            # SKIPPED, and deliberately not journalled. A row per quiet firing
+            # would put four lines an hour in a human's brief saying nothing
+            # happened, which is the noise that makes people stop reading a
+            # brief -- the same reasoning `attention.py` opens with. Returning
+            # normally (rather than raising) is what stops Temporal retrying a
+            # firing that had nothing to do.
+            activity.logger.info(
+                "autonomous_run_skipped_no_signal agent_id=%s org_id=%s schedule_id=%s",
+                request.agent_id, request.org_id, request.schedule_id,
+            )
+            return AutonomousRunResult(
+                status=SKIPPED_NO_SIGNAL,
+                principal_id="",
+                correlation_id=str(correlation_id),
+                requires_attention=False,
+                cost_minor=0,
+                journal_seq=None,
+            )
         outcome = await run_scheduled(
             self._service,
             org_id=request.org_id,
@@ -274,11 +312,14 @@ def build_schedule(
     type and the id scheme live next to the workflow they start, and so a test can
     assert the shape without a Temporal connection.
 
-    `cron` defaults to the pilot cadence, resolved lazily for the same reason the
-    activity's imports are deferred — this module must not reach application code
-    at import time.
+    `cron` defaults to THIS AGENT's declared cadence, not to a module-level
+    default — the two allowlisted agents run at different rates for reasons
+    argued in `pilot.py`, and a shared default would silently put a
+    one-item-per-firing agent on a window agent's hourly cadence. Resolved
+    lazily for the same reason the activity's imports are deferred: this module
+    must not reach application code at import time.
     """
-    from ....app.autonomy.pilot import PILOT_CRON
+    from ....app.autonomy.pilot import cron_for
     from temporalio.client import (
         Schedule,
         ScheduleActionStartWorkflow,
@@ -287,7 +328,7 @@ def build_schedule(
         ScheduleSpec,
     )
 
-    cron = cron if cron is not None else PILOT_CRON
+    cron = cron if cron is not None else cron_for(agent_id)
     sched_id = schedule_id_for(org_id, agent_id)
     return sched_id, Schedule(
         action=ScheduleActionStartWorkflow(

@@ -111,7 +111,9 @@ async def run(settings: Settings | None = None) -> None:
         # None only if the composition root failed to build it, which cannot
         # happen on the postgres backend this worker already requires.
         autonomous = (
-            AutonomousActivities(container.autonomous_runs)
+            AutonomousActivities(
+                container.autonomous_runs, container.signal_sources
+            )
             if container.autonomous_runs is not None
             else None
         )

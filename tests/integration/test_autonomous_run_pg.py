@@ -47,7 +47,7 @@ from httpx import ASGITransport, AsyncClient
 
 from skylize.app.audit.service import AuditService
 from skylize.app.autonomy.errors import PrincipalUnresolvable
-from skylize.app.autonomy.pilot import PILOT_AGENT_ID
+from skylize.app.autonomy.pilot import CONTENT_REVIEW_AGENT_ID, PILOT_AGENT_ID
 from skylize.app.autonomy.runner import (
     KIND_COMPLETED,
     KIND_DEFERRED,
@@ -676,4 +676,338 @@ async def test_a_harvested_audit_signal_reaches_the_agent_and_is_attributed(
             await container.aclose()
     finally:
         await admin_conn.execute("TRUNCATE audit_log")
+        await _cleanup(admin_conn, org)
+
+
+# ---------------------------------------------------------------------------
+# THE SECOND AGENT: brand_guardian_agent, on real authored content.
+#
+# The mechanism is the same runner, resolver and journal the pilot uses. What is
+# different is everything agent-specific: a different input SHAPE (one piece of
+# content, not counts over a window), a different SOURCE (`deliverables`, not
+# `audit_log`) and a different CALIBRATION (0.85, not 0.7).
+#
+# The content is produced by a REAL live-path agent run rather than inserted by
+# hand -- `ad_copy_agent` executes, writes its deliverable, and the review sweep
+# then finds that row. So the thing under review is a row the product actually
+# produced, not a fixture shaped to be found.
+# ---------------------------------------------------------------------------
+
+#: A clean brand verdict: approved, nothing named, confident. Trips none of the
+#: three conditions, so it must land in done_while_away UNflagged.
+CLEAN_BRAND_VERDICT = {
+    "outcome": "approve",
+    "violations": [],
+    "confidence": 0.96,
+}
+
+
+def _assert_brand_manifest_is_covered() -> None:
+    """brand_guardian_agent's manifest is the same two scopes as the pilot's, so
+    `_seed_owner`'s grants already cover it. Asserted rather than assumed."""
+    from skylize.contracts.registry import MVP_REGISTRY
+
+    contract = MVP_REGISTRY.resolve(CONTENT_REVIEW_AGENT_ID)
+    assert {g.tool_id for g in contract.allowed_tools} == set(MANIFEST), (
+        "the owner's seeded grants no longer cover this agent's manifest; the "
+        "per-employee mint intersection would be empty and the run would fail "
+        "for a reason unrelated to what this test measures"
+    )
+
+
+async def _produce_real_content(
+    container, org: str, owner_id: uuid.UUID, app_db: Database
+) -> uuid.UUID:
+    """Run `ad_copy_agent` through the LIVE path and return its deliverable id.
+
+    Reads the row back through the SWEEP's pool before returning. The write goes
+    through the container's pool and the sweep reads through `app_db`'s, so this
+    separates "no content was produced" from "the sweep could not see it" -- two
+    different bugs with the same symptom.
+    """
+    row = await container.agent_execution.execute(
+        org_id=org,
+        agent_id="ad_copy_agent",
+        input_data={
+            "brief_id": str(uuid.uuid4()),
+            "hook": "Never pay full price again",
+            "product": "Skylize",
+        },
+        user_id=str(owner_id),
+    )
+    async with app_db.tenant_session(org) as conn:
+        seen = await conn.fetchrow(
+            "SELECT id, agent_id, created_at FROM deliverables "
+            "WHERE org_id=$1 AND id=$2",
+            org, row.id,
+        )
+    assert seen is not None, (
+        f"deliverable {row.id} was written through the container's pool but is "
+        f"not visible to the sweep's pool"
+    )
+    assert seen["agent_id"] == "ad_copy_agent"
+    return row.id
+
+
+@requires_redis
+@requires_app_role
+async def test_the_content_review_runs_on_real_authored_content_and_reaches_the_brief(
+    app_db, admin_conn, fake_provider
+) -> None:
+    from skylize.app.autonomy.signals import harvest_content_signal
+    from skylize.dal.content_signals import DeliverableContentSignalDAL
+
+    base_url, fake = fake_provider
+    org = _org()
+    try:
+        _assert_brand_manifest_is_covered()
+        await _seed_price(admin_conn)
+        await _seed_tenant(admin_conn, org)
+        await _seed_ceiling(app_db, org)
+        owner_id = await _seed_owner(admin_conn, org)
+        await _seed_non_owner(admin_conn, org)
+
+        app, container = await _build(base_url, org, governed=False)
+        try:
+            # 1. REAL CONTENT, produced by a real agent run through the live path.
+            fake.program(
+                success(
+                    text=json.dumps({
+                        "brief_id": str(uuid.uuid4()),
+                        "variants": [
+                            "Buy now, pay never.", "Half price, all the time.",
+                        ],
+                    }),
+                    message_id="msg_adcopy_0001",
+                ),
+            )
+            deliverable_id = await _produce_real_content(container, org, owner_id, app_db)
+
+            # 2. The sweep finds it -- as the RLS-subject app role, through the
+            #    same DAL the worker is wired with.
+            signal = await harvest_content_signal(
+                DeliverableContentSignalDAL(app_db),
+                org_id=org,
+                reviewer_agent_id=CONTENT_REVIEW_AGENT_ID,
+                now=datetime.now(timezone.utc),
+            )
+            assert signal is not None, "the source must find the content just produced"
+            assert signal["brief_id"] == str(deliverable_id)
+            assert signal["content_kind"] == "copy"  # from the PRODUCING agent
+            # The content is the markdown the live path actually persisted, not
+            # a string this test invented.
+            assert "Buy now, pay never." in signal["content"]
+
+            # 3. The governed, attributed, journalled run.
+            fake.program(
+                success(
+                    text=json.dumps(CLEAN_BRAND_VERDICT),
+                    message_id="msg_brand_0001",
+                ),
+                success(
+                    text=json.dumps({"summary": "Brand check clean."}),
+                    message_id="msg_brief_0001",
+                ),
+            )
+            outcome = await run_scheduled(
+                container.autonomous_runs,
+                org_id=org,
+                agent_id=CONTENT_REVIEW_AGENT_ID,
+                schedule_id="content-15min",
+                input_data=signal,
+            )
+            assert outcome.status == "completed", outcome.reasons
+            # Clean verdict -> no boundary reached -> done_while_away.
+            assert outcome.requires_attention is False
+            assert outcome.principal_id == str(owner_id)
+
+            # 4. THE CONTENT REACHED THE AGENT. Asserted off the wire: "we passed
+            #    it in" is not evidence that the agent was asked about it.
+            # `fake.program` resets the recorder, so index 0 is the AGENT's call
+            # and index 1 is the brief's own summarisation call. Asserting on the
+            # agent's is the point: the brief never sees the copy.
+            sent = fake.message_requests
+            assert sent, "the agent must have called the provider"
+            wire = json.dumps(sent[0].json_body)
+            assert "Buy now, pay never." in wire, wire[:400]
+            # And the KIND it was told, which came from the producing agent.
+            assert "copy" in wire, wire[:400]
+
+            # 5. A real journal row, attributed to the resolved human.
+            rows = await _journal_rows(app_db, org)
+            brand_rows = [
+                r for r in rows if r["detail"]["agent_id"] == CONTENT_REVIEW_AGENT_ID
+            ]
+            assert len(brand_rows) == 1
+            row = brand_rows[0]
+            assert row["principal_id"] == str(owner_id)
+            assert row["actor_kind"] == "agent_autonomous"
+            assert row["kind"] == KIND_COMPLETED
+            assert row["requires_attention"] is False
+            assert row["detail"]["trigger"] == "schedule:content-15min"
+            assert row["detail"]["session_kind"] == "autonomous"
+
+            # Real money, summed from the ledger for THIS run's correlation.
+            micros = await _ledger_micros(app_db, org, outcome.correlation_id)
+            assert micros > 0
+            assert row["cost_minor"] == micros_to_minor(micros)
+
+            # 6. The owner's brief returns it.
+            brief = await _get_brief(app, org, str(owner_id))
+            kinds = [e["kind"] for e in brief["done_while_away"]]
+            assert KIND_COMPLETED in kinds
+            assert not brief["needs_attention"]
+        finally:
+            await container.aclose()
+    finally:
+        await _cleanup(admin_conn, org)
+
+
+@requires_redis
+@requires_app_role
+async def test_a_brand_boundary_flags_the_run_and_lands_in_needs_attention(
+    app_db, admin_conn, fake_provider
+) -> None:
+    """The calibration, end to end: an APPROVED verdict that still names a
+    violation must reach `needs_attention`.
+
+    This is the case the pilot's rules have no analogue for, and the one most
+    likely to be lost: the agent says "shippable" and lists a brand defect in the
+    same breath. Filing that in done_while_away would put the agent's own finding
+    where nobody reads it.
+    """
+    from skylize.app.autonomy.signals import harvest_content_signal
+    from skylize.dal.content_signals import DeliverableContentSignalDAL
+
+    base_url, fake = fake_provider
+    org = _org()
+    try:
+        await _seed_price(admin_conn)
+        await _seed_tenant(admin_conn, org)
+        await _seed_ceiling(app_db, org)
+        owner_id = await _seed_owner(admin_conn, org)
+
+        app, container = await _build(base_url, org, governed=False)
+        try:
+            fake.program(
+                success(
+                    text=json.dumps({
+                        "brief_id": str(uuid.uuid4()),
+                        "variants": ["Guaranteed #1 results, forever."],
+                    }),
+                    message_id="msg_adcopy_0002",
+                ),
+            )
+            await _produce_real_content(container, org, owner_id, app_db)
+
+            signal = await harvest_content_signal(
+                DeliverableContentSignalDAL(app_db),
+                org_id=org,
+                reviewer_agent_id=CONTENT_REVIEW_AGENT_ID,
+                now=datetime.now(timezone.utc),
+            )
+            assert signal is not None
+
+            fake.program(
+                success(
+                    text=json.dumps({
+                        "outcome": "approve",
+                        "violations": ["unsubstantiated superiority claim"],
+                        "confidence": 0.97,
+                    }),
+                    message_id="msg_brand_0002",
+                ),
+                success(
+                    text=json.dumps({"summary": "One item needs a look."}),
+                    message_id="msg_brief_0002",
+                ),
+            )
+            outcome = await run_scheduled(
+                container.autonomous_runs,
+                org_id=org,
+                agent_id=CONTENT_REVIEW_AGENT_ID,
+                schedule_id="content-15min",
+                input_data=signal,
+            )
+            assert outcome.status == "completed", outcome.reasons
+            assert outcome.requires_attention is True
+            assert any("violation" in r for r in outcome.reasons), outcome.reasons
+            assert any("brand_legal_sensitive" in r for r in outcome.reasons)
+
+            brief = await _get_brief(app, org, str(owner_id))
+            flagged = [
+                e for e in brief["needs_attention"] if e["kind"] == KIND_COMPLETED
+            ]
+            assert len(flagged) == 1
+        finally:
+            await container.aclose()
+    finally:
+        await _cleanup(admin_conn, org)
+
+
+@requires_redis
+@requires_app_role
+async def test_a_second_sweep_does_not_review_the_same_content_twice(
+    app_db, admin_conn, fake_provider
+) -> None:
+    """The already-reviewed join, proven against a run that really happened.
+
+    The DAL suite proves the SQL with hand-written metadata. This proves the
+    metadata a REAL review run writes is the metadata that join reads -- which is
+    the part that would break silently if `execute()` ever changed where it puts
+    `input_data`.
+    """
+    from skylize.app.autonomy.signals import harvest_content_signal
+    from skylize.dal.content_signals import DeliverableContentSignalDAL
+
+    base_url, fake = fake_provider
+    org = _org()
+    try:
+        await _seed_price(admin_conn)
+        await _seed_tenant(admin_conn, org)
+        await _seed_ceiling(app_db, org)
+        owner_id = await _seed_owner(admin_conn, org)
+
+        app, container = await _build(base_url, org, governed=False)
+        try:
+            fake.program(
+                success(
+                    text=json.dumps({
+                        "brief_id": str(uuid.uuid4()), "variants": ["Only copy."],
+                    }),
+                    message_id="msg_adcopy_0003",
+                ),
+            )
+            only_one = await _produce_real_content(container, org, owner_id, app_db)
+
+            source = DeliverableContentSignalDAL(app_db)
+            first = await harvest_content_signal(
+                source, org_id=org, reviewer_agent_id=CONTENT_REVIEW_AGENT_ID,
+                now=datetime.now(timezone.utc),
+            )
+            assert first is not None and first["brief_id"] == str(only_one)
+
+            fake.program(
+                success(
+                    text=json.dumps(CLEAN_BRAND_VERDICT),
+                    message_id="msg_brand_0003",
+                )
+            )
+            outcome = await run_scheduled(
+                container.autonomous_runs, org_id=org,
+                agent_id=CONTENT_REVIEW_AGENT_ID, schedule_id="content-15min",
+                input_data=first,
+            )
+            assert outcome.status == "completed", outcome.reasons
+
+            # THE NEXT FIRING HAS NOTHING TO DO -- derived from the verdict the
+            # run above actually wrote, with no bookkeeping of its own.
+            second = await harvest_content_signal(
+                source, org_id=org, reviewer_agent_id=CONTENT_REVIEW_AGENT_ID,
+                now=datetime.now(timezone.utc),
+            )
+            assert second is None, "the reviewed deliverable must leave the queue"
+        finally:
+            await container.aclose()
+    finally:
         await _cleanup(admin_conn, org)

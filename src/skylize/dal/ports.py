@@ -576,3 +576,30 @@ class AuditWindowCounts:
     by_result: dict[str, int]
     distinct_action_types: int
     distinct_agents: int
+
+
+@dataclass(frozen=True)
+class UncheckedContentRow:
+    """One authored deliverable a content reviewer has not yet ruled on.
+
+    Here rather than next to its query in ``dal/content_signals.py`` for exactly
+    the reason ``AuditWindowCounts`` is: ``app/autonomy/signals.py`` maps it onto
+    the reviewing agent's input, and the "Application logic contains no SQL"
+    contract forbids ``skylize.app`` from importing a module that reaches
+    ``dal.connection``. The ROW is the contract between the layers; the SQL that
+    selects it is not.
+
+    ``backlog`` is carried alongside the item because one scheduled firing checks
+    exactly ONE deliverable, so "how many are still waiting" is the only way a
+    caller can tell a drained queue from a queue it is falling behind on. It is
+    reported, never acted on -- this layer does not decide what to do about it.
+    """
+
+    deliverable_id: UUID
+    org_id: str
+    producing_agent_id: str
+    deliverable_type: str
+    title: str
+    content_markdown: str
+    created_at: datetime
+    backlog: int

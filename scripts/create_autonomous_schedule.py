@@ -32,7 +32,12 @@ import sys
 from temporalio.client import Client, ScheduleUpdate, ScheduleUpdateInput
 
 from skylize.app.autonomy.errors import ContractNotAutonomous, PrincipalUnresolvable
-from skylize.app.autonomy.pilot import PILOT_AGENT_ID, PILOT_CRON, assert_pilot_agent
+from skylize.app.autonomy.pilot import (
+    PILOT_AGENT_ID,
+    PILOT_AGENT_IDS,
+    assert_pilot_agent,
+    cron_for,
+)
 from skylize.app.orchestrator.temporal.autonomous import build_schedule, schedule_id_for
 from skylize.bootstrap import build_container
 from skylize.config import get_settings
@@ -43,6 +48,9 @@ async def run(args: argparse.Namespace) -> int:
     container = await build_container(settings)
     try:
         assert_pilot_agent(args.agent_id)
+        # Resolved AFTER the gate, so an agent that is not allowlisted is
+        # refused by name rather than by a missing cadence.
+        cron = args.cron if args.cron is not None else cron_for(args.agent_id)
 
         client = await Client.connect(
             settings.temporal_address, namespace=settings.temporal_namespace
@@ -73,19 +81,19 @@ async def run(args: argparse.Namespace) -> int:
             org_id=args.org_id,
             agent_id=args.agent_id,
             task_queue=settings.temporal_task_queue,
-            cron=args.cron,
+            cron=cron,
         )
 
         if args.dry_run:
             print(
                 f"dry run: would create schedule {sched_id} "
-                f"cron={args.cron!r} task_queue={settings.temporal_task_queue!r}"
+                f"cron={cron!r} task_queue={settings.temporal_task_queue!r}"
             )
             return 0
 
         try:
             await client.create_schedule(sched_id, schedule)
-            print(f"created schedule {sched_id} cron={args.cron!r}")
+            print(f"created schedule {sched_id} cron={cron!r}")
         except Exception as exc:  # already exists -> update in place
             if "already" not in str(exc).lower():
                 raise
@@ -94,7 +102,7 @@ async def run(args: argparse.Namespace) -> int:
                 return ScheduleUpdate(schedule=schedule)
 
             await client.get_schedule_handle(sched_id).update(_update)
-            print(f"updated existing schedule {sched_id} cron={args.cron!r}")
+            print(f"updated existing schedule {sched_id} cron={cron!r}")
         return 0
     except (PrincipalUnresolvable, ContractNotAutonomous) as exc:
         print(f"REFUSED: {exc}", file=sys.stderr)
@@ -109,9 +117,15 @@ def main() -> None:
     parser.add_argument(
         "--agent-id",
         default=PILOT_AGENT_ID,
-        help=f"pilot allowlist only (default: {PILOT_AGENT_ID})",
+        choices=sorted(PILOT_AGENT_IDS),
+        help=f"allowlisted agents only (default: {PILOT_AGENT_ID})",
     )
-    parser.add_argument("--cron", default=PILOT_CRON, help=f"default: {PILOT_CRON!r}")
+    parser.add_argument(
+        "--cron",
+        default=None,
+        help="override the cadence; defaults to the one declared for --agent-id "
+             "in app/autonomy/pilot.py (each agent's is argued there)",
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--delete", action="store_true")
     raise SystemExit(asyncio.run(run(parser.parse_args())))
