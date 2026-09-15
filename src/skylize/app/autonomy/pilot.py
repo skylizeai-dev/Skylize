@@ -33,15 +33,20 @@ THE COMPROMISE, STATED PLAINLY
 ------------------------------
 No agent in the 23 cleanly satisfies "read-only AND naturally scheduled", and
 this one is a closest fit, not a clean fit. Its input is
-`ActivitySignalIn{entity_id, signal_kind, features}` -- PER-SIGNAL -- and there
-is no activity-signal store anywhere in `src/` for a periodic sweep to read. So
-the scheduled run's input is a declared sweep descriptor supplied by the trigger
-below, NOT signals harvested from real system state. The genuinely natural shape
-for fraud detection is event-driven, which is why `triggers.py` implements both
-and this agent can be moved onto the event shape with no change to the runner.
+`ActivitySignalIn{entity_id, signal_kind, features}` -- PER-SIGNAL -- while the
+scheduled shape fires once per org per cadence, so a sweep has to report on a
+WINDOW rather than on one signal. The genuinely natural shape for fraud detection
+is event-driven, which is why `triggers.py` implements both and this agent can be
+moved onto the event shape with no change to the runner.
 
-Wiring a real signal source is explicitly OUT OF SCOPE here and is the first
-thing to do before this agent's scheduled shape means anything in production.
+UPDATE (2026-09-15): the sweep now carries real counts. This module used to say
+there was "no activity-signal store anywhere in src/" to populate `features`
+from. That was too strong: `audit_log` (migration 0001) is one, it is written by
+the live request path on every governed action, and its `denied`/`failed` rows
+are exactly the security-relevant tail. `dal/activity_signals.py` reads a window
+of it and `app/autonomy/signals.py` maps that window onto `ActivitySignalIn`.
+`PILOT_SWEEP_INPUT` below survives as the FALLBACK for a run whose window could
+not be read -- see `signals.py` for why that falls open rather than skipping.
 The runner-up, `cfo_agent`, is far more naturally scheduled (a periodic budget
 summary, with real spend in `ai_cost_ledger` to summarize) but is
 `authority_level="executive"` and takes the multi-turn tool path -- the wrong
@@ -69,10 +74,11 @@ PILOT_AGENT_IDS: frozenset[str] = frozenset({PILOT_AGENT_ID})
 #: is what Temporal's ScheduleSpec accepts.
 PILOT_CRON = "0 * * * *"
 
-#: The sweep descriptor the scheduled run submits. Honest about what it is: a
-#: periodic review request, NOT a harvested signal (see the module docstring).
-#: `features` is empty because there is no store to populate it from -- an
-#: invented number here would be a fabricated input on a governance record.
+#: The FALLBACK input, submitted only when a window could not be read. Honest
+#: about what it is: a periodic review request, NOT a harvested signal. `features`
+#: stays empty because an invented number here would be a fabricated input on a
+#: governance record -- and `signal_kind` differs from the harvested signal's
+#: `audit_window`, so a reader can always tell the two apart on a record.
 PILOT_SWEEP_INPUT: Mapping[str, Any] = {
     "entity_id": "org_periodic_sweep",
     "signal_kind": "scheduled_review",

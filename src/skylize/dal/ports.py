@@ -556,3 +556,23 @@ class WorkflowRepository(Protocol):
     Temporal `write_run_step` activity to the `workflow_run_steps` table."""
 
     async def record_step(self, row: WorkflowRunStepRow) -> None: ...
+
+@dataclass(frozen=True)
+class AuditWindowCounts:
+    """One org's audited activity over ``[since, until)``. Counts only.
+
+    Lives in `ports` rather than next to its query in `dal/activity_signals.py`
+    because `app/autonomy/signals.py` maps it onto the pilot agent's input, and
+    the "Application logic contains no SQL" contract forbids `skylize.app` from
+    reaching `dal.connection` -- which importing the DAL module would do
+    transitively. The counts are the contract between the two layers; the SQL
+    that produces them is not.
+    """
+
+    org_id: str
+    since: datetime
+    until: datetime
+    total: int
+    by_result: dict[str, int]
+    distinct_action_types: int
+    distinct_agents: int

@@ -575,3 +575,105 @@ async def test_an_org_with_no_owner_refuses_before_anything_runs(
             await container.aclose()
     finally:
         await _cleanup(admin_conn, org)
+
+
+# ---------------------------------------------------------------------------
+# The HARVESTED signal: real audit_log rows -> real counts -> the pilot agent.
+#
+# The other tests here submit `pilot_input()`'s descriptor, whose `features` is
+# empty. This one proves the path that replaces it end to end: rows land in
+# `audit_log` the way the live request path lands them, `AuditActivitySignalDAL`
+# counts them as the RLS-subject app role, and the numbers the agent is asked to
+# reason over are the ones Postgres actually holds -- asserted off the prompt the
+# provider received, not off the value this test passed in.
+# ---------------------------------------------------------------------------
+async def test_a_harvested_audit_signal_reaches_the_agent_and_is_attributed(
+    app_db, admin_conn, fake_provider
+) -> None:
+    import json as _json
+    from datetime import timedelta as _timedelta
+
+    from skylize.app.autonomy.signals import (
+        SIGNAL_KIND_AUDIT_WINDOW,
+        harvest_activity_signal,
+    )
+    from skylize.dal.activity_signals import AuditActivitySignalDAL
+
+    base_url, fake = fake_provider
+    org = _org()
+    try:
+        await _seed_price(admin_conn)
+        await _seed_tenant(admin_conn, org)
+        await _seed_ceiling(app_db, org)
+        owner_id = await _seed_owner(admin_conn, org)
+
+        # A denial burst, in the shape the live path writes: `tool.invoked`
+        # refusals are what an abused credential leaves in this table.
+        now = datetime.now(timezone.utc)
+        inside = now - _timedelta(minutes=5)
+        for action_type, result in (
+            ("tool.invoked", "denied"),
+            ("tool.invoked", "denied"),
+            ("tool.invoked", "denied"),
+            ("tool.invoked", "success"),
+            ("hitl.approve_failed", "failed"),
+        ):
+            await admin_conn.execute(
+                """
+                INSERT INTO audit_log (event_id, org_id, tenant_id, correlation_id,
+                                       source_agent_id, action_type, result, occurred_at)
+                VALUES ($1, $2, $2, $3, $4, $5, $6, $7)
+                """,
+                uuid.uuid4(), org, uuid.uuid4(), PILOT_AGENT_ID,
+                action_type, result, inside,
+            )
+
+        signal = await harvest_activity_signal(
+            AuditActivitySignalDAL(app_db), org_id=org, now=now
+        )
+        assert signal is not None, "the source must produce a signal, not fall back"
+        assert signal["signal_kind"] == SIGNAL_KIND_AUDIT_WINDOW
+        assert signal["entity_id"] == org
+        # Counted from Postgres, NOT asserted against a number this test invented
+        # anywhere but in the rows it inserted above.
+        assert signal["features"]["denied"] == 3.0
+        assert signal["features"]["failed"] == 1.0
+        assert signal["features"]["total_actions"] == 5.0
+        assert signal["features"]["denial_rate"] == pytest.approx(0.6)
+
+        app, container = await _build(base_url, org, governed=False)
+        try:
+            fake.program(success(text=_json.dumps(CLEAN_VERDICT)))
+            outcome = await run_scheduled(
+                container.autonomous_runs,
+                org_id=org,
+                agent_id=PILOT_AGENT_ID,
+                schedule_id=SCHEDULE_ID,
+                input_data=signal,
+            )
+            assert outcome.status == "completed", outcome.reasons
+
+            # THE SIGNAL REACHED THE AGENT: the counts are in the prompt the
+            # provider actually received. Asserted off the wire, because
+            # "we passed it in" is not evidence that the agent was asked about it.
+            sent = fake.message_requests
+            assert sent, "the agent must have called the provider"
+            wire = _json.dumps(sent[0].json_body)
+            assert SIGNAL_KIND_AUDIT_WINDOW in wire, wire[:400]
+            assert "denial_rate" in wire, wire[:400]
+
+            # ATTRIBUTION: same chain the descriptor run proves, on a real signal.
+            rows = await _journal_rows(app_db, org)
+            assert len(rows) == 1
+            row = rows[0]
+            assert row["actor_kind"] == "agent_autonomous"
+            assert row["actor_id"] == PILOT_AGENT_ID
+            assert row["principal_id"] == str(owner_id)
+            assert row["kind"] == KIND_COMPLETED
+            assert row["correlation_id"] == outcome.correlation_id
+            assert row["detail"]["trigger"] == f"schedule:{SCHEDULE_ID}"
+        finally:
+            await container.aclose()
+    finally:
+        await admin_conn.execute("TRUNCATE audit_log")
+        await _cleanup(admin_conn, org)

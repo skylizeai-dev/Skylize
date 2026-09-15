@@ -75,6 +75,7 @@ from temporalio.common import RetryPolicy
 
 if TYPE_CHECKING:  # never executed, so never seen by the workflow sandbox
     from ....app.autonomy.runner import AutonomousRunService
+    from ....app.autonomy.signals import ActivitySignalSource
 
 #: Deterministic namespace for `uuid5(NAMESPACE, workflow_id)`. A fixed constant,
 #: never regenerated: changing it would silently re-correlate every future run and
@@ -134,8 +135,17 @@ class AutonomousActivities:
     through a global.
     """
 
-    def __init__(self, service: "AutonomousRunService") -> None:
+    def __init__(
+        self,
+        service: "AutonomousRunService",
+        signals: "ActivitySignalSource | None" = None,
+    ) -> None:
         self._service = service
+        #: Optional so a worker built without one keeps the previous behaviour
+        #: exactly: `harvest_activity_signal` returns None and `run_scheduled`
+        #: falls back to the declared sweep descriptor. Wiring the source is what
+        #: turns the sweep from a review request into counted evidence.
+        self._signals = signals
 
     @activity.defn(name=RUN_AUTONOMOUS_AGENT)
     async def run_autonomous_agent(
@@ -152,17 +162,31 @@ class AutonomousActivities:
         """
         # Deferred: see the module docstring. An activity runs outside the
         # sandbox, so these are ordinary imports here and invisible to it.
+        from datetime import datetime, timezone
+
         from ....app.autonomy.pilot import assert_pilot_agent
+        from ....app.autonomy.signals import harvest_activity_signal
         from ....app.autonomy.triggers import run_scheduled
 
         assert_pilot_agent(request.agent_id)
         correlation_id = correlation_for(activity.info().workflow_id)
+        # Harvested here rather than inside the workflow: reading a database is
+        # I/O, and the workflow body must stay deterministic for replay. Returns
+        # None when there is no source or the read fails, and `run_scheduled`
+        # then falls back to the declared descriptor -- a sweep that cannot read
+        # its window still runs and still says which input it got.
+        input_data = await harvest_activity_signal(
+            self._signals,
+            org_id=request.org_id,
+            now=datetime.now(timezone.utc),
+        )
         outcome = await run_scheduled(
             self._service,
             org_id=request.org_id,
             agent_id=request.agent_id,
             schedule_id=request.schedule_id,
             correlation_id=correlation_id,
+            input_data=input_data,
         )
         return AutonomousRunResult(
             status=outcome.status,
