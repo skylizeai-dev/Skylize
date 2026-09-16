@@ -21,6 +21,7 @@ migrations/versions/0007_org_credentials.py, dal/connection.py:79).
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
@@ -387,30 +388,44 @@ class PostgresSpendRepository:
                 )
                 return SpendEnvelope(**dict(row)) if row is not None else None
 
-    async def sweep_expired(self, *, now: datetime, limit: int = 500) -> int:
+    async def sweep_expired(
+        self, *, org_ids: Sequence[str], now: datetime, limit: int = 500
+    ) -> int:
         """Release abandoned holds. Run from Temporal on a schedule, not from a
-        request path. Returns the number of holds reclaimed."""
-        async with self._pool.acquire() as conn:  # type: ignore[attr-defined]
-            async with conn.transaction():
-                rows = await conn.fetch(
-                    """
-                    UPDATE spend_reservation
-                       SET state = 'expired', settled_at = $1
-                     WHERE reservation_id IN (
-                           SELECT reservation_id FROM spend_reservation
-                            WHERE state = 'held' AND expires_at < $1
-                            ORDER BY expires_at LIMIT $2
-                            FOR UPDATE SKIP LOCKED)
-                    RETURNING envelope_id, amount_minor
-                    """,
-                    now,
-                    limit,
-                )
-                for row in rows:
+        request path. Returns the number of holds reclaimed.
+
+        `spend_reservation` is FORCE RLS (migration 0019): a query with no
+        `skylize.org_id` GUC set matches no rows under the non-superuser
+        `skylize_app` role, not an error. So this binds the GUC once per org in
+        `org_ids` and sweeps each org's transaction separately, rather than
+        issuing one unscoped query that would silently reclaim nothing."""
+        reclaimed = 0
+        for org_id in org_ids:
+            async with self._pool.acquire() as conn:  # type: ignore[attr-defined]
+                async with conn.transaction():
                     await conn.execute(
-                        "UPDATE spend_envelope SET reserved_minor = reserved_minor - $2 "
-                        "WHERE envelope_id = $1",
-                        row["envelope_id"],
-                        row["amount_minor"],
+                        "SELECT set_config($1, $2, true)", self._rls_guc, org_id
                     )
-                return len(rows)
+                    rows = await conn.fetch(
+                        """
+                        UPDATE spend_reservation
+                           SET state = 'expired', settled_at = $1
+                         WHERE reservation_id IN (
+                               SELECT reservation_id FROM spend_reservation
+                                WHERE state = 'held' AND expires_at < $1
+                                ORDER BY expires_at LIMIT $2
+                                FOR UPDATE SKIP LOCKED)
+                        RETURNING envelope_id, amount_minor
+                        """,
+                        now,
+                        limit,
+                    )
+                    for row in rows:
+                        await conn.execute(
+                            "UPDATE spend_envelope SET reserved_minor = reserved_minor - $2 "
+                            "WHERE envelope_id = $1",
+                            row["envelope_id"],
+                            row["amount_minor"],
+                        )
+                    reclaimed += len(rows)
+        return reclaimed
