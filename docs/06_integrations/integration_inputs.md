@@ -246,8 +246,14 @@ of it.
   secret a per-org `org_credentials` row or a platform secret? Related:
   `docs/06_integrations/stripe.md:31` specifies invalid signature -> 401, but no
   endpoint exists.
-- **Q2.1c `[OWNER-DECISION-REQUIRED]` Refund authorization ceiling.** A concrete
-  number, or the explicit statement that refunds always defer to a human.
+- **Q2.1c `[OWNER-DECIDED 2026-09-16]` Refund authorization ceiling: 0 - refunds ALWAYS
+  defer to a human.** The base refund ceiling is `0` in currency MINOR units, at every
+  authority level. No refund auto-approves; every one goes to HITL. This is the
+  "explicit statement that refunds always defer to a human" branch of the question, not
+  a number to be tuned later - the mechanism is to be OBSERVED in production before any
+  non-zero number is set. Rationale (owner): a refund moves real customer money outward
+  and the refund path has never executed in production, so the first production evidence
+  should come from a path a human has already approved.
   `policy_inputs.md:168` already carries a `[RESEARCH-SUGGESTED]` row -
   "Refund (small, under threshold, no fraud flag) | Medium | `manager` | no" - but the
   threshold itself is unset, and `policy_inputs.md:227` defines T4 as auto-reject
@@ -255,8 +261,13 @@ of it.
   **2026-09-09:** design doc 7.5 now specifies WHERE that number lives and HOW it is checked -
   `org_refund_authority_limits` (per authority level) and `org_refund_review_thresholds`
   (org-wide), both in currency MINOR units, both `FORCE ROW LEVEL SECURITY`, both seeded
-  EMPTY so a missing row fails closed. **Q2.1c itself is still open**: the design supplies the
-  mechanism, the owner supplies the number (Q2.1j).
+  EMPTY so a missing row fails closed. **2026-09-16: Q2.1c is now ANSWERED** - the design
+  supplied the mechanism, and the owner's number is `0`. Note the interaction with 7.5.2's
+  fail-closed seeding: a `max_refund_minor = 0` row and a MISSING row both deny every
+  refund, but they are not the same statement. A missing row means "this org is not
+  configured for refunds"; an explicit `0` means "this org refunds only by human approval".
+  The connector must be able to tell them apart, because the second is a configured,
+  intended state that should route to HITL rather than read as a misconfiguration.
   (The level column read `L2` until the 2026-09-06 reconciliation of that file's
   ladder to the canonical `AUTHORITY_RANK`; `L2` was and is `manager`, so the row's
   meaning is unchanged - only its label is.)
@@ -315,7 +326,8 @@ of it.
   accounts (`connect: true`), with the connected account named by a top-level `account`
   field on the event (https://docs.stripe.com/connect/webhooks). The per-org
   `org_credentials` option this question offered does not exist in Stripe's model.
-- **Q2.1c**, **Q2.1d** - unchanged and still open. Both are independent of Q2.1e.
+- **Q2.1c** `[ANSWERED 2026-09-16: ceiling 0, always defer to a human]`, **Q2.1d** - still
+  open. Both are independent of Q2.1e.
 - **New questions raised by the decision** (design doc): **Q2.1h** platform-controlled
   customer accounts cannot connect via OAuth `read_write` since June 2021 - product answer
   required; **Q2.1i** confirm discarding the deprecated `access_token` / `refresh_token`

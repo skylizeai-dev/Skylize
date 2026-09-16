@@ -165,16 +165,27 @@ blocked until one is added.
 | Financial report generation (read-only) | Low | `worker` | no | `tool=="generateReport" && mode=="read"` |
 | PO-matched, clean three-way-match invoice → approval route | Low-Med | `manager` | no | `threeWayMatch==true && poBacked==true` |
 | Invoice approval (within tolerance, under threshold) | Medium | `manager` | no | `tool=="approveInvoice" && amount < mgr_limit` |
-| Refund (small, under threshold, no fraud flag) | Medium | `manager` | no | `tool=="issueRefund" && amount < refund_threshold && !fraudFlag` |
+| Refund (ANY amount) | Medium | `manager` | **yes - ceiling is 0** | `tool=="issueRefund"` |
 | Vendor record create/modify | High | `director` | no | `tool=="modifyVendor"` |
 | Payment processing (over threshold) | High | `executive` | no | `tool=="processPayment" && amount >= exec_threshold` |
 | Budget reallocation (large) | Critical | `executive` | **yes — `spend_over_ceiling`** | `tool=="budgetReallocation" && amount > critical_limit` |
 | Vendor bank-detail change | Critical | `executive` | **yes — `payment_instrument_change`** | `tool=="changeVendorBank"` |
 
 > **`[OWNER-DECISION-REQUIRED]`** — Fill in the actual dollar values for:
-> `mgr_limit`, `refund_threshold`, `exec_threshold`, `exec_limit`, `critical_limit`,
+> `mgr_limit`, `exec_threshold`, `exec_limit`, `critical_limit`,
 > `cap` (daily ad cap). These live in `data.json` (tunable without touching Rego).
 > See 0.2 for suggested defaults to align against.
+>
+> **`refund_threshold` is DECIDED, not outstanding.** `[OWNER-DECIDED 2026-09-16]`
+> `refund_threshold = 0` (currency MINOR units), at every authority level. No refund
+> auto-approves; every refund defers to a human. The row above is therefore no longer a
+> threshold comparison - with a ceiling of 0 the `amount < refund_threshold` guard can
+> never be true for a positive refund, so the rule is written as the unconditional
+> deferral it actually is. The number is to be revisited only after the refund path has
+> been OBSERVED executing in production under human approval.
+> See `docs/06_integrations/integration_inputs.md` Q2.1c and
+> `docs/06_integrations/stripe_connector_design.md` 7.5 for the machinery this is
+> configured through (`org_refund_authority_limits`, seeded empty, fails closed).
 
 ### Open sub-questions raised by the 2026-09-06 ladder reconciliation
 
