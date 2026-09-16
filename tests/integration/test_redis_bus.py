@@ -270,3 +270,59 @@ async def test_governance_broadcast_fans_out(redis_client) -> None:
         task.cancel()
         await pub.close()
         await sub.close()
+
+
+async def test_cancelling_the_subscriber_releases_its_connection_before_close(
+    redis_client,
+) -> None:
+    """Stopping the governance subscriber must actually STOP it.
+
+    `Container.aclose` tears down LIFO on the promise that consumers stop BEFORE
+    the pools they read from close (bootstrap.py `_stop_subscriber`, then
+    `redis_broadcast.close`). Cancelling the task is only half of that: the
+    subscriber also has to let go of its dedicated pub/sub connection, or the
+    pool close that runs next is closing a socket with a live blocked read still
+    on it -- the race that surfaced at teardown as a redis error instead of a
+    clean shutdown.
+
+    So this asserts the seam, not the symptom: the server must show the
+    subscriber-mode connection GONE after the cancel and BEFORE `close()`. The
+    old code left it open until the whole client was closed, and failed here.
+    """
+    from skylize.events.redis_governance_broadcast import RedisGovernanceBroadcast
+
+    async def subscriber_connections() -> int:
+        return sum(
+            1 for c in await redis_client.client_list() if int(c.get("sub", 0)) > 0
+        )
+
+    before = await subscriber_connections()
+
+    sub = RedisGovernanceBroadcast(REDIS_URL)
+
+    async def handler(msg) -> None:  # pragma: no cover - no message is published
+        raise AssertionError("this test never publishes")
+
+    task = asyncio.create_task(sub.subscribe(handler))
+    try:
+        for _ in range(50):  # let the SUBSCRIBE handshake land
+            if await subscriber_connections() > before:
+                break
+            await asyncio.sleep(0.1)
+        assert await subscriber_connections() == before + 1, "subscriber never connected"
+
+        # Exactly what bootstrap's `_stop_subscriber` does.
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+        for _ in range(50):  # the release is observed server-side, so allow a beat
+            if await subscriber_connections() == before:
+                break
+            await asyncio.sleep(0.1)
+        assert await subscriber_connections() == before, (
+            "the cancelled subscriber still holds a pub/sub connection; the pool "
+            "close in Container.aclose would race its in-flight read"
+        )
+    finally:
+        await sub.close()
