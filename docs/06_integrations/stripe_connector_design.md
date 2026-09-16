@@ -717,29 +717,32 @@ Only a local, tenant-scoped record of "(org, charge, amount) was already refunde
 the resulting `re_...` id" makes a late replay safe. It is checked in the handler, which is
 the layer that can return the prior refund rather than deny.
 
-`[OWNER-RATIFIED 2026-09-13 - Option (a)]` **Q2.1l - the residual the dedupe record
+`[OWNER-DECISION-REQUIRED]` **Q2.1l - the residual the dedupe record
 exposes.** `[CODE-VERIFIED]` `ToolProxy` commits the hold with the full reserved amount
 unconditionally (`proxy.py:386-390`, `actual_minor=reservation.amount_minor`), even though
 `commit` accepts a lower actual (`app/principal/spend.py:161-172`). A replayed refund that
 the dedupe record short-circuits moves **no new money at Stripe**, but still commits a
 second full reservation against the org's envelope - overstating spend.
 
-Three fixes were tabled. The owner has ratified **(a): settle the hold for what the tool
-ACTUALLY SPENT, not what it reserved**, which requires a proxy change to read the actual
+Three fixes were tabled. **(a): settle the hold for what the tool ACTUALLY SPENT, not what
+it reserved** is one reasonable candidate, which requires a proxy change to read the actual
 from the handler's output. (b) checking the dedupe record at the gate is **rejected** - it
 turns a gate into a control-flow branch that returns a prior result. (c) accepting the
 overstatement and reconciling from the audit trail is **rejected** - a ledger that knowingly
 overstates spend is not a ledger. This was the only part of the idempotency design not
-resolvable inside the connector; it is now resolved.
+resolvable inside the connector; **it is not yet resolved for Stripe's refund path**. Option
+(a) is not owner-ratified as the final resolution here - do not treat it as settled.
 
-> **`[NOT YET IN EFFECT AT THIS HEAD]`** Option (a) matches a decision already implemented
-> on `fix/toolproxy-ledger-commit-accounting` (`3334e76 fix: settle a spend hold for what
-> the tool spent, not what it reserved`), which is **NOT merged into main**. At this HEAD
-> the proxy still commits `reservation.amount_minor` unconditionally (`proxy.py:386-390`),
-> and `replay_key`, `result_snapshot` and `ToolSpendKeyConflict` exist nowhere outside that
-> branch. **A Stripe refund handler must not be built against Option (a) until it merges.**
-> That branch's migration also still claims revision `0028`, which trunk has since taken
-> for `0028_org_autonomy_mode.py`; it must renumber before it can land.
+> **`[NOT YET IN EFFECT AT THIS HEAD]`** Option (a) matches a candidate implementation
+> shipped and tested on `fix/toolproxy-ledger-commit-accounting` (`3334e76 fix: settle a
+> spend hold for what the tool spent, not what it reserved`), which is **NOT merged into
+> main** and **has not been owner-approved as the final resolution for Stripe's refund path**.
+> At this HEAD the proxy still commits `reservation.amount_minor` unconditionally
+> (`proxy.py:386-390`), and `replay_key`, `result_snapshot` and `ToolSpendKeyConflict` exist
+> nowhere outside that branch. **A Stripe refund handler must not be built against Option (a)
+> until it is owner-ratified and merges.** That branch's migration also still claims revision
+> `0028`, which trunk has since taken for `0028_org_autonomy_mode.py`; it must renumber before
+> it can land.
 
 **RESOLVED - Q2.1c.** Owner decision: refunds always defer to a human. There is no numeric
 refund ceiling; no such number is coming. Every refund therefore executes on the HITL-replay
@@ -1041,8 +1044,10 @@ set_review_threshold(*, org_id, currency, review_above_minor,
 3. Q2.1d approved. **No longer blocked on a `ToolProxy.invoke` change** - `hitl_id` is
    already threaded to the handler (`proxy.py:160-167,334-337`), so the handler can derive
    the Stripe `Idempotency-Key` itself (7.0.1). What remains is the durable local dedupe
-   record. **Q2.1l (the double-commit residual) is RATIFIED as Option (a) (7.0.1)** but is
-   not yet in effect: it depends on `fix/toolproxy-ledger-commit-accounting` merging.
+   record. **Q2.1l (the double-commit residual) is `[OWNER-DECISION-REQUIRED]` (7.0.1)** -
+   Option (a) is one reasonable, shipped, tested candidate on
+   `fix/toolproxy-ledger-commit-accounting`, but is NOT owner-ratified as the final
+   resolution for Stripe's refund path, and depends on that branch merging.
 4. Q2.1h answered - the product answer for platform-controlled customer accounts (1.0.3).
 5. Q2.1i confirmed - the discard of `access_token` / `refresh_token` (4.0.1).
 6. Q3.0b answered - `SECURITY DEFINER` resolver vs directory table, with
