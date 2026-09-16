@@ -67,6 +67,12 @@ platform's existing invariants rather than defining new ones:
   (`:3-6`), one HTTP client per call so a token cannot leak across orgs (`:80-83`),
   "not connected" degraded into a clean `ToolExecutionError` rather than a 500
   (`:131-138`).
+  `[CODE-VERIFIED 2026-09-16]` "Real" means the code exists and is registered, not
+  wired: unreachable from any contract's `invocable_tools`, so no live tenant can
+  invoke it today. Separately, its 409 handler misreads the search-index-lag case
+  (retriable, not a duplicate) as a failure and reports `created=False` even on a
+  successful write - flag for whenever this connector is actually wired to a
+  contract.
 
 ### 1.0.2 What does NOT exist
 
