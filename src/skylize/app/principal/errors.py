@@ -115,3 +115,19 @@ class CeilingExceeded(BudgetError):
 
 class ReservationConflict(BudgetError):
     """Same idempotency key, different amount. Never silently reuse."""
+
+
+class ReplayKeyConflict(BudgetError):
+    """A concurrent attempt already holds or has settled this replay key.
+
+    Raised when `spend_reservation_replay_live` (migration 0028's partial unique
+    index on `(org_id, replay_key) WHERE replay_key IS NOT NULL AND state IN
+    ('held','committed')`) refuses an INSERT. This is a DIFFERENT situation from
+    `ReservationConflict`: that one is a caller reusing one idempotency key for a
+    changed amount; this one is two concurrent replay attempts for the SAME
+    logical call racing between `SpendLedger.find_replay` (a read) and
+    `try_reserve` (the write) -- the read found nothing live, but by the time the
+    write ran, a concurrent attempt had already placed the hold. Deliberately its
+    own type rather than reusing `ReservationConflict`, so a caller can still
+    tell "bad key reuse" apart from "lost a replay race" in the audit trail.
+    """
