@@ -20,6 +20,21 @@ export const BACKEND_ERROR_CODES = [
   "decision_rejected",
   "governance_denied",
   "authorization_failed",
+  // The rest of the backend's closed set (edge/errors.py `ErrorCode`). These
+  // were missing while only /agents/execute forwarded a code and only three
+  // causes could reach it. The co-work turn route raises
+  // `principal_authority_denied` on its own path (cowork.py, the PrincipalError
+  // branch) -- "the caller's ROLE let them in; their own authority did not" --
+  // and an unlisted value is narrowed to null by `asBackendErrorCode`, so
+  // leaving it out would silently erase the one cause that tells an operator
+  // the refusal was about THEM rather than the request.
+  "principal_authority_denied",
+  "spend_ceiling_exceeded",
+  "spend_ceiling_not_configured",
+  "model_not_priced",
+  "provider_unavailable",
+  "provider_timeout",
+  "org_not_available",
 ] as const;
 
 export type BackendErrorCode = (typeof BACKEND_ERROR_CODES)[number];
@@ -61,8 +76,13 @@ export interface SkylizeFetchOptions {
    * (backend PUT /api/v1/autonomy). Like POST it is never auto-retried --
    * `canRetry` below stays GET-only, so adding PUT cannot introduce a
    * duplicate write even though the backend's PUT happens to be idempotent.
+   *
+   * DELETE is here for api-key revocation (backend DELETE /api/v1/api-keys/
+   * {key_id}). It is likewise never auto-retried: the backend answers 404 for
+   * a key that is already gone, so a retry after a timeout that actually
+   * SUCCEEDED would turn a completed revocation into a reported failure.
    */
-  method?: "GET" | "POST" | "PUT";
+  method?: "GET" | "POST" | "PUT" | "DELETE";
   /** JSON-serialized as the request body when provided. */
   body?: unknown;
   timeoutMs?: number;
@@ -161,6 +181,13 @@ export async function skylizeFetch<T>(
     clearTimeout(timer);
 
     if (response.ok) {
+      // 204 carries NO body by definition, and the backend uses it for a
+      // successful api-key revocation (api_keys.py `revoke_key`). Parsing it
+      // would throw and report a completed revocation as a malformed body, so
+      // an empty success resolves as null rather than failing.
+      if (response.status === 204) {
+        return null as T;
+      }
       try {
         return (await response.json()) as T;
       } catch {

@@ -266,3 +266,131 @@ export type ConsoleHitlItem = BackendHitlItem;
 export type ConsoleHitlApprove = BackendHitlApproveResponse;
 export type ConsoleHitlReject = BackendHitlRejectResponse;
 export type ConsoleDeliverable = BackendDeliverableDetail;
+
+// ---------------------------------------------------------------------------
+// Console wiring, round 2 — audit / cowork / api-keys / org users.
+//
+// Confirmed against the Python source, same discipline as above:
+//   src/skylize/edge/routes/audit.py    -> GET  /api/v1/audit (AuditListResponse)
+//   src/skylize/edge/routes/cowork.py   -> POST /api/v1/cowork/turns
+//                                          (CoworkTurnResponse, 201)
+//   src/skylize/edge/routes/api_keys.py -> GET/POST/DELETE /api/v1/api-keys
+//   src/skylize/edge/routes/tenants.py  -> GET  /api/v1/tenants/me/users
+// ---------------------------------------------------------------------------
+
+/**
+ * One row of GET /api/v1/audit — AuditEntryResponse (audit.py:29-40).
+ *
+ * THERE IS NO HUMAN ACTOR FIELD AND NO SIGNATURE FIELD, and the console must
+ * not imply either. `source_agent_id` is an AGENT id or null — never a person.
+ * `inputs_hash`/`outputs_hash` are SHA-256 CONTENT HASHES of the payloads
+ * (audit.py:8-10), which prove the payload has not changed; they are not
+ * signatures and prove nothing about who produced the row.
+ */
+export interface BackendAuditEntry {
+  event_id: string;
+  correlation_id: string;
+  action_type: string;
+  result: string;
+  occurred_at: string;
+  source_agent_id: string | null;
+  authority_level: string | null;
+  governance_token_id: string | null;
+  result_reason: string | null;
+  inputs_hash: string | null;
+  outputs_hash: string | null;
+}
+
+/** GET /api/v1/audit — AuditListResponse. `next_before` is the cursor for the
+ *  next (older) page; null means there are no more rows. */
+export interface BackendAuditListResponse {
+  entries: BackendAuditEntry[];
+  next_before: string | null;
+}
+
+/**
+ * POST /api/v1/cowork/turns request body — CoworkTurnIn.
+ *
+ * `message` IS THE ONLY FIELD, and that is a design decision rather than an
+ * omission: the model is extra="forbid", the agent is the module constant
+ * COWORK_AGENT_ID, and the principal is the caller's own `ctx.user_id`
+ * (cowork.py:15-27, 47-50 — "a caller must never be able to name someone else
+ * as the principal"). Adding an agent/department field here would have to
+ * widen the backend, which is explicitly out of bounds.
+ */
+export interface CoworkTurnInput {
+  message: string;
+}
+
+/** POST /api/v1/cowork/turns, HTTP 201 — CoworkTurnResponse. */
+export interface BackendCoworkTurnResponse {
+  reply: string;
+  deliverable_id: string;
+  agent_id: string;
+}
+
+/** POST /api/v1/cowork/turns, HTTP 202 — the route's literal JSONResponse
+ *  content (cowork.py, AgentDeferredToHuman branch). A turn that hit a gated
+ *  condition produced a HITL row instead of a reply. */
+export interface BackendCoworkTurnDeferred {
+  hitl_id: string;
+  status: "deferred_to_human";
+  agent_id: string;
+  reason: string;
+}
+
+/** One row of GET /api/v1/api-keys — KeyResponse. Carries NO secret and no
+ *  hash: the plaintext exists in exactly one response ever, the 201 below. */
+export interface BackendApiKey {
+  key_id: string;
+  prefix: string;
+  name: string;
+  scopes: string[];
+  created_by: string;
+  created_at: string;
+  expires_at: string | null;
+  last_used_at: string | null;
+  revoked_at: string | null;
+}
+
+/** POST /api/v1/api-keys request body — IssueKeyRequest (extra="forbid"). */
+export interface IssueApiKeyInput {
+  name: string;
+  scopes?: string[];
+  expires_in_days?: number | null;
+}
+
+/**
+ * POST /api/v1/api-keys, HTTP 201 — IssuedKeyResponse.
+ *
+ * `api_key` is the PLAINTEXT SECRET and is present in this one response and
+ * never again (api_keys.py:6-8). It must reach the operator once and must not
+ * be persisted anywhere by the console.
+ */
+export interface BackendIssuedApiKey {
+  key_id: string;
+  prefix: string;
+  name: string;
+  scopes: string[];
+  api_key: string;
+  expires_at: string | null;
+}
+
+/**
+ * One row of GET /api/v1/tenants/me/users — UserResponse.
+ *
+ * TWO FIELDS, AND THAT IS ALL THE BACKEND HAS. There is no email, no display
+ * name, no last-seen timestamp and no MFA state anywhere behind this route
+ * (tenants.py:105-113), so a console column for any of them could only be
+ * filled with fiction.
+ */
+export interface BackendOrgUser {
+  user_id: string;
+  role: string;
+}
+
+export type ConsoleAuditList = BackendAuditListResponse;
+export type ConsoleCoworkTurn = BackendCoworkTurnResponse;
+export type ConsoleApiKeyList = BackendApiKey[];
+export type ConsoleIssuedApiKey = BackendIssuedApiKey;
+export type ConsoleOrgUserList = BackendOrgUser[];

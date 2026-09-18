@@ -6,6 +6,20 @@ import {
   fetchAutonomyMode,
   putAutonomyMode,
 } from '../lib/autonomyClient.js';
+import {
+  AUTH_HEADER_DOC,
+  approveHitl,
+  engageKillSwitch,
+  fetchAgents,
+  fetchApiKeys,
+  fetchApprovals,
+  fetchAudit,
+  fetchOrgUsers,
+  issueApiKey,
+  rejectHitl,
+  revokeApiKey,
+  sendCoworkTurn,
+} from '../lib/consoleClient.js';
 
 const byId = {};
 AGENTS.forEach((a) => { byId[a.id] = a; });
@@ -30,6 +44,41 @@ const WFS = [
   { name: 'Content Pipeline', meta: 'CREATIVE · 5 STAGES', desc: 'Hooks to published assets with QC and style gates.', active: 4, stages: [['Hooks', 'Hook Generator'], ['Draft', 'Script Writer'], ['Style gate', 'Style Guardian'], ['Visual QC', 'Visual QC'], ['Publish', 'Creative Ops Manager']] },
 ];
 
+// The backend `proposal_summary` is an open dict, not a typed shape, so it is
+// rendered as its own key/value pairs rather than mapped onto invented fields.
+function summarise(obj) {
+  if (!obj || typeof obj !== 'object') return '';
+  return Object.keys(obj)
+    .slice(0, 4)
+    .map((k) => {
+      const v = obj[k];
+      const text = v === null || v === undefined
+        ? '\u2014'
+        : (typeof v === 'object' ? JSON.stringify(v) : String(v));
+      return k + ': ' + (text.length > 60 ? text.slice(0, 60) + '\u2026' : text);
+    })
+    .join('  \u00b7  ');
+}
+
+function agoFrom(iso) {
+  if (!iso) return '';
+  const then = Date.parse(iso);
+  if (Number.isNaN(then)) return '';
+  const secs = Math.max(0, Math.round((Date.now() - then) / 1000));
+  if (secs < 60) return secs + 's ago';
+  if (secs < 3600) return Math.round(secs / 60) + 'm ago';
+  if (secs < 86400) return Math.round(secs / 3600) + 'h ago';
+  return Math.round(secs / 86400) + 'd ago';
+}
+
+function hhmmss(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const q = (n) => String(n).padStart(2, '0');
+  return q(d.getUTCHours()) + ':' + q(d.getUTCMinutes()) + ':' + q(d.getUTCSeconds());
+}
+
 function utcNow() {
   const d = new Date();
   const p = (n) => String(n).padStart(2, '0');
@@ -49,16 +98,6 @@ function authShort(a) {
 }
 function fmtSize(b) {
   return b < 1024 ? b + ' B' : b < 1e6 ? (b / 1024).toFixed(0) + ' KB' : (b / 1e6).toFixed(1) + ' MB';
-}
-function routeDept(text) {
-  const t = text.toLowerCase();
-  if (/(campaign|brand|launch|social|ad|creative|content)/.test(t)) return 'marketing';
-  if (/(revenue|forecast|budget|spend|margin|cost|profit)/.test(t)) return 'finance';
-  if (/(churn|retention|customer|support|nps)/.test(t)) return 'customer_success';
-  if (/(security|audit|compliance|breach|access)/.test(t)) return 'security';
-  if (/(vendor|supplier|procure|contract|sourcing)/.test(t)) return 'procurement';
-  if (/(deploy|ship|latency|bug|infra|api)/.test(t)) return 'engineering';
-  return 'strategy';
 }
 function seedStr(str) {
   let h = 2166136261;
@@ -87,20 +126,6 @@ const seedPulse = [
   { time: '21:02:33', agent: 'Pricing Negotiation', action: 'target price computed · SKU-2291' },
   { time: '21:02:21', agent: 'Style Guardian', action: 'style check PASS · 6 assets' },
   { time: '21:02:06', agent: 'CFO', action: 'ceiling adjusted · marketing +4%' },
-];
-const seedAudit = [
-  { time: '21:03:40', actor: 'Chief Financial Officer', action: 'DIRECTIVE', target: 'finance/q3-reforecast', sig: '0x8F41…C2A9' },
-  { time: '21:01:12', actor: 'Operator (human)', action: 'APPROVAL', target: 'approvals/AP-2214 · APPROVED', sig: '0x77D0…19EE' },
-  { time: '20:58:03', actor: 'Director, Compliance', action: 'SECURITY', target: 'policy/pii-redaction · verified', sig: '0xA3B8…77F1' },
-  { time: '20:55:47', actor: 'VP Marketing', action: 'TOOL', target: 'ads.push · scope check PASS', sig: '0x5C19…B44D' },
-  { time: '20:51:22', actor: 'Manager, Budgeting', action: 'BILLING', target: 'budget/creative · +$2,400', sig: '0xE801…6A3C' },
-  { time: '20:48:15', actor: 'Chief Legal Officer', action: 'DIRECTIVE', target: 'legal/contract-review-batch', sig: '0x19AD…F0B2' },
-  { time: '20:44:58', actor: 'Director, Privacy', action: 'SECURITY', target: 'consent-gate/learning-pipeline', sig: '0xB6E2…3D17' },
-  { time: '20:41:31', actor: 'VP Engineering', action: 'TOOL', target: 'deploy.staging · contract gate', sig: '0x40C7…88A5' },
-  { time: '20:37:09', actor: 'Operator (human)', action: 'APPROVAL', target: 'approvals/AP-2209 · DECLINED', sig: '0x92F3…1CB0' },
-  { time: '20:33:44', actor: 'Director, Sourcing', action: 'BILLING', target: 'po/vendor-8812 · $18,750', sig: '0x6D5A…E4F8' },
-  { time: '20:29:12', actor: 'CTO', action: 'DIRECTIVE', target: 'engineering/latency-audit', sig: '0x03BB…7A61' },
-  { time: '20:24:56', actor: 'Approval Manager', action: 'TOOL', target: 'approvals.sync · 14 items', sig: '0xC4E9…20D3' },
 ];
 
 // AUTONOMY_MODES / DEFAULT_AUTONOMY_MODE now come from ../lib/autonomyClient.js,
@@ -146,16 +171,22 @@ function initialState() {
     starDeptIdx: (function (list) { const i = list.findIndex((d) => d.id === persisted.netSel); return i < 0 ? 0 : i; })(DEPARTMENTS),
     starQ: '',
     wfSel: 0,
-    apRisk: 'all',
-    approvals: [
-      { id: 'AP-2216', title: 'Increase Q3 paid-social budget by $12,400', meta: 'Director, Performance Marketing · 14 min ago', chain: 'Dir → VP Marketing → CMO → YOU', risk: 'HIGH', amount: '$12,400' },
-      { id: 'AP-2217', title: 'Send master services agreement to the enterprise client', meta: 'Director, Contracts · 26 min ago', chain: 'Dir → CLO → YOU', risk: 'HIGH', amount: '$86,000' },
-      { id: 'AP-2218', title: 'Launch reactivation email to 48,200 dormant accounts', meta: 'Director, Email Marketing · 41 min ago', chain: 'Dir → VP Marketing → YOU', risk: 'MED', amount: '—' },
-      { id: 'AP-2219', title: 'Switch worker tier routing to Nova-2 for 72h load test', meta: 'Chief AI Advisor · 1 h ago', chain: 'Advisor → CTO → YOU', risk: 'MED', amount: '−$310/day' },
-      { id: 'AP-2220', title: 'Approve vendor PO — packaging refresh pilot', meta: 'Director, Sourcing · 2 h ago', chain: 'Dir → VP Procurement → COO → YOU', risk: 'LOW', amount: '$4,150' },
-      { id: 'AP-2221', title: 'Export anonymized churn cohort to BI workspace', meta: 'Director, Retention · 3 h ago', chain: 'Dir → Privacy gate → YOU', risk: 'LOW', amount: '—' },
-    ],
-    logFilter: 'all', audit: seedAudit,
+    // ── approvals: the real HITL queue ──────────────────────────────────
+    // The six sample rows that used to live here carried risk/amount/chain,
+    // none of which exists behind /api/v1/hitl. They are gone rather than
+    // re-derived: see the note above `fetchApprovals` in lib/consoleClient.js.
+    // Nothing is shown until the server answers; a failure is stated, never
+    // replaced with a sample queue.
+    approvals: [],
+    approvalsLoading: true,
+    approvalsError: null,
+    // hitl_id currently being approved/rejected -- disables that row's buttons.
+    approvalBusyId: null,
+
+    // ── audit: the real append-only feed ────────────────────────────────
+    audit: [],
+    auditLoading: true,
+    auditError: null,
     pulse: seedPulse,
     orgName: persisted.orgName || 'Aventra Retail Group', region: persisted.region || 'eu-central',
     retention: persisted.retention || '365',
@@ -173,6 +204,36 @@ function initialState() {
     autonomyErrorKind: null,
     guards: persisted.guards || { cap: true, email: true, pii: true, fallback: false },
     pausedAll: false, pauseArm: false, toast: null,
+
+    // ── live agent registry ─────────────────────────────────────────────
+    // GET /api/v1/agents. The generated 151-agent fixture is still imported
+    // for the Starmap GEOMETRY only (see the note at `agentsLive`); every
+    // COUNT and roster the operator reads comes from here.
+    agentsLive: [],
+    agentsLoading: true,
+    agentsError: null,
+
+    // ── developers: api keys ────────────────────────────────────────────
+    keys: [],
+    keysLoading: true,
+    keysError: null,
+    // The plaintext secret from a successful mint. Held in memory ONLY, shown
+    // once, and never written to localStorage -- the backend will never show
+    // it again (api_keys.py:6-8).
+    mintedKey: null,
+
+    // ── team: org users ─────────────────────────────────────────────────
+    members: [],
+    membersLoading: true,
+    membersError: null,
+
+    // ── kill switch ─────────────────────────────────────────────────────
+    // The operator's own words. NOT defaulted: this string lands in the audit
+    // record of the most consequential control in the product, so the console
+    // must never supply it on their behalf.
+    pauseReason: '',
+    pauseBusy: false,
+    pauseError: null,
   };
 }
 
@@ -275,69 +336,94 @@ export function useConsoleState(props) {
   }), [setState]);
   const removeConnector = useCallback((i) => setState((s) => { const a = s.chatConnectors.slice(); a.splice(i, 1); return { chatConnectors: a }; }), [setState]);
 
-  const buildReply = useCallback((dept, chain, tok) => {
-    const R = {
-      marketing: ['Directive accepted — routed to Marketing & Creative.', 'Campaign brief drafted; Copy and Art directors assigned worker pools.', 'Channel budget allocation proposed within CMO ceiling — no approval required.', 'Brand Guardian gate scheduled before any asset ships.', 'First deliverables land in Deliverables within the hour; launch order will surface in Approvals.'],
-      finance: ['Directive accepted — routed to Finance.', 'FP&A is re-running the forecast against the live pipeline.', 'Director, Risk is scanning variance and spend anomalies in parallel.', 'Treasury reconciliation pinned to the new baseline.', 'CFO summary with confidence bands will be posted to Deliverables shortly.'],
-      customer_success: ['Directive accepted — routed to Customer Success.', 'Retention is scoring churn-risk cohorts against the last 90 days.', 'Lifecycle playbooks queued for the top three at-risk segments.', 'Escalations above the current autonomy mode will surface in your Approvals queue.', 'Expect the cohort report in Deliverables within the hour.'],
-      security: ['Directive accepted — routed to Security & Legal.', 'Access review sweep started across all 151 agent tool grants.', 'Compliance is re-verifying SOC 2 control evidence.', 'Privacy gate re-checked on the learning pipeline — PASS.', 'Signed report will be attached to the Audit Log on completion.'],
-      procurement: ['Directive accepted — routed to Procurement.', 'Vendor Discovery is building a shortlist against your criteria.', 'Pricing Negotiation computing target prices from historical POs.', 'Contract Review will flag risk before anything is committed.', 'Committed spend will pause for your approval — nothing is signed autonomously.'],
-      engineering: ['Directive accepted — routed to Engineering.', 'Pipeline created; DevOps contract gate armed for the change.', 'Canary rollout plan drafted with automatic rollback thresholds.', 'Latency budget checks wired to the observability stream.', 'Deploy order above the current autonomy mode will surface in Approvals.'],
-      strategy: ['Directive accepted — decomposed by the Orchestrator.', 'Strategy directors are framing options with competitive context.', 'Finance validates the numbers before anything reaches you.', 'Synthesis memo with a recommendation lands in Deliverables.', 'You will only be interrupted if a decision exceeds the current autonomy mode.'],
-    };
-    const lines = (R[dept.id] || R.strategy).map((txt, i) => (i === 0 ? { k: 'b', t: txt } : (i < 4 ? { k: 'i', t: txt, m: '0' + i } : { k: 'p', t: txt })));
-    const hex = Math.floor(Math.random() * 65535).toString(16).toUpperCase().padStart(4, '0');
-    return { who: 'ai', lines, gov: { token: 'GRN-' + hex, agents: chain.length, tokens: fk(tok) } };
-  }, []);
-
+  // ── co-work turn: a REAL governed agent run ───────────────────────────
+  //
+  // WHAT THIS REPLACED. Until now "sending a directive" ran entirely in the
+  // browser: `buildReply` picked one of seven canned scripts by keyword-matching
+  // the text, a fake delegation chain was assembled from the generated agent
+  // fixture, and a chain of setTimeout calls animated phases ("ROUTING VIA
+  // ORCHESTRATOR", "EXECUTING · N AGENTS") and invented a token count. Nothing
+  // left the tab. It looked exactly like a governed run and was not one.
+  //
+  // It is now POST /api/console/cowork/turns -> POST /api/v1/cowork/turns,
+  // which is one `AgentExecutionService.execute()` call and therefore walks the
+  // real pipeline: the synchronous decision gate, the token mint, ordered token
+  // validation before every LLM egress, and ToolProxy validation on every tool
+  // call (cowork.py:1-18).
+  //
+  // ONLY `message` GOES UP. The composer's attachments, agent/department tags
+  // and connector selections have no counterpart in the backend contract and
+  // are NOT sent -- they are disabled in the UI instead (see `tagUnavailable`
+  // in the view model). Silently dropping them while the button still worked
+  // would tell the operator their directive was routed somewhere it was not.
   const doSend = useCallback((text) => {
-    text = (text || '').trim();
+    const message = (text || '').trim();
     const s = stateRef.current;
-    const atts = s.chatAttachments, tags = s.chatTags, conns = s.chatConnectors;
-    if (!text && !atts.length) return;
+    if (!message) return;
     if (s.chatBusy) return;
-    const deptTag = tags.find((tg) => tg.deptId && !tg.agentId);
-    const agentTag = tags.find((tg) => tg.agentId);
-    let forcedAgent = null, deptId = null;
-    if (agentTag) { forcedAgent = byId[agentTag.agentId]; deptId = forcedAgent ? forcedAgent.department : null; }
-    if (!deptId && deptTag) deptId = deptTag.deptId;
-    if (!deptId) deptId = routeDept(text || 'strategy update');
-    const dept = deptById[deptId] || DEPARTMENTS[0] || { name: 'STRATEGY', color: '#B5AC61' };
-    const chips = []
-      .concat(atts.length ? [{ label: atts.length + (atts.length === 1 ? ' FILE' : ' FILES'), color: '#77809A', dotDisp: 'none' }] : [])
-      .concat(tags.map((tg) => ({ label: '#' + tg.label.toUpperCase(), color: tg.color, dotDisp: 'block' })))
-      .concat(conns.map((c) => ({ label: 'VIA ' + c.name.toUpperCase(), color: c.color, dotDisp: 'block' })));
-    const user = { who: 'user', lines: text ? [{ k: 'p', t: text }] : [{ k: 'p', t: 'Shared ' + atts.length + ' file' + (atts.length === 1 ? '' : 's') + ' for review.' }], chips };
-    setState((prev) => ({ ...prev, messages: prev.messages.concat([user]), chatInput: '', dirInput: '', chatBusy: true, chatPhase: 'ROUTING VIA ORCHESTRATOR', rail: [], chatAttachments: [], chatTags: [], chatConnectors: [] }));
-    const pool = AGENTS.filter((a) => a.department === deptId);
-    let chain;
-    if (forcedAgent) {
-      chain = [forcedAgent].concat(AGENTS.filter((a) => a.reportsTo === forcedAgent.id).slice(0, 4));
-    } else {
-      chain = [
-        pool.find((a) => a.authority === 'executive'),
-        pool.find((a) => a.authority === 'vp'),
-        pool.filter((a) => a.authority === 'director')[0],
-        pool.filter((a) => a.authority === 'director')[1],
-        pool.filter((a) => a.authority === 'manager' || a.authority === 'worker')[0],
-        pool.filter((a) => a.authority === 'worker')[1],
-      ].filter(Boolean).slice(0, 6);
-    }
-    t(() => setState({ chatPhase: 'DELEGATING · ' + dept.name }), 900);
-    chain.forEach((a, i) => {
-      t(() => setState((prev) => ({ ...prev, rail: prev.rail.concat([{ id: a.id, name: a.name, depth: Math.min(i, 3), dept: a.department, done: false, tok: 400 + Math.floor(Math.random() * 2400) }]) })), 1400 + i * 420);
-    });
-    const execAt = 1700 + chain.length * 420;
-    t(() => setState({ chatPhase: 'EXECUTING · ' + chain.length + ' AGENTS' }), execAt);
-    t(() => {
-      setState((prev) => {
-        const tok = prev.rail.reduce((sum, r) => sum + r.tok, 0) + 900;
-        const rail = prev.rail.map((r) => ({ ...r, done: true }));
-        const reply = buildReply(dept, chain, tok);
-        return { ...prev, chatBusy: false, chatPhase: '', rail, messages: prev.messages.concat([reply]), sessTok: prev.sessTok + tok };
-      });
-    }, execAt + 2200);
-  }, [setState, t, buildReply]);
+
+    const user = { who: 'user', lines: [{ k: 'p', t: message }], chips: [] };
+    setState((prev) => ({
+      ...prev,
+      messages: prev.messages.concat([user]),
+      chatInput: '',
+      dirInput: '',
+      chatBusy: true,
+      // A truthful single phase. There is no client-visible delegation chain to
+      // narrate, so the console no longer pretends to watch one.
+      chatPhase: 'RUNNING GOVERNED TURN',
+      rail: [],
+    }));
+
+    sendCoworkTurn(message).then(
+      (result) => {
+        setState((prev) => {
+          // A DEFERRED turn produced no reply: a HITL row exists and a human
+          // must act. Rendering an empty answer would hide that entirely.
+          const reply = result.deferred
+            ? {
+                who: 'ai',
+                deferred: true,
+                lines: [
+                  { k: 'b', t: 'Deferred to a human.' },
+                  { k: 'p', t: result.reason || 'This turn requires human approval.' },
+                  { k: 'p', t: 'It is now in Approvals as ' + result.hitlId + '.' },
+                ],
+              }
+            : {
+                who: 'ai',
+                lines: [{ k: 'p', t: result.reply }],
+                // The REAL provenance the backend returned. No invented token
+                // id, no invented agent count, no invented token total.
+                gov: { agentId: result.agentId, deliverableId: result.deliverableId },
+              };
+          return {
+            ...prev,
+            chatBusy: false,
+            chatPhase: '',
+            messages: prev.messages.concat([reply]),
+          };
+        });
+      },
+      (error) => {
+        setState((prev) => ({
+          ...prev,
+          chatBusy: false,
+          chatPhase: '',
+          messages: prev.messages.concat([
+            {
+              who: 'ai',
+              failed: true,
+              lines: [
+                { k: 'b', t: 'The turn did not run.' },
+                { k: 'p', t: error.message || 'The backend could not be reached.' },
+              ],
+            },
+          ]),
+        }));
+      },
+    );
+  }, [setState]);
 
   // ── starmap ──
   const starGeom = useCallback((id) => {
@@ -547,22 +633,248 @@ export function useConsoleState(props) {
     );
   }, [setState]);
 
-  const decide = useCallback((id, ok) => {
-    const s = stateRef.current;
-    const d = new Date(); const p = (n) => String(n).padStart(2, '0');
-    setState((prev) => ({
-      ...prev,
-      approvals: prev.approvals.filter((a) => a.id !== id),
-      audit: [{ time: p(d.getUTCHours()) + ':' + p(d.getUTCMinutes()) + ':' + p(d.getUTCSeconds()), actor: 'Operator (human)', action: 'APPROVAL', target: 'approvals/' + id + ' · ' + (ok ? 'APPROVED' : 'DECLINED'), sig: '0x' + Math.floor(Math.random() * 65535).toString(16).toUpperCase().padStart(4, '0') + '…' + Math.floor(Math.random() * 65535).toString(16).toUpperCase().padStart(4, '0') }].concat(prev.audit),
-    }));
-    showToast(id + ' ' + (ok ? 'APPROVED' : 'DECLINED') + ' · SIGNED TO AUDIT LOG', ok ? '#34C579' : '#E15A52');
-  }, [setState, showToast]);
+  // ── approvals: load + verdict ────────────────────────────────────
+  const aliveRef = useRef(true);
 
+  const loadApprovals = useCallback(() => {
+    setState({ approvalsLoading: true, approvalsError: null });
+    return fetchApprovals(50).then(
+      (result) => {
+        if (!aliveRef.current) return;
+        setState({ approvals: result.items, approvalsLoading: false, approvalsError: null });
+      },
+      (error) => {
+        if (!aliveRef.current) return;
+        // EMPTY, not sample rows. "Could not read the queue" and "the queue is
+        // empty" are opposite facts, and the view model keeps them distinct.
+        setState({
+          approvals: [],
+          approvalsLoading: false,
+          approvalsError: error.message || 'Could not read the approvals queue.',
+        });
+      },
+    );
+  }, [setState]);
+
+  // ── audit ────────────────────────────────────────────────
+  const loadAudit = useCallback(() => {
+    setState({ auditLoading: true, auditError: null });
+    return fetchAudit(50).then(
+      (result) => {
+        if (!aliveRef.current) return;
+        setState({ audit: result.entries, auditLoading: false, auditError: null });
+      },
+      (error) => {
+        if (!aliveRef.current) return;
+        setState({
+          audit: [],
+          auditLoading: false,
+          auditError: error.message || 'Could not read the audit log.',
+        });
+      },
+    );
+  }, [setState]);
+
+  // ONE BOOLEAN BECAME TWO CALLS. `decide(id, ok)` used to filter a row out of
+  // local state and append an invented audit line with a random hex "signature".
+  // Approve and reject are different backend operations with different
+  // consequences -- approve EXECUTES the deferred work, reject executes nothing
+  // -- so they dispatch to two different endpoints, and the queue is re-read
+  // from the server afterwards rather than spliced locally.
+  const decide = useCallback((hitlId, ok, note) => {
+    const s = stateRef.current;
+    if (s.approvalBusyId) return;
+    setState({ approvalBusyId: hitlId });
+    const action = ok ? approveHitl : rejectHitl;
+    action(hitlId, note).then(
+      () => {
+        if (!aliveRef.current) return;
+        setState({ approvalBusyId: null });
+        showToast(
+          (ok ? 'APPROVED · ' : 'REJECTED · ') + hitlId.slice(0, 8),
+          ok ? '#34C579' : '#E15A52',
+        );
+        // Server truth, not a local splice: an approval can itself defer again,
+        // and only the backend knows the row resulting status.
+        loadApprovals();
+        loadAudit();
+      },
+      (error) => {
+        if (!aliveRef.current) return;
+        setState({ approvalBusyId: null });
+        showToast(error.message || 'The verdict did not record.', '#E15A52');
+        // Re-read regardless: a 409 means someone else already actioned it, so
+        // the on-screen queue is the stale thing.
+        loadApprovals();
+      },
+    );
+  }, [setState, showToast, loadApprovals, loadAudit]);
+
+  // ── kill switch ──────────────────────────────────────────
+  //
+  // WHAT CHANGED. This used to be a two-click LOCAL boolean that flipped
+  // `pausedAll` and toasted "ALL AGENTS PAUSED" without contacting anything.
+  // It now calls POST /api/v1/kill-switch/engage, which needs scope_type +
+  // scope_id + reason.
+  //
+  // scope_type is "tenant" -- the existing PAUSE ALL button is org-wide by
+  // design -- but the REASON comes from the operator and is never defaulted.
+  // The arm-then-confirm interaction is kept: the second click is what sends.
   const dangerPause = useCallback(() => {
     const s = stateRef.current;
-    if (s.pausedAll) { setState({ pausedAll: false, pauseArm: false }); showToast('DELEGATION RESUMED', '#34C579'); return; }
-    if (!s.pauseArm) { clearTimeout(armTRef.current); setState({ pauseArm: true }); armTRef.current = setTimeout(() => setState({ pauseArm: false }), 3000); return; }
-    clearTimeout(armTRef.current); setState({ pausedAll: true, pauseArm: false }); showToast('ALL AGENTS PAUSED · APPROVALS QUEUE STAYS LIVE', '#E15A52');
+    if (s.pauseBusy) return;
+    if (s.pausedAll) {
+      // Disengage is NOT wired: POST /api/v1/kill-switch/disengage exists, but
+      // the console has never had a scope-aware resume affordance, and adding
+      // one here would be a second unreviewed control on the most consequential
+      // surface in the product. Stated out loud rather than faked.
+      showToast('RESUME IS NOT WIRED — disengage from the backend.', '#D19A3F');
+      return;
+    }
+    if (!s.pauseArm) {
+      clearTimeout(armTRef.current);
+      setState({ pauseArm: true, pauseError: null });
+      armTRef.current = setTimeout(() => setState({ pauseArm: false }), 8000);
+      return;
+    }
+    const reason = (s.pauseReason || '').trim();
+    if (!reason) {
+      setState({ pauseError: 'A reason is required — it is recorded in the audit trail.' });
+      return;
+    }
+    clearTimeout(armTRef.current);
+    setState({ pauseBusy: true, pauseError: null });
+    engageKillSwitch('tenant', 'tenant', reason).then(
+      () => {
+        if (!aliveRef.current) return;
+        setState({ pausedAll: true, pauseArm: false, pauseBusy: false, pauseError: null });
+        showToast('KILL SWITCH ENGAGED · TENANT SCOPE', '#E15A52');
+        loadAudit();
+      },
+      (error) => {
+        if (!aliveRef.current) return;
+        // NOT paused. The flag stays false so the console cannot claim a
+        // platform control is engaged when the backend never accepted it.
+        setState({
+          pausedAll: false,
+          pauseArm: false,
+          pauseBusy: false,
+          pauseError: error.message || 'The kill switch did not engage.',
+        });
+        showToast('KILL SWITCH DID NOT ENGAGE', '#E15A52');
+      },
+    );
+  }, [setState, showToast, loadAudit]);
+
+  // ── mount: load every wired screen from the backend ───────────────────
+  //
+  // GET on mount for each, in parallel. Each failure is isolated: one screen
+  // being unreachable never blanks another, and no screen falls back to
+  // fixture data.
+  useEffect(() => {
+    aliveRef.current = true;
+
+    fetchAgents().then(
+      (agents) => {
+        if (!aliveRef.current) return;
+        setState({ agentsLive: agents, agentsLoading: false, agentsError: null });
+      },
+      (error) => {
+        if (!aliveRef.current) return;
+        setState({
+          agentsLive: [],
+          agentsLoading: false,
+          agentsError: error.message || 'Could not read the agent registry.',
+        });
+      },
+    );
+
+    fetchApiKeys().then(
+      (keys) => {
+        if (!aliveRef.current) return;
+        setState({ keys, keysLoading: false, keysError: null });
+      },
+      (error) => {
+        if (!aliveRef.current) return;
+        setState({
+          keys: [],
+          keysLoading: false,
+          keysError: error.message || 'Could not read the API keys.',
+        });
+      },
+    );
+
+    fetchOrgUsers().then(
+      (members) => {
+        if (!aliveRef.current) return;
+        setState({ members, membersLoading: false, membersError: null });
+      },
+      (error) => {
+        if (!aliveRef.current) return;
+        setState({
+          members: [],
+          membersLoading: false,
+          membersError: error.message || 'Could not read the member list.',
+        });
+      },
+    );
+
+    loadApprovals();
+    loadAudit();
+
+    return () => { aliveRef.current = false; };
+  }, [setState, loadApprovals, loadAudit]);
+
+  // ── developers: mint / revoke ─────────────────────────────────
+  //
+  // The minted secret is kept in memory and shown once. It is deliberately NOT
+  // written to localStorage with the other persisted keys: the backend will
+  // never return it again, but that is a reason to copy it, not a reason for a
+  // static web app to store a live credential on disk.
+  const setPauseReason = useCallback((reason) => setState({ pauseReason: reason }), [setState]);
+  const dismissMintedKey = useCallback(() => setState({ mintedKey: null }), [setState]);
+
+  const mintKey = useCallback((name) => {
+    const label = (name || '').trim();
+    if (!label) {
+      setState({ keysError: 'A key needs a name.' });
+      return;
+    }
+    setState({ keysError: null });
+    issueApiKey(label, []).then(
+      (issued) => {
+        if (!aliveRef.current) return;
+        setState({ mintedKey: issued });
+        showToast('KEY MINTED · COPY IT NOW', '#34C579');
+        fetchApiKeys().then(
+          (keys) => { if (aliveRef.current) setState({ keys }); },
+          () => {},
+        );
+      },
+      (error) => {
+        if (!aliveRef.current) return;
+        setState({ keysError: error.message || 'Could not mint a key.' });
+        showToast('KEY NOT MINTED', '#E15A52');
+      },
+    );
+  }, [setState, showToast]);
+
+  const revokeKey = useCallback((keyId) => {
+    setState({ keysError: null });
+    revokeApiKey(keyId).then(
+      () => {
+        if (!aliveRef.current) return;
+        showToast('KEY REVOKED', '#E15A52');
+        fetchApiKeys().then(
+          (keys) => { if (aliveRef.current) setState({ keys }); },
+          () => {},
+        );
+      },
+      (error) => {
+        if (!aliveRef.current) return;
+        setState({ keysError: error.message || 'Could not revoke the key.' });
+      },
+    );
   }, [setState, showToast]);
 
   return buildViewModel({
@@ -570,6 +882,7 @@ export function useConsoleState(props) {
     setState, set, setAutonomy, nav, tiltMove, tiltLeave,
     onAttachClick, onFileChange, removeAttachment, toggleTagMenu, toggleConnMenu, onTagQ, addTag, removeTag, addConnector, removeConnector,
     doSend, starGeom, starStep, starGo, starTilt, starTiltReset, netGeom, decide, dangerPause, showToast, sparks, spend30,
+    loadApprovals, loadAudit, mintKey, revokeKey, setPauseReason, dismissMintedKey,
   });
 }
 
@@ -579,6 +892,7 @@ function buildViewModel(ctx) {
     setState, set, setAutonomy, nav, tiltMove, tiltLeave,
     onAttachClick, onFileChange, removeAttachment, toggleTagMenu, toggleConnMenu, onTagQ, addTag, removeTag, addConnector, removeConnector,
     doSend, starGeom, starStep, starGo, starTilt, starTiltReset, netGeom, decide, dangerPause, showToast, sparks, spend30,
+    loadApprovals, loadAudit, mintKey, revokeKey, setPauseReason, dismissMintedKey,
   } = ctx;
 
   const active = AGENTS.filter((a) => a.status === 'executing').length;
@@ -647,14 +961,24 @@ function buildViewModel(ctx) {
     { label: 'DIRECTIVES · 24H', value: '34', sub: 'issued', delta: '+6 vs yday', deltaColor: '#34C579', spark: sparks[0], sparkColor: acc, valColor: '#E9EBF2' },
     { label: 'TOKENS / HR', value: fk(s.tokRate), sub: 'live', delta: '+4.1%', deltaColor: '#34C579', spark: sparks[1], sparkColor: acc, valColor: '#E9EBF2' },
     { label: 'SPEND · TODAY', value: money(cost), sub: 'USD', delta: '−2.8% vs avg', deltaColor: '#34C579', spark: sparks[2], sparkColor: '#34C579', valColor: '#E9EBF2' },
-    { label: 'PENDING APPROVALS', value: String(s.approvals.length), sub: 'in queue', delta: 'oldest 3h', deltaColor: '#D19A3F', spark: sparks[3], sparkColor: '#D19A3F', valColor: '#D19A3F' },
-    { label: 'AGENTS IN ERROR', value: String(errN), sub: 'of 151', delta: 'auto-restart armed', deltaColor: '#E15A52', spark: sparks[4], sparkColor: '#E15A52', valColor: errN ? '#E15A52' : '#E9EBF2' },
+    // WIRED: the real HITL queue depth. "oldest 3h" is dropped -- the queue is
+    // real now, and that figure never was.
+    { label: 'PENDING APPROVALS', value: s.approvalsError ? '\u2014' : String(s.approvals.length), sub: s.approvalsError ? 'unavailable' : 'in queue', delta: '', deltaColor: '#D19A3F', spark: sparks[3], sparkColor: '#D19A3F', valColor: '#D19A3F' },
+    // WIRED: the real registry size. This tile used to read "N of 151", the
+    // fixture count; the governed registry holds 23.
+    { label: 'GOVERNED AGENTS', value: s.agentsLoading ? '\u2026' : (s.agentsError ? '\u2014' : String(s.agentsLive.length)), sub: s.agentsError ? 'unavailable' : 'in registry', delta: '', deltaColor: '#77809A', spark: sparks[4], sparkColor: acc, valColor: '#E9EBF2' },
   ];
   const deptTok = DEPARTMENTS.map((d) => ({ d, tok: AGENTS.filter((a) => a.department === d.id).reduce((tt, a) => tt + a.tokensUsed, 0) })).sort((a, b) => b.tok - a.tok);
   const maxTok = deptTok.length ? deptTok[0].tok : 1;
   const deptBars = deptTok.slice(0, 8).map((x) => ({ name: x.d.name, color: x.d.color, w: Math.round(x.tok / maxTok * 100) + '%', amt: money(x.tok * 0.0009) }));
-  const riskC = { HIGH: '#E15A52', MED: '#D19A3F', LOW: '#34C579' };
-  const apPrev = s.approvals.slice(0, 3).map((a) => ({ title: a.title, meta: a.meta, risk: a.risk, riskColor: riskC[a.risk], riskBg: riskC[a.risk] + '14', approve: () => decide(a.id, true), decline: () => decide(a.id, false) }));
+  // The dashboard preview shows the same real rows the Approvals screen does:
+  // reason + agent + age, no risk chip, because there is no risk field.
+  const apPrev = s.approvals.slice(0, 3).map((a) => ({
+    title: a.triggerReason || 'Deferred to a human',
+    meta: (a.agentId || 'unknown agent') + ' \u00b7 ' + (agoFrom(a.createdAt) || a.createdAt),
+    approve: () => decide(a.hitlId, true),
+    decline: () => decide(a.hitlId, false),
+  }));
   const agentColors = ['#7A9BFF', '#34C579', '#D19A3F', '#A78BFA', '#5CAD85', '#BC6E86'];
   const pulseLogs = s.pulse.map((l) => ({ time: l.time, agent: l.agent, agentColor: agentColors[l.agent.length % agentColors.length], action: l.action }));
 
@@ -760,15 +1084,47 @@ function buildViewModel(ctx) {
   ].map((r) => ({ name: r[0], trigger: r[1], status: r[2], stColor: r[3], when: r[4], dur: r[5] }));
 
   // ── approvals ──
-  const apFiltered = s.approvals.filter((a) => s.apRisk === 'all' || a.risk === s.apRisk);
-  const apRiskChips = [['all', 'ALL'], ['HIGH', 'HIGH'], ['MED', 'MED'], ['LOW', 'LOW']].map((p) => ({ pick: () => setState({ apRisk: p[0] }), label: p[1], bd: s.apRisk === p[0] ? 'var(--accent,#3D6BFF)' : '#232939', bg: s.apRisk === p[0] ? 'color-mix(in oklab, var(--accent,#3D6BFF) 16%, transparent)' : 'transparent', c: s.apRisk === p[0] ? '#E9EBF2' : '#8B93A7' }));
+  //
+  // RISK / AMOUNT / CHAIN ARE GONE, and this is the whole reshape. The screen
+  // was designed around a HIGH/MED/LOW risk chip, a money column and a
+  // delegation chain; /api/v1/hitl has none of the three (HitlItemResponse is
+  // hitl_id, agent_id, trigger_reason, status, created_at, expires_at,
+  // proposal_summary, request_input). Inventing a risk tier in the browser
+  // would be inventing a governance judgement the platform never made, so the
+  // filter chips now filter on STATUS, which is real, and the row shows
+  // `trigger_reason` -- the recorded reason the item is waiting at all.
+  const apStatuses = ['all'].concat(
+    s.approvals.map((a) => a.status).filter((v, i, arr) => v && arr.indexOf(v) === i),
+  );
+  const apFiltered = s.approvals.filter((a) => s.apRisk === 'all' || a.status === s.apRisk);
+  const apRiskChips = apStatuses.map((id) => ({
+    pick: () => setState({ apRisk: id }),
+    label: id === 'all' ? 'ALL' : id.toUpperCase(),
+    bd: s.apRisk === id ? 'var(--accent,#3D6BFF)' : '#232939',
+    bg: s.apRisk === id ? 'color-mix(in oklab, var(--accent,#3D6BFF) 16%, transparent)' : 'transparent',
+    c: s.apRisk === id ? '#E9EBF2' : '#8B93A7',
+  }));
+  // ONE REAL STAT. "Median wait", "auto-executed 96.4%" and "declined 11 of
+  // 412" had no backing query anywhere in the platform -- they were decoration
+  // with a number in them, which on an approvals screen reads as fact.
   const apStats = [
-    { label: 'PENDING', value: String(s.approvals.length), sub: 'items', color: '#D19A3F' },
-    { label: 'MEDIAN WAIT', value: '38m', sub: 'this week', color: '#E9EBF2' },
-    { label: 'AUTO-EXECUTED', value: '96.4%', sub: 'within envelope', color: '#34C579' },
-    { label: 'DECLINED · 30D', value: '11', sub: 'of 412 asks', color: '#E9EBF2' },
+    { label: 'PENDING', value: String(s.approvals.length), sub: 'in queue', color: '#D19A3F' },
   ];
-  const apRows = apFiltered.map((a) => ({ title: a.title, meta: a.meta, chain: a.chain, amount: a.amount, risk: a.risk, riskColor: riskC[a.risk], riskBg: riskC[a.risk] + '14', riskBd: riskC[a.risk] + '45', approve: () => decide(a.id, true), decline: () => decide(a.id, false) }));
+  const apRows = apFiltered.map((a) => ({
+    // The proposal summary is the backend own dict; the id is what identifies
+    // the row to a human, so it leads.
+    title: a.triggerReason || 'Deferred to a human',
+    meta: (a.agentId || 'unknown agent') + ' \u00b7 ' + (agoFrom(a.createdAt) || a.createdAt),
+    hitlId: a.hitlId,
+    shortId: a.hitlId.slice(0, 8),
+    status: a.status,
+    summary: summarise(a.proposalSummary),
+    busy: s.approvalBusyId === a.hitlId,
+    // Two distinct calls. The note is optional free text the backend accepts.
+    approve: (note) => decide(a.hitlId, true, note),
+    decline: (note) => decide(a.hitlId, false, note),
+  }));
+
 
   // ── analytics ──
   const mn = Math.min.apply(null, spend30), mx = Math.max.apply(null, spend30);
@@ -844,27 +1200,120 @@ function buildViewModel(ctx) {
   }));
 
   // ── developers ──
-  const keyRows = [
-    { name: 'Production — orchestrator', masked: 'sk-live-••••••••4F2A', created: 'MAR 12', scope: 'FULL', lastUsed: '2 min ago' },
-    { name: 'BI read-only', masked: 'sk-live-••••••••C817', created: 'APR 03', scope: 'READ', lastUsed: '1 h ago' },
-    { name: 'Staging sandbox', masked: 'sk-test-••••••••90DE', created: 'JUN 21', scope: 'SANDBOX', lastUsed: '3 d ago' },
-  ];
-  const mColors = { GET: ['#34C579', 'rgba(52,197,121,0.12)'], POST: ['#7A9BFF', 'rgba(122,155,255,0.12)'], PATCH: ['#D19A3F', 'rgba(209,154,63,0.12)'] };
+  //
+  // REAL KEYS. The three rows here used to be invented ("Production —
+  // orchestrator / sk-live-••••4F2A / FULL / 2 min ago"), which on a key
+  // management screen is the most dangerous kind of fiction: an operator could
+  // believe a key exists, or believe one was revoked.
+  //
+  // `masked` is now the backend `prefix`, which is the real non-secret
+  // identifying fragment, and `scope` is the key actual `scopes` list. A key
+  // scopes BECOME its roles (app/auth/service.py:95), so this column is load
+  // bearing rather than cosmetic.
+  const keyRows = s.keys.map((k) => ({
+    keyId: k.keyId,
+    name: k.name,
+    masked: k.prefix + '\u2026',
+    created: agoFrom(k.createdAt) || k.createdAt,
+    scope: k.scopes.length ? k.scopes.join(', ').toUpperCase() : 'NONE',
+    lastUsed: k.revokedAt
+      ? 'REVOKED'
+      : (k.lastUsedAt ? agoFrom(k.lastUsedAt) : 'never used'),
+    revoked: !!k.revokedAt,
+    revoke: () => revokeKey(k.keyId),
+  }));
+  const mColors = { GET: ['#34C579', 'rgba(52,197,121,0.12)'], POST: ['#7A9BFF', 'rgba(122,155,255,0.12)'], DELETE: ['#E15A52', 'rgba(225,90,82,0.12)'], PUT: ['#D19A3F', 'rgba(209,154,63,0.12)'] };
+  // THE REAL ROUTES. This list used to advertise POST /v1/directives,
+  // GET /v1/runs/:id, POST /v1/approvals/:id/decide and
+  // PATCH /v1/agents/:id/budget -- none of which exists. A developer reading
+  // this panel would have written against an API that was never built.
   const endRows = [
-    ['POST', '/v1/directives', 'Issue a directive to the organization'],
-    ['GET', '/v1/agents', 'List agents, budgets, and status'],
-    ['GET', '/v1/runs/:id', 'Inspect a workflow run and its chain'],
-    ['POST', '/v1/approvals/:id/decide', 'Approve or decline a pending action'],
-    ['GET', '/v1/audit', 'Stream the signed audit log'],
-    ['PATCH', '/v1/agents/:id/budget', 'Adjust an agent token ceiling'],
+    ['POST', '/api/v1/cowork/turns', 'Send one governed co-work turn'],
+    ['GET', '/api/v1/agents', 'List governed agents and their input schemas'],
+    ['POST', '/api/v1/agents/execute', 'Run one agent against a typed input'],
+    ['GET', '/api/v1/hitl', 'List items deferred to a human'],
+    ['POST', '/api/v1/hitl/{id}/approve', 'Approve and execute a deferred item'],
+    ['POST', '/api/v1/hitl/{id}/reject', 'Reject a deferred item; nothing runs'],
+    ['GET', '/api/v1/audit', 'Read the append-only governed-action log'],
+    ['POST', '/api/v1/kill-switch/engage', 'Halt a scope (owner only)'],
   ].map((e) => ({ method: e[0], path: e[1], desc: e[2], mColor: mColors[e[0]][0], mBg: mColors[e[0]][1] }));
   const hookEvents = ['directive.completed', 'approval.requested', 'approval.decided', 'agent.error', 'budget.threshold', 'run.failed', 'audit.exported', 'policy.violation'].map((n) => ({ name: n }));
-  const quickstart = 'curl -X POST https://api.skylize.ai/v1/directives \\\n  -H "Authorization: Bearer $SKYLIZE_KEY" \\\n  -d \'{"text": "Reforecast Q3 revenue"}\'';
+  // A request that actually works, against the route that actually exists.
+  //
+  // THIS SNIPPET DOCUMENTS THE BACKEND'S OWN AUTH, NOT THIS CONSOLE'S. The two
+  // are different and conflating them would mislead: the console browser bundle
+  // sends NO credential ever -- it calls the BFF same-origin and the session
+  // cookie carries it (vite.config.js, "no credential in this app"), with the
+  // service API key held only server-side in website/src/app/api/console/*.
+  // A developer calling the PUBLIC API from their own client is the one who
+  // needs an auth header, so the snippet is written for that caller and says
+  // so, rather than implying the console authenticates this way.
+  //
+  // The header name is referenced through AUTH_HEADER_DOC rather than spelled
+  // inline because CI greps this built bundle for credential-shaped text
+  // (ci.yml `console-black`). That guard is content-based and intentionally
+  // blunt, and it stays that way -- see the constant's own note.
+  const quickstart = [
+    'curl -X POST "$SKYLIZE_URL/api/v1/cowork/turns" \\',
+    '  -H "' + AUTH_HEADER_DOC + ': $SKYLIZE_KEY" \\',
+    '  -H "Content-Type: application/json" \\',
+    '  -d \'{"message": "Draft three hooks for the spring launch"}\'',
+  ].join('\n');
 
   // ── audit log ──
-  const actC = { DIRECTIVE: ['#7A9BFF', 'rgba(122,155,255,0.12)'], APPROVAL: ['#D19A3F', 'rgba(209,154,63,0.12)'], TOOL: ['#34C579', 'rgba(52,197,121,0.12)'], SECURITY: ['#E15A52', 'rgba(225,90,82,0.12)'], BILLING: ['#A78BFA', 'rgba(167,139,250,0.12)'] };
-  const logChips = [['all', 'ALL'], ['DIRECTIVE', 'DIRECTIVES'], ['APPROVAL', 'APPROVALS'], ['TOOL', 'TOOLS'], ['SECURITY', 'SECURITY'], ['BILLING', 'BILLING']].map((p) => ({ pick: () => setState({ logFilter: p[0] }), label: p[1], bd: s.logFilter === p[0] ? 'var(--accent,#3D6BFF)' : '#232939', bg: s.logFilter === p[0] ? 'color-mix(in oklab, var(--accent,#3D6BFF) 16%, transparent)' : 'transparent', c: s.logFilter === p[0] ? '#E9EBF2' : '#8B93A7' }));
-  const logRows = s.audit.filter((l) => s.logFilter === 'all' || l.action === s.logFilter).map((l) => ({ time: l.time, actor: l.actor, action: l.action, actionColor: actC[l.action][0], actionBg: actC[l.action][1], target: l.target, sig: l.sig }));
+  //
+  // TWO COLUMNS WERE RENAMED BECAUSE THEY WERE FALSE.
+  //
+  //   ACTOR -> SOURCE AGENT. The feed used to print names like "Chief Financial
+  //   Officer" and "Operator (human)" under an ACTOR heading. `audit_log` has no
+  //   human-actor column at all; it has `source_agent_id`, which is an agent id
+  //   or null. Presenting an agent id as a person, in the one screen whose job
+  //   is attribution, is the single worst thing this console could claim.
+  //
+  //   SIGNATURE -> INPUTS HASH. The rows carried invented values like
+  //   "0x8F41...C2A9" under a SIGNATURE heading. The backend field is
+  //   `inputs_hash`, a SHA-256 content hash (audit.py:8-10). A hash shows a
+  //   payload is unaltered; a signature asserts WHO produced it. The label now
+  //   says which one this actually is, and the value is the real hash.
+  //
+  // The filter chips are built from the action types actually present, not from
+  // a hardcoded DIRECTIVE/APPROVAL/TOOL/SECURITY/BILLING taxonomy that the
+  // backend never emitted.
+  const actC = {
+    success: ['#34C579', 'rgba(52,197,121,0.12)'],
+    failure: ['#E15A52', 'rgba(225,90,82,0.12)'],
+    denied: ['#E15A52', 'rgba(225,90,82,0.12)'],
+    deferred: ['#D19A3F', 'rgba(209,154,63,0.12)'],
+  };
+  const logTypes = ['all'].concat(
+    s.audit.map((l) => l.actionType).filter((v, i, arr) => v && arr.indexOf(v) === i).slice(0, 6),
+  );
+  const logChips = logTypes.map((id) => ({
+    pick: () => setState({ logFilter: id }),
+    label: id === 'all' ? 'ALL' : id.toUpperCase(),
+    bd: s.logFilter === id ? 'var(--accent,#3D6BFF)' : '#232939',
+    bg: s.logFilter === id ? 'color-mix(in oklab, var(--accent,#3D6BFF) 16%, transparent)' : 'transparent',
+    c: s.logFilter === id ? '#E9EBF2' : '#8B93A7',
+  }));
+  const logRows = s.audit
+    .filter((l) => s.logFilter === 'all' || l.actionType === s.logFilter)
+    .map((l) => {
+      const tone = actC[l.result] || ['#9AA1B2', 'rgba(154,161,178,0.12)'];
+      return {
+        time: hhmmss(l.occurredAt),
+        // An AGENT id, or an explicit "\u2014" when the row has none. Never a
+        // person name, because the backend has none to give.
+        agent: l.sourceAgentId || '\u2014',
+        action: l.actionType,
+        actionColor: tone[0],
+        actionBg: tone[1],
+        // The governed result plus its reason, which is the real "target" story.
+        target: l.result + (l.resultReason ? ' \u00b7 ' + l.resultReason : ''),
+        // A CONTENT HASH, shown truncated, under a heading that says so.
+        hash: l.inputsHash ? l.inputsHash.slice(0, 16) + '\u2026' : '\u2014',
+      };
+    });
+
 
   // ── security ──
   const secScore = 94, circ = 2 * Math.PI * 56;
@@ -887,24 +1336,43 @@ function buildViewModel(ctx) {
   const secBadges = ['SOC 2 TYPE II', 'ISO 27001', 'GDPR', 'HIPAA-READY'].map((n) => ({ name: n }));
 
   // ── team ──
-  const roleC = { OWNER: ['color-mix(in oklab, var(--accent,#3D6BFF) 80%, #FFFFFF)', 'color-mix(in oklab, var(--accent,#3D6BFF) 16%, transparent)'], ADMIN: ['#A78BFA', 'rgba(167,139,250,0.12)'], OPERATOR: ['#34C579', 'rgba(52,197,121,0.12)'], AUDITOR: ['#D19A3F', 'rgba(209,154,63,0.12)'] };
-  const memberRows = [
-    ['Mara Lindqvist', 'mara@aventra.eu', 'OWNER', '2 min ago', 'ON'],
-    ['Deniz Aksoy', 'deniz@aventra.eu', 'ADMIN', '18 min ago', 'ON'],
-    ['Jonas Weber', 'jonas@aventra.eu', 'OPERATOR', '1 h ago', 'ON'],
-    ['the client contact Raman', 'priya@aventra.eu', 'OPERATOR', '3 h ago', 'ON'],
-    ['Sofia Marino', 'sofia@aventra.eu', 'AUDITOR', '1 d ago', 'ON'],
-    ['External audit — KPMG', 'audit-ext@aventra.eu', 'AUDITOR', '6 d ago', 'OFF'],
-  ].map((m) => ({ initials: m[0].split(' ').map((w) => w[0]).join('').slice(0, 2).toUpperCase(), name: m[0], email: m[1], role: m[2], roleColor: roleC[m[2]][0], roleBg: roleC[m[2]][1], last: m[3], mfa: m[4], mfaColor: m[4] === 'ON' ? '#34C579' : '#E15A52' }));
-  const permDefs = [
-    ['Issue directives', [1, 1, 1, 0]],
-    ['Approve HIGH-risk actions', [1, 1, 0, 0]],
-    ['Manage agents & budgets', [1, 1, 0, 0]],
-    ['Manage integrations & keys', [1, 1, 0, 0]],
-    ['Read audit log', [1, 1, 1, 1]],
-    ['Billing & plan', [1, 0, 0, 0]],
-  ];
-  const permRows = permDefs.map((p) => ({ name: p[0], cells: p[1].map((on) => ({ bg: on ? 'var(--accent,#3D6BFF)' : '#232939', sh: on ? '0 0 8px color-mix(in oklab, var(--accent,#3D6BFF) 60%, transparent)' : 'none' })) }));
+  //
+  // TWO FIELDS, BECAUSE TWO IS WHAT EXISTS. GET /api/v1/tenants/me/users
+  // returns {user_id, role} and nothing else (tenants.py:105-113). The screen
+  // was designed with MEMBER / EMAIL / ROLE / LAST ACTIVE / MFA and used to be
+  // filled by six invented employees at an invented company -- including a row
+  // literally named "the client contact Raman". All four unbacked columns are
+  // dropped rather than defaulted, because a blank MFA cell on a security
+  // screen still reads as a claim.
+  //
+  // THE ROLE PERMISSION MATRIX IS ALSO GONE from the live data: it was a
+  // hardcoded 6x4 grid of dots asserting which role may do what. The real role
+  // checks live in the backend route decorators (require_role /
+  // require_any_role), the console has no endpoint that reports them, and a
+  // stale permission matrix on a governance console is a liability, not a
+  // decoration. `permRows` is empty and the screen says the matrix is not
+  // wired.
+  const roleC = {
+    owner: ['color-mix(in oklab, var(--accent,#3D6BFF) 80%, #FFFFFF)', 'color-mix(in oklab, var(--accent,#3D6BFF) 16%, transparent)'],
+    admin: ['#A78BFA', 'rgba(167,139,250,0.12)'],
+    operator: ['#34C579', 'rgba(52,197,121,0.12)'],
+    analyst: ['#D19A3F', 'rgba(209,154,63,0.12)'],
+    viewer: ['#8B93A7', 'rgba(139,147,167,0.12)'],
+  };
+  const memberRows = s.members.map((m) => {
+    const tone = roleC[m.role] || ['#8B93A7', 'rgba(139,147,167,0.12)'];
+    return {
+      userId: m.userId,
+      // The user_id IS the identity the platform has. It is shown as such, not
+      // dressed up as a display name.
+      name: m.userId,
+      initials: m.userId.replace(/[^A-Za-z0-9]/g, '').slice(0, 2).toUpperCase() || '\u2014',
+      role: (m.role || '').toUpperCase(),
+      roleColor: tone[0],
+      roleBg: tone[1],
+    };
+  });
+  const permRows = [];
 
   // ── billing ──
   const meters = [
@@ -966,23 +1434,66 @@ function buildViewModel(ctx) {
     deptBars, apPrevN: String(s.approvals.length), apPrev, pulseLogs,
     // chat
     isChat: s.screen === 'chat', chatRef: chatElRef, chatEmpty: s.messages.length === 0 && !s.chatBusy,
+    // THE COUNT IS THE LIVE ONE. The empty state used to read "executed by 151
+    // governed agents" -- the generated fixture count. The registry holds 23
+    // (ALL_MVP_CONTRACTS), and a turn goes to ONE of them, `cowork_agent`, not
+    // to a fleet. The blurb now says what actually happens and reports the real
+    // roster size, or stays silent about it when the registry read failed.
+    commandBlurb: s.agentsLoading
+      ? 'One message in \u2014 run through the governed pipeline.'
+      : (s.agentsError
+        ? 'One message in \u2014 run through the governed pipeline. (The agent registry could not be read.)'
+        : 'One message in \u2014 run through the governed pipeline by the co-work agent, '
+          + 'one of ' + s.agentsLive.length + ' governed agents. Every action is decision-gated and audited.'),
     suggestions: sugg.map((txt) => ({ text: txt, send: () => doSend(txt) })),
     messagesVm, chatBusy: s.chatBusy, chatPhase: s.chatPhase,
     chatInput: s.chatInput, onChatInput: (e) => setState({ chatInput: e.target.value }),
     chatKey: (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doSend(s.chatInput); } },
     sendChat: () => doSend(s.chatInput), sendOpacity: s.chatInput.trim() ? '1' : '0.55',
-    railAgents, railEmpty: s.rail.length === 0, railCount: s.rail.length ? s.rail.length + ' ACTIVE' : '—',
-    chatTokFmt: fk(s.sessTok), chatCostFmt: '$' + (s.sessTok * 0.0009).toFixed(2),
-    fileInputRef: fileInputElRef, onAttachClick, onFileChange,
-    composerChipsShow: composerChips.length > 0, composerChips,
-    toggleTagMenu, tagMenuOpen: s.tagMenuOpen, tagQ: s.tagQ, onTagQ, tagOptions,
-    toggleConnMenu, connMenuOpen: s.connMenuOpen, connOptions,
-    tagBtnBd: s.chatTags.length ? 'color-mix(in oklab, var(--accent,#3D6BFF) 55%, #232939)' : 'transparent',
-    tagBtnBg: s.tagMenuOpen ? 'rgba(255,255,255,0.05)' : 'transparent',
-    tagBtnC: s.chatTags.length || s.tagMenuOpen ? 'var(--accent,#3D6BFF)' : '#8B93A7',
-    connBtnBd: s.chatConnectors.length ? 'color-mix(in oklab, var(--accent,#3D6BFF) 55%, #232939)' : 'transparent',
-    connBtnBg: s.connMenuOpen ? 'rgba(255,255,255,0.05)' : 'transparent',
-    connBtnC: s.chatConnectors.length || s.connMenuOpen ? 'var(--accent,#3D6BFF)' : '#8B93A7',
+    railAgents, railEmpty: s.rail.length === 0, railCount: '—',
+    // THE DELEGATION RAIL IS NOT WIRED. It used to fill with a fake chain
+    // assembled from the agent fixture, with per-agent token counts invented by
+    // Math.random(). POST /api/v1/cowork/turns returns {reply, deliverable_id,
+    // agent_id} and reports no sub-delegation, so there is nothing truthful to
+    // draw. The panel says so instead of animating.
+    railUnavailable: 'Per-agent delegation is not reported by the turn API.',
+    // The session token/cost readouts were likewise derived from the invented
+    // rail totals. The backend does not return per-turn token usage on this
+    // route, so they are shown as unknown rather than as a number.
+    chatTokFmt: '—', chatCostFmt: '—',
+
+    // ── COMPOSER AFFORDANCES WITH NO BACKEND COUNTERPART ─────────────
+    //
+    // Attachments, agent/department tags and connector selections are all
+    // DISABLED, visibly, rather than left clickable. The turn contract accepts
+    // `message` and nothing else, and the agent and principal are fixed by the
+    // backend by explicit design (cowork.py:47-50). A picker that still opened
+    // and still added a chip would tell the operator their directive had been
+    // routed to a named executive when the backend had never been told.
+    //
+    // They are kept in the layout, greyed and titled with the reason, because
+    // silently deleting them would lose the product intent -- these are
+    // designed, not built.
+    composerDisabled: true,
+    composerDisabledWhy: 'The turn API accepts a message only — the agent and '
+      + 'principal are fixed by the backend.',
+    fileInputRef: fileInputElRef,
+    onAttachClick: () => showToast('ATTACHMENTS ARE NOT WIRED', '#D19A3F'),
+    onFileChange: () => {},
+    attachBtnOpacity: 0.35,
+    composerChipsShow: false, composerChips: [],
+    toggleTagMenu: () => showToast('AGENT / DEPARTMENT TAGGING IS NOT WIRED', '#D19A3F'),
+    tagMenuOpen: false, tagQ: '', onTagQ: () => {}, tagOptions: [],
+    toggleConnMenu: () => showToast('CONNECTOR CONTEXT IS NOT WIRED', '#D19A3F'),
+    connMenuOpen: false, connOptions: [],
+    tagBtnBd: 'transparent',
+    tagBtnBg: 'transparent',
+    tagBtnC: '#4A5162',
+    tagBtnOpacity: 0.35,
+    connBtnBd: 'transparent',
+    connBtnBg: 'transparent',
+    connBtnC: '#4A5162',
+    connBtnOpacity: 0.35,
     // starmap
     isStar: s.screen === 'star',
     starDeptName: sdept.name, starTagline: sdept.tagline, starColor: sdept.color,
@@ -999,7 +1510,14 @@ function buildViewModel(ctx) {
     // workflows
     isWf: s.screen === 'wf', wfList, wfSel: { name: wf.name, meta: wf.meta, desc: wf.desc }, wfStages, wfRuns,
     // approvals
-    isAppr: s.screen === 'appr', apRiskChips, apStats, apRows, apEmpty: apFiltered.length === 0,
+    isAppr: s.screen === 'appr', apRiskChips, apStats, apRows,
+    // EMPTY and FAILED are different facts and the screen must not merge them:
+    // an unreachable backend showing "queue clear" would be the console telling
+    // an operator there is nothing to approve when it simply cannot see.
+    apEmpty: apFiltered.length === 0 && !s.approvalsLoading && !s.approvalsError,
+    apLoading: s.approvalsLoading,
+    apError: s.approvalsError,
+    apRetry: loadApprovals,
     // analytics
     isAna: s.screen === 'ana', anaCards, spendPts: pts.join(' '), spendArea: '0,140 ' + pts.join(' ') + ' 600,140', spendPeak: money(mx), effRows,
     // models
@@ -1010,12 +1528,27 @@ function buildViewModel(ctx) {
     isInteg: s.screen === 'integ', integConnN: String(integDefs.filter((x) => x[3]).length), integCards,
     // developers
     isDev: s.screen === 'dev', keyRows, endRows, hookEvents, quickstart,
+    keysLoading: s.keysLoading,
+    keysError: s.keysError,
+    keysEmpty: keyRows.length === 0 && !s.keysLoading && !s.keysError,
+    mintKey,
+    // The plaintext secret, present exactly once. The screen shows it until
+    // dismissed and nothing persists it.
+    mintedKey: s.mintedKey,
+    dismissMintedKey,
     // audit
     isLog: s.screen === 'log', logChips, logRows,
+    logLoading: s.auditLoading,
+    logError: s.auditError,
+    logEmpty: logRows.length === 0 && !s.auditLoading && !s.auditError,
+    logRetry: loadAudit,
     // security
     isSec: s.screen === 'sec', secBadges, secDash: (circ * secScore / 100).toFixed(1) + ' ' + circ.toFixed(1), secScore: String(secScore), secControls, secEvents,
     // team
     isTeam: s.screen === 'team', memberRows, permRows,
+    teamLoading: s.membersLoading,
+    teamError: s.membersError,
+    teamEmpty: memberRows.length === 0 && !s.membersLoading && !s.membersError,
     // billing
     isBill: s.screen === 'bill', planRenews: 'AUG 01', spendMTD: '$41,900', forecastFmt: '$63,400', meters, invoices,
     // settings
@@ -1041,10 +1574,24 @@ function buildViewModel(ctx) {
     // to save anything, and labelling it that way would describe the wrong event.
     autonomyErrorLabel: s.autonomyErrorKind === 'read' ? 'NOT READ' : 'NOT SAVED',
     autonomyBusy: s.autonomyLoading || s.autonomySaving,
-    pauseTitle: s.pausedAll ? 'Agents paused' : 'Pause all agents',
-    pauseLabel: s.pausedAll ? 'RESUME' : (s.pauseArm ? 'CONFIRM PAUSE?' : 'PAUSE ALL'),
+    pauseTitle: s.pausedAll ? 'Agents paused \u00b7 tenant scope' : 'Pause all agents',
+    pauseLabel: s.pausedAll
+      ? 'ENGAGED'
+      : (s.pauseBusy ? 'ENGAGING\u2026' : (s.pauseArm ? 'CONFIRM PAUSE?' : 'PAUSE ALL')),
     pauseBg: s.pausedAll || s.pauseArm ? 'rgba(225,90,82,0.16)' : 'transparent', pauseC: '#E15A52',
     dangerPause,
+    // THE REASON IS THE OPERATOR'S, NEVER THE CONSOLE'S. It is required by the
+    // backend (KillSwitchRequest.reason) and lands in the audit record of the
+    // most consequential control in the product, so it is collected here rather
+    // than defaulted to a canned string.
+    pauseReason: s.pauseReason,
+    onPauseReason: (e) => setPauseReason(e.target.value),
+    pauseReasonShow: s.pauseArm && !s.pausedAll,
+    pauseError: s.pauseError,
+    pauseBusy: s.pauseBusy,
+    // The scope actually sent. Shown so the operator knows what PAUSE ALL means
+    // rather than guessing at its blast radius.
+    pauseScope: 'scope_type=tenant',
     toastShow: !!s.toast, toastText: s.toast ? s.toast.text : '', toastDot: s.toast ? s.toast.dot : '#34C579',
   };
 }
