@@ -744,6 +744,23 @@ resolvable inside the connector; **it is not yet resolved for Stripe's refund pa
 > `0028`, which trunk has since taken for `0028_org_autonomy_mode.py`; it must renumber before
 > it can land.
 
+> **`[REFUND-TOOL-SCOPED AUTHORIZATION, 2026-09-16]`**: The general Q2.1l question (should
+> the ledger settle actual-vs-reserved spend as its universal behavior) remains
+> `[OWNER-DECISION-REQUIRED]` and unratified. However, the owner has separately authorized
+> this refund tool specifically to consume the generic settlement mechanism (Option a) as its
+> first production consumer, now that it has landed on `main`. `[CODE-VERIFIED]` by content
+> diff (not by SHA ancestry, which a squash merge breaks): `origin/main`'s
+> `src/skylize/tools/proxy.py:480` settles `actual_minor=settle_minor` rather than the
+> unconditional `reservation.amount_minor` this section describes above, and
+> `migrations/versions/0030_spend_reservation_replay_key.py` is present on `origin/main`.
+> Both landed via the squash-merged PR #14 (`f162a72`), whose source branch included the
+> commit `f87403c "fix: settle a spend hold for what the tool spent, not what it reserved"`.
+> **CI status on that merge was not independently checked and is not asserted here.** This is
+> a narrow, refund-tool-specific green light - not a general ratification of Option (a) as
+> Skylize's permanent policy for all future money-moving tools. Any future tool wanting to
+> rely on this behavior needs its own explicit check-in, not an assumption that this note
+> covers it.
+
 **RESOLVED - Q2.1c.** Owner decision: refunds always defer to a human. There is no numeric
 refund ceiling; no such number is coming. Every refund therefore executes on the HITL-replay
 path with `hitl_id` always present (7.0.1 above), and `org_refund_authority_limits` (7.5.2)
