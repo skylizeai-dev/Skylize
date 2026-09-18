@@ -14,7 +14,7 @@ export default function Command({ vm }) {
               </div>
               <div style={sx("font-family:'Geist Mono',ui-monospace,monospace;font-size:9.5px;letter-spacing:0.18em;color:#77809A")}>COMMAND CHANNEL</div>
               <div style={sx('font-size:20px;font-weight:600;letter-spacing:-0.015em;margin-top:10px')}>Command your organization.</div>
-              <div style={sx('font-size:12.5px;color:#8B93A7;margin-top:6px;max-width:420px;line-height:1.6')}>One order in — routed, delegated, and executed by 151 governed agents. Every action signed and auditable.</div>
+              <div style={sx('font-size:12.5px;color:#8B93A7;margin-top:6px;max-width:420px;line-height:1.6')}>{vm.commandBlurb}</div>
               <div style={sx('display:flex;gap:8px;margin-top:20px;flex-wrap:wrap;justify-content:center')}>
                 {vm.suggestions.map((sg, i) => (
                   <Interactive key={i} as="button" onClick={sg.send} style={sx("height:29px;padding:0 13px;border:1px solid #232939;border-radius:6px;background:rgba(255,255,255,0.02);color:#C7CBD6;font-family:'Geist Mono',ui-monospace,monospace;font-size:11px;cursor:pointer;transition:border-color .15s,color .15s,box-shadow .15s")} hoverStyle={sx('border-color:var(--accent,#3D6BFF);color:#E9EBF2;box-shadow:0 0 16px color-mix(in oklab,var(--accent,#3D6BFF) 20%,transparent)')}>{sg.text}</Interactive>
@@ -92,19 +92,21 @@ export default function Command({ vm }) {
           <div style={sx('display:flex;align-items:center;justify-content:space-between;padding:5px 8px 5px 6px;border-top:1px solid #161A26')}>
             <div style={sx('display:flex;align-items:center;gap:2px')}>
               <input ref={vm.fileInputRef} type="file" multiple onChange={vm.onFileChange} style={{ display: 'none' }} />
-              <Interactive as="button" onClick={vm.onAttachClick} aria-label="Attach files" title="Attach files" style={sx('display:flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:6px;border:1px solid transparent;background:none;color:#8B93A7;cursor:pointer;transition:border-color .15s,color .15s')} hoverStyle={sx('border-color:#232939;color:#E9EBF2')}>
+              <Interactive as="button" onClick={vm.onAttachClick} aria-label="Attach files (not available)" aria-disabled="true" title={vm.composerDisabledWhy} style={sx(`display:flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:6px;border:1px solid transparent;background:none;color:#4A5162;cursor:not-allowed;opacity: ${vm.attachBtnOpacity}`)} hoverStyle={sx('border-color:#232939')}>
                 <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M11.5 5.5l-5 5a2 2 0 102.8 2.8l5-5a3.6 3.6 0 00-5-5.1l-5.2 5.2a5 5 0 007 7l4.7-4.6"></path></svg>
               </Interactive>
-              <Interactive as="button" onClick={vm.toggleTagMenu} aria-label="Tag a department or agent" title="Tag a department or agent" style={sx(`display:flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:6px;border:1px solid ${vm.tagBtnBd};background: ${vm.tagBtnBg};color: ${vm.tagBtnC};cursor:pointer;transition:border-color .15s,color .15s`)} hoverStyle={sx('border-color:#232939;color:#E9EBF2')}>
+              <Interactive as="button" onClick={vm.toggleTagMenu} aria-label="Tag a department or agent (not available)" aria-disabled="true" title={vm.composerDisabledWhy} style={sx(`display:flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:6px;border:1px solid ${vm.tagBtnBd};background: ${vm.tagBtnBg};color: ${vm.tagBtnC};cursor:not-allowed;opacity: ${vm.tagBtnOpacity}`)} hoverStyle={sx('border-color:#232939')}>
                 <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M6.2 2.5L5 13.5M11 2.5l-1.2 11M2.5 6h11M2 10.5h11"></path></svg>
               </Interactive>
-              <Interactive as="button" onClick={vm.toggleConnMenu} aria-label="Attach connector context" title="Attach connector context" style={sx(`display:flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:6px;border:1px solid ${vm.connBtnBd};background: ${vm.connBtnBg};color: ${vm.connBtnC};cursor:pointer;transition:border-color .15s,color .15s`)} hoverStyle={sx('border-color:#232939;color:#E9EBF2')}>
+              <Interactive as="button" onClick={vm.toggleConnMenu} aria-label="Attach connector context (not available)" aria-disabled="true" title={vm.composerDisabledWhy} style={sx(`display:flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:6px;border:1px solid ${vm.connBtnBd};background: ${vm.connBtnBg};color: ${vm.connBtnC};cursor:not-allowed;opacity: ${vm.connBtnOpacity}`)} hoverStyle={sx('border-color:#232939')}>
                 <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><path d="M5.2 2.5v3M10.8 2.5v3M4 5.5h8v2.8a4 4 0 01-8 0zM8 12.3V14"></path></svg>
               </Interactive>
             </div>
             <div style={sx("display:flex;align-items:center;gap:10px;font-family:'Geist Mono',ui-monospace,monospace;font-size:9px;letter-spacing:0.09em;color:#616A82")}>
               <span>ENTER TO SEND</span>
-              <span style={sx('font-variant-numeric:tabular-nums')}>SESSION {vm.chatTokFmt} TOK · {vm.chatCostFmt}</span>
+              {/* Per-turn token usage is not returned by the turn API, so the
+                  console does not print a number it would have to invent. */}
+              <span style={sx('font-variant-numeric:tabular-nums')}>USAGE NOT REPORTED</span>
             </div>
           </div>
           {vm.tagMenuOpen && (
@@ -146,9 +148,11 @@ export default function Command({ vm }) {
           <span style={sx("font-family:'Geist Mono',ui-monospace,monospace;font-size:10px;color:#77809A;font-variant-numeric:tabular-nums")}>{vm.railCount}</span>
         </div>
         <div style={sx('flex:1;overflow-y:auto')}>
-          {vm.railEmpty && (
-            <div style={sx("padding:22px 14px;font-family:'Geist Mono',ui-monospace,monospace;font-size:10px;line-height:1.7;color:#616A82;letter-spacing:0.04em")}>No delegation in flight.<br />Issue a directive to watch the authority chain execute here.</div>
-          )}
+          {/* NOT WIRED, and said so. This panel used to animate a delegation
+              chain assembled from the local agent fixture, with per-agent token
+              counts from Math.random(). The turn API reports no sub-delegation,
+              so there is nothing truthful to draw. */}
+          <div style={sx("padding:22px 14px;font-family:'Geist Mono',ui-monospace,monospace;font-size:10px;line-height:1.7;color:#616A82;letter-spacing:0.04em")}>{vm.railUnavailable}</div>
           {vm.railAgents.map((ra, i) => (
             <div key={i} style={sx(`display:flex;align-items:center;gap:8px;padding:7px 12px;border-bottom:1px solid #12151F;padding-left: ${ra.pad}`)}>
               <span style={sx(`width:6px;height:6px;border-radius:50%;flex-shrink:0;background: ${ra.dot};box-shadow:0 0 8px ${ra.dot};animation: ${ra.anim}`)}></span>
@@ -162,7 +166,7 @@ export default function Command({ vm }) {
         </div>
         <div style={sx("display:flex;align-items:center;justify-content:space-between;padding:8px 12px;border-top:1px solid #161A26;font-family:'Geist Mono',ui-monospace,monospace;font-size:9.5px;letter-spacing:0.08em;color:#77809A")}>
           <span>TOTAL</span>
-          <span style={sx('font-variant-numeric:tabular-nums;color:#E9EBF2')}>{vm.chatTokFmt} TOK · {vm.chatCostFmt}</span>
+          <span style={sx('font-variant-numeric:tabular-nums;color:#616A82')}>{vm.chatTokFmt}</span>
         </div>
       </div>
     </div>

@@ -43,15 +43,35 @@ export default function Settings({ vm }) {
             <div style={sx('display:flex;align-items:center;justify-content:space-between;gap:12px')}>
               <div>
                 <div style={sx('font-size:12.5px;font-weight:500;color:#E9EBF2')}>{vm.pauseTitle}</div>
-                <div style={sx('font-size:11px;color:#77809A;margin-top:2px')}>Freezes all delegation. Human approval queue stays live.</div>
+                <div style={sx('font-size:11px;color:#77809A;margin-top:2px')}>Halts the tenant scope at the backend. The approval queue stays readable.</div>
+                <div style={sx("font-family:'Geist Mono',ui-monospace,monospace;font-size:9px;letter-spacing:0.08em;color:#4A5162;margin-top:4px")}>{vm.pauseScope}</div>
               </div>
               <Interactive
                 as="button"
                 onClick={vm.dangerPause}
+                disabled={vm.pauseBusy}
                 style={sx(`height:30px;padding:0 13px;border-radius:6px;border:1px solid rgba(225,90,82,0.5);background: ${vm.pauseBg};color: ${vm.pauseC};font-family:'Geist Mono',ui-monospace,monospace;font-size:9.5px;letter-spacing:0.08em;cursor:pointer;flex-shrink:0;transition:background-color .15s`)}
                 hoverStyle={sx('background-color:rgba(225,90,82,0.18)')}
               >{vm.pauseLabel}</Interactive>
             </div>
+            {/* REQUIRED BY THE BACKEND, AND NOT DEFAULTED. The reason is written
+                into the audit record; the console must not put words there on
+                the operator's behalf. */}
+            {vm.pauseReasonShow && (
+              <div style={sx('margin-top:11px')}>
+                <label style={sx("display:block;font-family:'Geist Mono',ui-monospace,monospace;font-size:9px;letter-spacing:0.12em;color:#E15A52;margin-bottom:5px")}>REASON — RECORDED IN THE AUDIT TRAIL</label>
+                <input
+                  value={vm.pauseReason}
+                  onChange={vm.onPauseReason}
+                  autoFocus
+                  placeholder="Why are you halting every agent?"
+                  style={sx("width:100%;box-sizing:border-box;height:32px;padding:0 10px;border-radius:6px;border:1px solid rgba(225,90,82,0.4);background:#07080C;color:#E9EBF2;font-family:'Geist',system-ui,sans-serif;font-size:12.5px")}
+                />
+              </div>
+            )}
+            {vm.pauseError && (
+              <div style={sx("margin-top:9px;font-family:'Geist Mono',ui-monospace,monospace;font-size:10px;color:#E15A52;line-height:1.55")}>{vm.pauseError}</div>
+            )}
           </div>
         </div>
         <div style={sx('display:flex;flex-direction:column;gap:12px')}>

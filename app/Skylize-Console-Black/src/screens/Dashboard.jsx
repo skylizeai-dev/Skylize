@@ -98,12 +98,13 @@ export default function Dashboard({ vm }) {
             </div>
             {vm.apPrev.map((ap, i) => (
               <div key={i} style={sx('display:flex;align-items:center;gap:12px;padding:10px 14px;border-bottom:1px solid #141826')}>
-                <span style={sx(`font-family:'Geist Mono',ui-monospace,monospace;font-size:8.5px;letter-spacing:0.1em;padding:2px 6px;border-radius:3px;color: ${ap.riskColor};background: ${ap.riskBg};flex-shrink:0`)}>{ap.risk}</span>
+                {/* No risk badge: /api/v1/hitl has no risk taxonomy. The row
+                    leads with the recorded trigger reason instead. */}
                 <div style={sx('flex:1;min-width:0')}>
                   <div style={sx('font-size:12.5px;font-weight:500;color:#E9EBF2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis')}>{ap.title}</div>
                   <div style={sx("font-family:'Geist Mono',ui-monospace,monospace;font-size:10px;color:#77809A;margin-top:2px")}>{ap.meta}</div>
                 </div>
-                <Interactive as="button" onClick={ap.decline} style={sx("height:26px;padding:0 11px;border-radius:5px;border:1px solid #262D40;background:transparent;color:#8B93A7;font-family:'Geist Mono',ui-monospace,monospace;font-size:10px;letter-spacing:0.06em;cursor:pointer;transition:border-color .15s,color .15s")} hoverStyle={sx('border-color:#77809A;color:#E9EBF2')}>DECLINE</Interactive>
+                <Interactive as="button" onClick={ap.decline} style={sx("height:26px;padding:0 11px;border-radius:5px;border:1px solid #262D40;background:transparent;color:#8B93A7;font-family:'Geist Mono',ui-monospace,monospace;font-size:10px;letter-spacing:0.06em;cursor:pointer;transition:border-color .15s,color .15s")} hoverStyle={sx('border-color:#77809A;color:#E9EBF2')}>REJECT</Interactive>
                 <Interactive as="button" onClick={ap.approve} style={sx("height:26px;padding:0 11px;border-radius:5px;border:none;background:var(--accent,#3D6BFF);color:#FFFFFF;font-family:'Geist Mono',ui-monospace,monospace;font-size:10px;letter-spacing:0.06em;cursor:pointer;box-shadow:0 0 14px color-mix(in oklab,var(--accent,#3D6BFF) 35%,transparent);transition:filter .15s")} hoverStyle={sx('filter:brightness(1.15)')}>APPROVE</Interactive>
               </div>
             ))}
