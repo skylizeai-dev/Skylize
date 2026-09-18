@@ -347,25 +347,25 @@ only if the platform key is held to a higher standard than a vault row would be.
 ### 4.5.1 Why a sixth profile, and not `ToolOAuthProfile`
 
 `[CODE-VERIFIED]` `ToolDefinition` carries **five** nullable, opt-in gate profiles today
-(`src/skylize/tools/base.py:289,292,298,302,309`): `spend` (`base.py:121-142`), `oauth`
-(`base.py:222-239`), `permission` (`base.py:145-177`), `wif` (`base.py:180-219`), and
-`approval` (`base.py:242-274`). The first four are each checked in their own stage of
+(`src/skylize/tools/base.py:310,313,319,323,330`): `spend` (`base.py:121-163`), `oauth`
+(`base.py:243-260`), `permission` (`base.py:166-198`), `wif` (`base.py:201-240`), and
+`approval` (`base.py:263-295`). The first four are each checked in their own stage of
 `ToolProxy.invoke`, and each fails closed when its backing dependency is unwired
-(`src/skylize/tools/proxy.py:122-141`).
+(`src/skylize/tools/proxy.py:334-414`).
 
 `[CODE-VERIFIED]` **`approval` is the exception: it is NOT proxy-enforced.** The gate that
 reads it lives in the agent tool loop (`AgentExecutionService._govern_tool_turn`), because
 only there does the whole turn - and the conversation prefix a resumption needs - exist at
-once (`base.py:303-309`). `ToolStripeProfile` would therefore be the **sixth profile** on
+once (`base.py:324-330`). `ToolStripeProfile` would therefore be the **sixth profile** on
 `ToolDefinition` but only the **fifth proxy-enforced gate**. The R1 decision of 2026-09-09
 said "fifth profile" because `ToolApprovalProfile` landed with the HITL resumption merge,
 AFTER this document was written. The distinction is recorded rather than silently
 renumbered, because it is the proxy-enforced count that governs where the stage goes (4.5.5).
 
 `ToolOAuthProfile` gates a tool on a **live stored grant**. The proxy's OAuth stage calls
-`_ensure_oauth_credential` (`[CODE-VERIFIED]` `proxy.py:274-278`, defined at `:394`), whose
+`_ensure_oauth_credential` (`[CODE-VERIFIED]` call site `proxy.py:335`, defined at `:494`), whose
 docstring states its job is to establish that a usable grant EXISTS, "refreshing on demand if
-needed" (`proxy.py:403-408`). Every part of that is inapplicable to Stripe:
+needed" (`proxy.py:507-512`). Every part of that is inapplicable to Stripe:
 
 `[CODE-VERIFIED]` + 4.0.1 above - **Skylize stores no Stripe bearer token.** There is nothing
 to hold, nothing to refresh, and no expiry to evaluate. Server-side authentication is the
@@ -375,19 +375,25 @@ this mode, with this scope - not a credential's freshness.
 
 `ToolWifProfile` records exactly this argument for exactly this reason: "a federation trust
 is not a stored grant. There is no token to hold, nothing to refresh, and no expiry"
-(`[CODE-VERIFIED]` `base.py:181-189`), and `gcp_wif_connections` is a separate table from
-`oauth_credentials` on the same grounds (`base.py:185-187`, migration 0024). **Stripe is the
+(`[CODE-VERIFIED]` `base.py:206-209`), and `gcp_wif_connections` is a separate table from
+`oauth_credentials` on the same grounds (migration 0024). **Stripe is the
 second instance of that shape**, and `org_stripe_accounts` (4.0.2) is the third such table.
 The precedent is followed.
+
+**`[RE-VERIFICATION NOTE, 2026-09-18]` `ToolWifProfile`'s exact line range has drifted a
+third time since this document's earlier passes** - now `base.py:201-240` for the whole
+class (was `180-219`, was earlier still `181-189` for the docstring quote alone). Re-checked
+fresh against the current file rather than adjusted arithmetically, per this pass's brief.
 
 `[RESEARCH-SUGGESTED]` **Rejected alternative: resolve the connection inside the handler.**
 Rejected for the reason `docs/06_integrations/gcp_wif_killswitch_design.md:1083-1088` already
 rejected it for WIF: it puts the check somewhere that is neither inspectable in a registry
 entry nor deny-by-default, and the proxy-enforced profiles "refuse callable predicates on
-purpose, so a gate stays inspectable" - the phrasing `ToolWifProfile` itself uses at `base.py:201`, over
-`ToolSpendProfile.:134` ("Deliberately NOT a callable estimator") and
-`ToolPermissionProfile.:163` ("Deliberately NOT a callable predicate")
-(`[CODE-VERIFIED]` `base.py:134,163,201`). A gate
+purpose, so a gate stays inspectable" - the phrasing `ToolWifProfile`'s own docstring uses at
+`base.py:222`, over
+`ToolSpendProfile`'s at `base.py:134` ("Deliberately NOT a callable estimator") and
+`ToolPermissionProfile`'s at `base.py:184` ("Deliberately NOT a callable predicate")
+(`[CODE-VERIFIED]` `base.py:134,184,222`). A gate
 that lives only inside a function body is one refactor from being skipped.
 
 ### 4.5.2 `ToolWifProfile` is NOT extended or generalized - and why that is not a defect
@@ -397,10 +403,10 @@ cheap mistake. `ToolWifProfile` needs **no change** to accommodate Stripe: nothi
 design touches it. The two profiles share a *rationale* - a trust, not a stored grant - and
 share **no fields**:
 
-| | `ToolWifProfile` (`base.py:216-219`) | `ToolStripeProfile` (proposed, 4.5.3) |
+| | `ToolWifProfile` (`base.py:237-240`) | `ToolStripeProfile` (proposed, 4.5.3) |
 |---|---|---|
 | Selector | `label` - which connection, when an org has several | none: mode is environment-derived (4.5.4), and 4.0.2's partial unique index permits at most one live and one test row per org |
-| Per-resource allow-list | `project_field` / `zone_field` / `instance_field`, checked against enabled `gcp_wif_targets` rows (`proxy.py:714-728`) | **none exists.** Stripe has no per-resource allow-list table, and inventing one would be a second allow-list for a question `org_stripe_accounts.scope` already answers |
+| Per-resource allow-list | `project_field` / `zone_field` / `instance_field`, checked against enabled `gcp_wif_targets` rows (`proxy.py:814-828`) | **none exists.** Stripe has no per-resource allow-list table, and inventing one would be a second allow-list for a question `org_stripe_accounts.scope` already answers |
 | Third check | the target is an enabled row | the direct-charge invariant of 2.0, which has no WIF analogue |
 
 The field sets are disjoint, so a shared base class would carry nothing but `model_config`.
@@ -410,9 +416,9 @@ later session does not re-open this as unnoticed duplication.
 ### 4.5.3 Proposed profile
 
 `[RESEARCH-SUGGESTED]` Declared alongside the other five in `src/skylize/tools/base.py`, and
-added as a SIXTH nullable field on `ToolDefinition` (`base.py:277-309`) defaulting to `None`,
+added as a SIXTH nullable field on `ToolDefinition` (`base.py:298-330`) defaulting to `None`,
 so every tool registered before it existed is unaffected - the additive discipline `wif` used
-(`base.py:302`).
+(`base.py:323`).
 
 ```python
 class ToolStripeProfile(BaseModel):
@@ -448,19 +454,19 @@ Deliberately **absent**:
   running process, and letting a registry entry override it is how a test-mode tool reaches
   live money.
 - **No amount or charge-id fields.** The amount already belongs to
-  `ToolSpendProfile.amount_field` (`[CODE-VERIFIED]` `base.py:142`), and 7.5's review trigger
+  `ToolSpendProfile.amount_field` (`[CODE-VERIFIED]` `base.py:157`), and 7.5's review trigger
   reads that same validated input. Naming the amount twice invites the two readings to
   diverge, which on a refund path is a money bug.
 
 ### 4.5.4 What the gate checks
 
 `[RESEARCH-SUGGESTED]` `ToolProxy._authorize_stripe`, mirroring `_authorize_wif`
-(`[CODE-VERIFIED]` `proxy.py:645-728`) in structure: every exit that is not a silent return
+(`[CODE-VERIFIED]` `proxy.py:745-828`) in structure: every exit that is not a silent return
 denies, and **each denial is audited before it is raised**, so a refused Stripe call leaves
-the same trail a refused scope check does (`proxy.py:668-675`).
+the same trail a refused scope check does (`proxy.py:769-774`).
 
 0. **The repository is unwired** -> `ToolStripeNotConnected`. Fail closed, exactly as
-   `_authorize_wif` does at `proxy.py:676-684`: a tool that moves a customer's money must
+   `_authorize_wif` does at `proxy.py:777-785`: a tool that moves a customer's money must
    never dispatch because the check itself was not wired.
 1. **No `org_stripe_accounts` row** for `(org_id, livemode = the running environment's mode)`
    with `deauthorized_at IS NULL` -> `ToolStripeNotConnected`, naming "connect Stripe" as the
@@ -482,28 +488,28 @@ the same trail a refused scope check does (`proxy.py:668-675`).
    only. Last check in the stage, and still before the spend reservation. Specified in 7.5.4.
 
 `[RESEARCH-SUGGESTED]` Distinct error types, not one, for the reason `_authorize_wif` gives
-at `proxy.py:660-664`: collapsing them "would hand an operator the wrong fix during an
+at `proxy.py:761-764`: collapsing them "would hand an operator the wrong fix during an
 incident". The remedies genuinely differ - connect the account, re-consent for a wider scope,
 fix the tool registration, route to a human.
 
 ### 4.5.5 Where the stage sits in the chain
 
-`[CODE-VERIFIED]` The existing order in `ToolProxy.invoke` is OAuth (`proxy.py:274`) ->
-permission (`:296`) -> WIF (`:314`) -> spend (`:327`) -> dispatch (`:334-339`).
+`[CODE-VERIFIED]` The existing order in `ToolProxy.invoke` is OAuth (`proxy.py:334`) ->
+permission (`:356`) -> WIF (`:374`) -> spend (`:399`) -> dispatch (`:415-416`).
 
 `[RESEARCH-SUGGESTED]` **The Stripe stage goes after WIF and before spend**, for the reason
-the WIF stage's own comment gives at `proxy.py:302-313`: a broken trust IS a denial, and
+the WIF stage's own comment gives at `proxy.py:363-374`: a broken trust IS a denial, and
 ordering it after the spend hold "would reserve budget against the customer's ceiling only to
 discover the call could never run, leaving a hold to unwind". Every check in 4.5.4 is a
 tenant-scoped DB read or a field inspection - all cheaper than a hold on the shared mutable
-ceiling, which "must be placed as late as possible" (`proxy.py:321-326`).
+ceiling, which "must be placed as late as possible" (`proxy.py:381-390`).
 
 ### 4.5.6 The tripwire that must be edited, deliberately
 
 `[CODE-VERIFIED]` `tests/contract/test_stateless_agents_no_oauth_access.py` asserts against
 the fully wired registry that the set of profile-gated tools is EXACTLY an expected set:
 `EXPECTED_OAUTH_TOOL_IDS` (`:48`), `EXPECTED_PERMISSION_TOOL_IDS` (`:68`), and the exactness
-tests at `:177` and `:191`. The WIF gate got the same treatment (`:296`,
+tests at `:185` and `:200`. The WIF gate got the same treatment (`:296`,
 `test_the_gcp_verb_is_gated_by_the_federation_profile`).
 
 `[RESEARCH-SUGGESTED]` A `ToolStripeProfile` needs a matching `EXPECTED_STRIPE_TOOL_IDS` set
@@ -628,30 +634,35 @@ without credentials is precisely the failure mode CLAUDE.md warns about.
 > draft predated `ToolContext.hitl_id`.
 
 `[CODE-VERIFIED]` **The spend profile is already money-denominated.** `ToolSpendProfile`
-(`src/skylize/tools/base.py:78-97`) carries `currency` and `amount_field` (`:98-99`), and
-`:86-89` states
+(`src/skylize/tools/base.py:121-163`) carries `currency` and `amount_field` (`:156-157`), and
+`:129-132` states
 the field holds "the amount in integer MINOR units (cents), the same unit `SpendEnvelope` and
 `budget_ledger` use." `SpendLedger.reserve` takes `amount_minor: int`
-(`src/skylize/app/principal/spend.py:116-125`). Stripe's `amount` is in the currency's minor
+(`src/skylize/app/principal/spend.py:123-168`). Stripe's `amount` is in the currency's minor
 unit; the units already agree. The gate is genuinely wired: `ToolProxy.invoke` runs the spend
-stage at `src/skylize/tools/proxy.py:319-324`, calling `_reserve_spend` (`:723`).
+stage at `src/skylize/tools/proxy.py:399-414`, calling `_reserve_spend` (`:831`).
 
-**Citation note (2026-09-09):** the three `file:line` references in this paragraph and in
-gaps 1-2 below were re-verified at this HEAD and four had drifted since 2026-08-28. They are
-corrected in place. The claims themselves are unchanged.
+**Citation note (2026-09-18):** every `file:line` reference in §6.0, §7.0 and §7.5 was
+re-verified fresh against this HEAD (post-HITL-resumption-merge, post-PR-#14) - see the
+dated note at the end of §9.0. Nearly all had drifted since the 2026-09-09 pass; they are
+corrected in place below. Two are flagged as **semantically changed, not merely moved** -
+`ToolSpendProfile` gained a genuinely new field (`actual_amount_field`), and this
+paragraph's own `_reserve_spend` reservation flow now runs a replay-guard check
+(`proxy.py:400-409`) ahead of the reservation that did not exist at the prior verification
+pass. See the inline notes below and 7.0.1's residual discussion.
 
 Three gaps block a refund tool specifically. All three were derived in the prior pass and stand:
 
-1. **Currency mismatch.** `ToolSpendProfile.currency` is frozen per tool (`base.py:96,98`), but a
+1. **Currency mismatch.** `ToolSpendProfile.currency` is frozen per tool (`base.py:156,163`), but a
    refund's currency belongs to the charge. `CeilingExceeded` reports `envelope.currency`
-   (`spend.py:157`) with no cross-currency reconciliation. Must fail closed on mismatch - a
+   (`spend.py:166`) with no cross-currency reconciliation. Must fail closed on mismatch - a
    100 JPY ceiling silently authorising a 100 EUR refund is the failure to prevent.
-2. **Full refunds are not expressible.** Stripe permits omitting `amount`; `proxy.py:767-773`
+2. **Full refunds are not expressible.** Stripe permits omitting `amount`; `proxy.py:876-883`
    denies anything that is not a positive `int` (and excludes `bool`, an `int` subclass). The tool must resolve a full refund to an
    explicit cent amount before the gate.
 3. **The two keys are different keys, and the August draft conflated them.** `[CODE-VERIFIED]`
-   `proxy.py:788` hardcodes the SPEND-LEDGER reservation key as
-   `f"tool:{tool.tool_id}:{uuid4()}"`, and the comment at `:779-787` explains why that is
+   `proxy.py:911` hardcodes the SPEND-LEDGER reservation key as
+   `f"tool:{tool.tool_id}:{uuid4()}"`, and the comment at `:890-910` explains why that is
    correct and must stay: `try_reserve` treats a repeated key as a retry and returns the
    ORIGINAL hold, so a key shared by two distinct calls "would let the second spend against
    the first's reservation." **That key is internal to the ledger. It is not, and must not
@@ -664,7 +675,7 @@ Three gaps block a refund tool specifically. All three were derived in the prior
 
 `[CODE-VERIFIED]` **`correlation_id` is the wrong seed, and the codebase already says so in
 its own words.** `ToolContext.hitl_id` exists precisely to close this gap
-(`src/skylize/tools/base.py:60-72`). Its comment is worth quoting because it is the whole
+(`src/skylize/tools/base.py:64-75`). Its comment is worth quoting because it is the whole
 argument: `HitlQueueService.approve` "mints a FRESH correlation id on every approval attempt
 (app/hitl/service.py:160), and a transient failure after the claim releases the row back to
 'pending' (app/hitl/service.py:234-246) so a human can retry - which re-executes the whole
@@ -673,9 +684,9 @@ retry and defeat the provider-side deduplication it exists to trigger. `hitl_id`
 across those retries; that is the entire point of threading it here."
 
 `[CODE-VERIFIED]` The plumbing is already in place. `ToolProxy.invoke` accepts
-`hitl_id: UUID | None` (`proxy.py:160-167`) and threads it onto the `ToolContext` handed to
-the handler (`proxy.py:326-329`), annotated as "LOAD-BEARING FOR EXTERNALLY-MUTATING
-HANDLERS" (`base.py:60-62`). **A Stripe refund handler is exactly such a handler.** No
+`hitl_id: UUID | None` (`proxy.py:228`) and threads it onto the `ToolContext` handed to
+the handler (`proxy.py:390-394`), annotated as "LOAD-BEARING FOR EXTERNALLY-MUTATING
+HANDLERS" (`base.py:67`). **A Stripe refund handler is exactly such a handler.** No
 signature change to `ToolProxy.invoke` is required for this - which retires precondition 3
 of 8.0 as originally written.
 
@@ -697,7 +708,7 @@ kill-switch design adopted for Google's `requestId`, for the identical reason
 mutating connectors in this repo share one idempotency discipline rather than inventing two.
 
 `[RESEARCH-SUGGESTED]` **When `hitl_id` is `None`.** It is `None` on the ordinary,
-non-deferred request path (`[CODE-VERIFIED]` `base.py:63-64`). Two consequences, and neither
+non-deferred request path (`[CODE-VERIFIED]` `base.py:76`, the field default). Two consequences, and neither
 may be left implicit:
 
 - Q2.1c is resolved (see below) to "refunds always defer to a human," so every refund
@@ -718,7 +729,8 @@ the resulting `re_...` id" makes a late replay safe. It is checked in the handle
 the layer that can return the prior refund rather than deny.
 
 `[OWNER-DECISION-REQUIRED]` **Q2.1l - the residual the dedupe record
-exposes.** `[CODE-VERIFIED]` `ToolProxy` commits the hold with the full reserved amount
+exposes.** `[CODE-VERIFIED at the 2026-09-09 pass; SEE THE 2026-09-18 FLAG BELOW]`
+`ToolProxy` commits the hold with the full reserved amount
 unconditionally (`proxy.py:386-390`, `actual_minor=reservation.amount_minor`), even though
 `commit` accepts a lower actual (`app/principal/spend.py:161-172`). A replayed refund that
 the dedupe record short-circuits moves **no new money at Stripe**, but still commits a
@@ -733,7 +745,8 @@ overstates spend is not a ledger. This was the only part of the idempotency desi
 resolvable inside the connector; **it is not yet resolved for Stripe's refund path**. Option
 (a) is not owner-ratified as the final resolution here - do not treat it as settled.
 
-> **`[NOT YET IN EFFECT AT THIS HEAD]`** Option (a) matches a candidate implementation
+> **`[NOT YET IN EFFECT AT THIS HEAD]` - STALE AS OF 2026-09-18, KEPT VERBATIM FOR HISTORY,
+> NOT SILENTLY CORRECTED.** Option (a) matches a candidate implementation
 > shipped and tested on `fix/toolproxy-ledger-commit-accounting` (`3334e76 fix: settle a
 > spend hold for what the tool spent, not what it reserved`), which is **NOT merged into
 > main** and **has not been owner-approved as the final resolution for Stripe's refund path**.
@@ -743,6 +756,22 @@ resolvable inside the connector; **it is not yet resolved for Stripe's refund pa
 > until it is owner-ratified and merges.** That branch's migration also still claims revision
 > `0028`, which trunk has since taken for `0028_org_autonomy_mode.py`; it must renumber before
 > it can land.
+>
+> **`[RE-VERIFICATION FLAG, 2026-09-18]` - the paragraph above (and this block's own claims)
+> describe pre-merge state and are NO LONGER ACCURATE, not merely re-line-numbered.** PR #14
+> (`f162a72`, squash-merged) landed this branch's content on `main`. At current HEAD:
+> `proxy.py` settles `actual_minor=settle_minor` via `_settlement_amount`
+> (`proxy.py:451,477-490`), NOT `reservation.amount_minor` unconditionally; `replay_key` and
+> `result_snapshot` exist on `Reservation` and are wired through `_reserve_spend` (`proxy.py:831-917`)
+> and `invoke` (`proxy.py:396-414,477-490`); `ToolSpendKeyConflict`, `ToolSpendReplayInFlight`
+> and `ToolSpendReplayResultUnavailable` are all defined and raised in `proxy.py` (not "nowhere
+> outside that branch"); and the migration landed renumbered as
+> `migrations/versions/0030_spend_reservation_replay_key.py`, not `0028`. **This is a
+> genuinely changed mechanism, not a line-number drift, and is left un-rewritten above per
+> this pass's instruction not to silently correct something that is actually different now.**
+> This does NOT change the general Q2.1l ratification status (still `[OWNER-DECISION-REQUIRED]`,
+> sign-off still blank) - see the `[REFUND-TOOL-SCOPED AUTHORIZATION, 2026-09-16]` note
+> immediately below for the narrow, refund-tool-specific consequence of this merge.
 
 > **`[REFUND-TOOL-SCOPED AUTHORIZATION, 2026-09-16]`**: The general Q2.1l question (should
 > the ledger settle actual-vs-reserved spend as its universal behavior) remains
@@ -771,8 +800,8 @@ that behavior is final, not an interim default awaiting a number. A Stripe refun
 now be registered as spend-capable on this basis.
 
 `[CODE-VERIFIED]` Registration note: `stripe.refund` already exists as a scope string in the same
-vocabulary as `ToolGrant.tool_id` (`src/skylize/app/principal/models.py:54-56`, used at `:74`,
-`tests/unit/test_principal_authority.py:44`, `tests/contract/test_cowork_contract.py:89`).
+vocabulary as `ToolGrant.tool_id` (`src/skylize/app/principal/models.py:56`, used at `:74`,
+`tests/unit/test_principal_authority.py:44`, `tests/contract/test_cowork_contract.py:98`).
 Registering the real tool under exactly that id keeps the existing authority fixtures meaningful.
 
 ---
@@ -797,8 +826,8 @@ micro-units.** Stated first, in its own subsection, because the mistake is a sil
 
 | Object | Unit | Cite |
 |---|---|---|
-| `SpendEnvelope.ceiling_minor`, `SpendLedger.reserve(amount_minor=...)` | currency **MINOR** units (cents) | `src/skylize/app/principal/models.py:208`; `src/skylize/app/principal/spend.py:116-125` |
-| `ToolSpendProfile.amount_field` | currency **MINOR** units (cents) - "the same unit `SpendEnvelope` and `budget_ledger` use" | `src/skylize/tools/base.py:86-89,99` |
+| `SpendEnvelope.ceiling_minor`, `SpendLedger.reserve(amount_minor=...)` | currency **MINOR** units (cents) | `src/skylize/app/principal/models.py:207-208`; `src/skylize/app/principal/spend.py:123-168` |
+| `ToolSpendProfile.amount_field` | currency **MINOR** units (cents) - "the same unit `SpendEnvelope` and `budget_ledger` use" | `src/skylize/tools/base.py:129-132,157` |
 | `org_spend_ceiling.ceiling_micros` | **micro-USD** - millionths of one USD, "NOT cents, NOT minor currency units" | `migrations/versions/0014_org_spend_ceiling.py:21-24,86-92` |
 
 A refund limit is compared against a refund amount, which reaches the gate through
@@ -859,11 +888,11 @@ COMMENT ON COLUMN org_refund_authority_limits.max_refund_minor IS
 ```
 
 `[CODE-VERIFIED]` The five `authority_level` values and their order are the canonical ladder
-`AUTHORITY_RANK` (`src/skylize/contracts/base.py:41-47`: `worker`=1, `manager`=2,
+`AUTHORITY_RANK` (`src/skylize/contracts/base.py:70-76`: `worker`=1, `manager`=2,
 `director`=3, `vp`=4, `executive`=5). The `CHECK` deliberately enumerates them rather than
 referencing a lookup table, matching how migration 0024 constrains its own enums
 (`migrations/versions/0024_gcp_wif_connections.py:152-163`). **The ladder is not redefined
-here** - `contracts/base.py:35-40` warns that "a second, privately-defined copy of this
+here** - `contracts/base.py:64-66` warns that "a second, privately-defined copy of this
 ladder is exactly the drift that would make 'the agent can never exceed the human' silently
 false in one of the two". This `CHECK` is a value constraint, not a second ranking.
 
@@ -921,11 +950,30 @@ the loosest.
 > INTEGRATION.** Labelled explicitly so a later session does not mistake it for fraud
 > detection.
 
-`[CODE-VERIFIED]` **`fraud_detection_agent` is contract-only and not wired.** The contract
+`[CODE-VERIFIED at the 2026-09-09 pass]` **`fraud_detection_agent` is contract-only and not
+wired.** The contract
 exists (`src/skylize/contracts/mvp/security.py:10`) and declares
-`output_schema="skylize.schemas.agents.security.FraudVerdictOut"` (`:16`), but no module
-under `src/` outside that declaration references `FraudVerdictOut` at all - the schema is
-declared and never consumed. There is no fraud signal available to a refund gate today, and
+`output_schema="skylize.schemas.agents.security.FraudVerdictOut"` (`:16`).
+
+> **`[RE-VERIFICATION FLAG, 2026-09-18]` - THE "NEVER CONSUMED" CLAIM ABOVE IS NOW FALSE, NOT
+> MERELY STALE-BY-LINE-NUMBER.** This is a genuinely changed mechanism and is flagged rather
+> than silently corrected. `FraudVerdictOut` IS now referenced outside its declaration:
+> `src/skylize/app/autonomy/attention.py:75-94` (`_fraud_outcome_not_clear` and
+> `_fraud_low_confidence`) reads `output.outcome` and `output.confidence` off it, wired through
+> `evaluate_attention` (`attention.py`, registered for `fraud_detection_agent` at `:189`) and
+> called from the autonomy runner (`src/skylize/app/autonomy/runner.py:267`, imported at
+> `:74`). This is a fully wired **autonomy attention/journal pilot** - a separate subsystem
+> from `ToolProxy` and the Stripe refund gate this section designs. **It does NOT reach
+> `ToolProxy.invoke` or this section's refund-review hook point** - grep of
+> `src/skylize/tools/proxy.py` for `FraudVerdictOut` or `fraud_detection_agent` finds nothing
+> at this HEAD. So the section's DESIGN CONCLUSION ("no fraud signal available to *a refund
+> gate* today") still appears to hold, but its supporting FACTUAL CLAIM ("no module... references
+> `FraudVerdictOut` at all") is now false and must not be quoted as still true. **A human
+> should confirm this distinction before this section is next relied upon** - the autonomy
+> pilot's existence is exactly the kind of "trusted signal now exists" development the interim
+> percentage-rule rejection (below) anticipated as a future integration point.
+
+There is no fraud signal available to a refund gate today, and
 designing against one would be designing against something that does not exist.
 
 `[RESEARCH-SUGGESTED]` **The interim rule, in full:**
@@ -961,14 +1009,14 @@ integration, where a Stripe read is already justified.
 `[RESEARCH-SUGGESTED]` **Hook point: check 4 of the Stripe stage (4.5.4), before the spend
 reservation.** Specifically:
 
-`[CODE-VERIFIED]` The spend stage runs at `proxy.py:319-324` and calls `_reserve_spend`
-(`:723`), which places a hold on the shared mutable ceiling before any of this design's
+`[CODE-VERIFIED]` The spend stage runs at `proxy.py:399-414` and calls `_reserve_spend`
+(`:831`), which places a hold on the shared mutable ceiling before any of this design's
 refund logic could otherwise run. The refund review decision must be reached **before that
-hold exists**, for the reason the proxy states in its own words at `proxy.py:313-318`: the
+hold exists**, for the reason the proxy states in its own words at `proxy.py:381-390`: the
 hold "must be placed as late as possible - after every cheaper denial has had its chance".
 Routing a refund to a human *after* reserving against the ceiling would leave a hold to
 unwind for a call that was never going to execute - the same waste the OAuth and WIF stages
-were ordered to avoid (`proxy.py:254-265`, `:294-305`).
+were ordered to avoid (`proxy.py:321-334`, `:363-380`).
 
 Placing it here has a second, larger consequence worth stating plainly: **the review decision
 is reached before `ToolSpendProfile`'s ceiling math runs at all.** A refund that is too large
@@ -978,15 +1026,16 @@ retried refund cannot churn the ceiling.
 `[RESEARCH-SUGGESTED]` **What "route to a human" means mechanically.** It raises a denial of
 the `ToolSpendDeferredToHuman` family rather than a hard denial, so it lands on the existing
 deferred-to-human path rather than a new one. `[CODE-VERIFIED]` that type already exists
-(`src/skylize/tools/base.py:310`) and is already raised by the spend gate for the
-`defer_to_human` ceiling disposition (`proxy.py:809-812`).
+(`src/skylize/tools/base.py:449`) and is already raised by the spend gate for the
+`defer_to_human` ceiling disposition (`proxy.py:938-941`).
 
 `[RESEARCH-SUGGESTED]` **The containment auto-hook must NOT fire for this rule.**
-`[CODE-VERIFIED]` `_schedule_containment` fires on `CeilingExceeded` for BOTH dispositions
-on purpose (`proxy.py:792-808`) - "the ceiling was breached either way, and that is the fact a
+`[CODE-VERIFIED]` `_schedule_containment` (defined at `proxy.py:666`) fires on `CeilingExceeded`
+for BOTH dispositions
+on purpose (`proxy.py:918-937`) - "the ceiling was breached either way, and that is the fact a
 containment responds to" - and is deliberately not fired for `EnvelopeNotFound` or
 `ToolSpendUnavailable`, because those mean "we could not check", not "the customer is
-overspending" (`proxy.py:801-807`). A large refund awaiting review is neither: no ceiling has
+overspending" (`proxy.py:926-932`). A large refund awaiting review is neither: no ceiling has
 been breached. Firing containment here would propose shutting things down every time an
 agent asked for a refund above a routine threshold, which is precisely the "safety control
 [that] starts stopping healthy machines" that comment warns against.
@@ -995,12 +1044,12 @@ agent asked for a refund above a routine threshold, which is precisely the "safe
 
 `[RESEARCH-SUGGESTED]` One DAL over both tables, modelled on `OrgSpendCeilingDAL`
 (`[CODE-VERIFIED]` `src/skylize/dal/org_spend_ceiling.py`) for the audited-setter pattern and
-on `PgPermissionGrantRepository` (`src/skylize/dal/permission_grants.py:71-101`) for the
+on `PgPermissionGrantRepository` (`src/skylize/dal/permission_grants.py:71-96`) for the
 explicit-org-predicate discipline.
 
 Every read and write runs inside `Database.tenant_session(org_id)` **and** carries an
 explicit `org_id` predicate, "so the RLS policy and the query agree rather than the query
-relying on RLS alone" (`[CODE-VERIFIED]` `dal/permission_grants.py:5-8`).
+relying on RLS alone" (`[CODE-VERIFIED]` `dal/permission_grants.py:6`).
 
 ```
 read_authority_limit_minor(org_id, currency, authority_level) -> int | None
@@ -1017,20 +1066,21 @@ set_review_threshold(*, org_id, currency, review_above_minor,
 
 1. **Audited on every change.** `[CODE-VERIFIED]` `OrgSpendCeilingDAL.set_ceiling` reads the
    previous value, upserts, then records an `AuditService` action carrying `before -> after`
-   (`dal/org_spend_ceiling.py:122-156`), because "a ceiling change is a GOVERNANCE EVENT, not
-   silent config" (`:110-113`). Same shape, with action types
+   (`dal/org_spend_ceiling.py:122-156`, the upsert at `122-143` and the audit record at
+   `144-156`), because "a ceiling change is a GOVERNANCE EVENT, not
+   silent config" (`:110-113`, docstring). Same shape, with action types
    `governance.refund_authority_limit_set` and `governance.refund_review_threshold_set`.
 2. **Validate before writing.** `set_ceiling` rejects a negative value before the write
    (`dal/org_spend_ceiling.py:118-121`); these reject negative amounts, an unknown
    `authority_level`, and a `currency` that is not three characters - the same length
    constraint `ToolSpendProfile.currency` and `SpendEnvelope.currency` carry
-   (`[CODE-VERIFIED]` `tools/base.py:98`, `principal/models.py:207`).
+   (`[CODE-VERIFIED]` `tools/base.py:156`, `principal/models.py:207`).
 3. **Reject a non-monotonic ladder.** `set_authority_limit` reads the org's other rows for
    the same currency and refuses a value that would leave a lower authority level with a
    higher cap than a higher one. This is the constraint 7.5.2 declines to express in SQL.
 4. **`None` is never fabricated into a default.** A read returning `None` is the honest "not
    configured" signal the caller acts on, exactly as `read_ceiling_micros` documents
-   (`dal/org_spend_ceiling.py:26-28`). For 7.5.2 the caller denies; for 7.5.3 the caller
+   (`dal/org_spend_ceiling.py:58-62`). For 7.5.2 the caller denies; for 7.5.3 the caller
    routes to a human (7.5.3).
 5. **No effective-dating.** `org_spend_ceiling` is effective-dated because it is keyed by
    billing period (`dal/org_spend_ceiling.py:19-22`). These tables have no period dimension:
@@ -1098,27 +1148,46 @@ same pass, so the repo's documented failure mode of stale claims propagating doe
   statement of fact, but should note that the Stripe broker, when built, has no token store and
   no refresh loop, so it is materially smaller than the Faz A-D plan assumed.
 - `integration_inputs.md` 2.1 Q2.1d - the citation `src/skylize/tools/proxy.py:322` is stale
-  in two ways. The line is now `:796` - it was corrected to `:788` in the 2026-09-09 pass and
-  drifted a further +8 in the HITL resumption merge - and the conclusion drawn from it was
+  in two ways. The line is now `:911` (re-verified 2026-09-18; was `:796` after the
+  2026-09-09 pass, drifted further in the HITL-resumption and PR #14 merges) - and the
+  conclusion drawn from it was
   wrong: that key is the ledger reservation key, not the Stripe `Idempotency-Key` (7.0 item
-  3). **Corrected in the same 2026-09-09 pass as this revision.**
+  3). **Corrected in the same 2026-09-09 pass as this revision; line re-verified 2026-09-18.**
 - `docs/06_integrations/gcp_wif_killswitch_design.md:1090-1094` describes `ToolWifProfile`
   as "a fourth opt-in profile". That count is **already stale, independently of this
-  design**: `ToolApprovalProfile` (`base.py:242-274`) landed with the HITL resumption merge,
+  design**: `ToolApprovalProfile` (`base.py:263-295`) landed with the HITL resumption merge,
   so `ToolDefinition` carries five profiles today. `ToolStripeProfile` would make six - but
   only five PROXY-ENFORCED gates, since `approval` is enforced in the agent tool loop and not
-  in `ToolProxy.invoke` (`base.py:303-309`). `base.py:183` carries the same stale count
+  in `ToolProxy.invoke` (`base.py:324-330`). `base.py:204` carries the same stale count
   in a code comment ("The fourth opt-in gate on `ToolProxy.invoke`") and would need the same
   edit at implementation time.
 - `[CODE-VERIFIED]` **`src/skylize/tools/base.py:99` cites a document that does not exist in
-  `main`.** The `ToolContext` docstring references
+  `main`.** ~~The `ToolContext` docstring references
   `docs/architecture/spend_reservation_replay_semantics.md`, which lives only on the unmerged
   `fix/toolproxy-ledger-commit-accounting` branch. That is a dangling reference in trunk
-  today, not a Stripe-specific defect. It is FLAGGED rather than fixed here because
-  correcting it is a CODE edit and this pass is docs-only. It resolves itself when that
-  branch merges; **if that branch is abandoned, the citation must be removed from
-  `base.py`.**
-- **Citation scope of the 2026-09-13 pass.** Only section 4.5's code citations, the R1/R2
+  today, not a Stripe-specific defect.~~ **`[RESOLVED, 2026-09-18]` This item is now stale
+  and its own claim is no longer true: PR #14 merged that branch's content to `main`, and
+  `docs/architecture/spend_reservation_replay_semantics.md` now exists on `main`
+  (confirmed: the file is present, and `src/skylize/tools/base.py:97,526` both cite it and
+  both resolve). No further action needed; kept here, struck through, so the history of the
+  flag and its resolution is not lost.**
+- **Citation scope of the 2026-09-18 pass.** Every `[CODE-VERIFIED]` citation in sections
+  4.5, 6.0, 7.0 and 7.5, plus this section's own citations, was individually re-read against
+  `base.py` / `proxy.py` / `spend.py` / `dal/spend_reservation.py` / `dal/org_spend_ceiling.py`
+  / `contracts/base.py` / `principal/models.py` at HEAD (post-HITL-resumption-merge,
+  post-PR-#14/`f162a72`) - not shifted arithmetically. The prior 2026-09-13 pass's scope note
+  below is superseded but kept for history. Two citations turned out to describe **mechanisms
+  that materially changed shape, not merely moved**, and are flagged in place rather than
+  silently corrected: the Q2.1l settlement paragraph in 7.0.1 (the proxy now settles
+  `actual_minor=settle_minor`, not the reservation unconditionally - this is the whole
+  substance of PR #14), and the `fraud_detection_agent`/`FraudVerdictOut` "never consumed"
+  claim in 7.5.4 (it is now consumed by the `app/autonomy` attention pilot, though not by the
+  Stripe refund gate this section designs). See those sections for the full flag. The
+  `PostgresSpendRepository` relocation from `app/principal/spend.py` to
+  `dal/spend_reservation.py` (also part of PR #14) did not require any citation fix in these
+  sections, because none of them had cited that class directly.
+- **Citation scope of the 2026-09-13 pass (superseded by the note above; kept for history).**
+  Only section 4.5's code citations, the R1/R2
   preamble's, and the two inside Q2.1l were re-verified against `base.py` / `proxy.py` at
   this HEAD. Sections 6.0, 7.0 and 7.5 still carry citations taken at `b0abf13`, which
   PREDATES the HITL resumption merge: `base.py` shifted by **+43** below line ~78 and
