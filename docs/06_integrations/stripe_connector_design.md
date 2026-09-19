@@ -653,10 +653,31 @@ pass. See the inline notes below and 7.0.1's residual discussion.
 
 Three gaps block a refund tool specifically. All three were derived in the prior pass and stand:
 
-1. **Currency mismatch.** `ToolSpendProfile.currency` is frozen per tool (`base.py:156,163`), but a
-   refund's currency belongs to the charge. `CeilingExceeded` reports `envelope.currency`
-   (`spend.py:166`) with no cross-currency reconciliation. Must fail closed on mismatch - a
-   100 JPY ceiling silently authorising a 100 EUR refund is the failure to prevent.
+1. **Currency mismatch - RESOLVED 2026-09-19.** `ToolSpendProfile.currency` is frozen per tool
+   (`base.py:156,163`), but a refund's currency belongs to the charge, and `org_stripe_accounts`
+   (4.0.2) deliberately carries no currency field to source a dynamic one from - it is
+   identity/authority, not a mirror of Stripe account capabilities. **Concrete mechanism
+   implemented:** `stripe.refund` is registered SINGLE-CURRENCY
+   (`tools/builtin/stripe_tools.py` `STRIPE_REFUND_CURRENCY = "usd"`, documented as a known
+   limit of this pass - a merchant taking charges in another currency needs a SEPARATE
+   registered tool instance for that currency, out of scope here). Before calling
+   `POST /v1/refunds`, the handler reads the charge's ACTUAL currency via a new read-only
+   `StripeRefundExecutor.get_charge_currency` call (`app/stripe/actions.py`; needs only the
+   platform secret key + `Stripe-Account` header, the same as any read per this section's own
+   table) and compares it against the tool's declared currency. A mismatch raises
+   `ChargeCurrencyMismatch` BEFORE any money moves, surfaced by the tool handler as
+   `ToolSpendDeferredToHuman` - the SAME defer-to-human disposition the `[INTERIM-RULE]`
+   review-threshold check uses (7.5.4) - never a silent proceed and never an attempted currency
+   conversion. `CeilingExceeded` still reports `envelope.currency` (`spend.py:166`) with no
+   cross-currency reconciliation of its own; this mechanism is what keeps a mismatched-currency
+   refund from ever reaching that gate in the first place. Tests:
+   `tests/unit/test_stripe_actions.py::test_create_refund_refuses_on_a_currency_mismatch_before_calling_refunds`
+   asserts the executor never calls `/v1/refunds` on a mismatch (only the currency-check `GET`
+   happens); `tests/unit/test_stripe_actions.py::test_create_refund_currency_check_is_case_insensitive`
+   guards the comparison itself; `tests/unit/test_stripe_tools_handler.py::
+   test_handler_defers_to_human_on_a_currency_mismatch` proves the HANDLER translates that
+   executor exception into `ToolSpendDeferredToHuman` and that no money moves (`recorder.post_calls
+   == 0`) when it does.
 2. **Full refunds are not expressible.** Stripe permits omitting `amount`; `proxy.py:876-883`
    denies anything that is not a positive `int` (and excludes `bool`, an `int` subclass). The tool must resolve a full refund to an
    explicit cent amount before the gate.
