@@ -6,8 +6,11 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
+import logging
+
 from ...config import Settings
 from ...dal.ports import RefreshTokenRow, UserRepository, UserRow
+from ..principal.provider import PrincipalProvisioner
 from .passwords import hash_password, verify_password
 from .tokens import InvalidTokenError, create_access_token, create_refresh_token, decode_token
 
@@ -39,9 +42,15 @@ class LoginResult:
 
 
 class UserAuthService:
-    def __init__(self, repo: UserRepository, settings: Settings) -> None:
+    def __init__(
+        self,
+        repo: UserRepository,
+        settings: Settings,
+        provisioner: PrincipalProvisioner | None = None,
+    ) -> None:
         self._repo = repo
         self._settings = settings
+        self._provisioner = provisioner
 
     async def register(
         self,
@@ -85,7 +94,87 @@ class UserAuthService:
         )
         if not await self._repo.create_owner_of_new_org(row):
             raise OrgNotAvailableError(org_id)
+
+        await self._provision_principal(row)
         return row
+
+    async def _provision_principal(self, row: UserRow) -> None:
+        """Give the new owner a principal so the co-work surface is reachable.
+
+        WHY THIS RUNS AT ALL. Without a `principal` row,
+        `PrincipalAuthorityService.snapshot_for` raises `PrincipalNotFound` for
+        this user (app/principal/provider.py:71-75) — correctly, since absence of
+        a principal record is a denial and never a grant. The owner would be able
+        to register and log in, and every co-work turn would be refused. Migration
+        0020 seeds principals for owners who exist when it runs; nobody who
+        registers AFTERWARDS gets one, which is exactly the hole backfill
+        migration 0031 had to repair once already.
+
+        WHAT THIS DELIBERATELY DOES NOT DO. It does not create the tenant. This
+        registration path still requires the `tenants` row to exist already
+        (`users.org_id` is a FK onto it, migration 0001), which today means an
+        operator created it out-of-band via `python -m skylize.ops.bootstrap_api_key
+        --create-tenant`. Unauthenticated tenant creation stays closed; this
+        method narrows the gap for owners of operator-provisioned orgs only, and
+        an org with no tenant row still fails at `create_owner_of_new_org` with a
+        ForeignKeyViolationError, before this is ever reached.
+
+        TRANSACTION SAFETY — the deliberate choice, stated plainly. The user
+        INSERT and this write are two separate statements on two separate
+        connections and are NOT atomic. That is forced, not overlooked: the user
+        write goes through `admin_session` (no tenant GUC — `users` has no RLS
+        policy keyed on one), while `principal` carries FORCE ROW LEVEL SECURITY
+        whose WITH CHECK requires `skylize.org_id` to be set (migration 0019), so
+        it MUST go through `tenant_session`. Each helper acquires its own
+        connection from the pool (dal/connection.py:71-88), so one transaction
+        cannot span both without restructuring `Database` to hand out a
+        caller-managed connection — a change to the single module every query in
+        the system flows through, which is more than this task should do
+        unilaterally.
+
+        The sequence is instead made CRASH-RECOVERABLE, which is what atomicity
+        would have bought here:
+
+          * the user row is the sole source of truth — it is written first and,
+            once written, the registration is real;
+          * `provision_owner_principal` is idempotent (ON CONFLICT / NOT EXISTS,
+            dal/principal.py), so re-running it after a crash converges;
+          * a failure HERE is logged and swallowed rather than raised, because
+            raising would return an error for a registration that actually
+            succeeded — the user exists and can log in — and would invite the
+            caller to retry with the same email, which now fails as a duplicate.
+            The recoverable state is "user without principal"; the unrecoverable
+            one would be a user who believes registration failed.
+
+        The residual gap is therefore bounded and self-announcing: an owner whose
+        principal write failed can log in but is denied co-work, and migration
+        0031's query — or simply re-running it — repairs exactly that state. No
+        silent data loss, and no authority granted by accident.
+        """
+        if self._provisioner is None:
+            return
+        try:
+            await self._provisioner.provision_owner_principal(
+                org_id=row.org_id,
+                # The identity rule fixed by migration 0020 and repeated in 0031:
+                # principal_id IS users.user_id rendered as text, because
+                # `RequestContext.user_id` is the JWT `sub` (edge/deps.py:75)
+                # minted from this same column (edge/routes/auth.py:136). Any
+                # other derivation silently splits the two identity spaces.
+                principal_id=str(row.user_id),
+                display_name=(row.display_name or "").strip() or row.email,
+            )
+        except Exception:
+            # Swallowed by design — see the docstring. The user row is already
+            # committed; surfacing this would misreport a successful registration.
+            logging.getLogger(__name__).exception(
+                "registration succeeded but principal provisioning failed for "
+                "user_id=%s org_id=%s; the owner can log in but co-work will be "
+                "denied until a principal is provisioned (re-runnable: "
+                "migration 0031 / provision_owner_principal)",
+                row.user_id,
+                row.org_id,
+            )
 
     async def login(self, *, email: str, password: str) -> LoginResult:
         user = await self._repo.get_by_email(email)

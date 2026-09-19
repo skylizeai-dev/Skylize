@@ -11,12 +11,18 @@ authority — never "no restrictions".
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Protocol, Sequence, runtime_checkable
 
 from .authority import compile_authority
 from .errors import PrincipalNotFound
-from .models import AuthoritySnapshot, Grant, Principal
+from .models import (
+    COWORK_SEED_MANIFEST,
+    AuthoritySnapshot,
+    Grant,
+    GrantSource,
+    Principal,
+)
 
 
 @runtime_checkable
@@ -34,6 +40,24 @@ class PrincipalRepository(Protocol):
     async def load_grants(
         self, *, org_id: str, principal_id: str
     ) -> Sequence[Grant]: ...
+
+
+@runtime_checkable
+class PrincipalProvisioner(Protocol):
+    """Write port for provisioning an org owner's principal. SEPARATE from
+    `PrincipalRepository` on purpose.
+
+    The read port is what `PrincipalAuthorityService` — and through it, token
+    minting — depends on, and it must stay read-only: a component that resolves
+    authority has no business being able to grant it. Widening the read port
+    would hand that capability to every holder of it. Registration depends on
+    this narrow port instead, so the ability to create a principal is visible in
+    the type of whatever holds it.
+    """
+
+    async def provision_owner_principal(
+        self, *, org_id: str, principal_id: str, display_name: str
+    ) -> bool: ...
 
 
 @runtime_checkable
@@ -104,3 +128,50 @@ class InMemoryPrincipalRepository:
         self, *, org_id: str, principal_id: str
     ) -> Sequence[Grant]:
         return list(self._grants.get((org_id, principal_id), []))
+
+    async def provision_owner_principal(
+        self, *, org_id: str, principal_id: str, display_name: str
+    ) -> bool:
+        """Mirror of the Pg conditional write (dal/principal.py).
+
+        Same two guards, same return meaning: True when this call created the
+        principal row, False when one already existed. Grants are added if
+        absent even when the principal was already present, because the durable
+        path does the same -- a crash between the two writes must be repairable
+        by calling again.
+
+        There is no race to settle here: this store is a plain dict mutated from
+        a single event loop, so the check and the write cannot interleave. The Pg
+        implementation needs ON CONFLICT / NOT EXISTS precisely because that is
+        not true there.
+        """
+        key = (org_id, principal_id)
+        created = key not in self._principals
+        if created:
+            self._principals[key] = Principal(
+                principal_id=principal_id,
+                org_id=org_id,
+                display_name=display_name,
+                position_id=None,
+                authority_level="executive",
+                manager_principal_id=None,
+                suspended_at=None,
+            )
+
+        existing = self._grants.setdefault(key, [])
+        held = {
+            g.scope for g in existing if g.source is GrantSource.POSITION
+        }
+        now = datetime.now(timezone.utc)
+        for scope in COWORK_SEED_MANIFEST:
+            if scope not in held:
+                existing.append(
+                    Grant(
+                        scope=scope,
+                        source=GrantSource.POSITION,
+                        valid_from=now,
+                        valid_to=None,
+                        justification=None,
+                    )
+                )
+        return created
