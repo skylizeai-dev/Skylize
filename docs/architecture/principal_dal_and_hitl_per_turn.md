@@ -442,13 +442,71 @@ deferred one.
    Passing it directly is only safe if the two are provisioned as the same
    identifier — which nothing currently enforces.
 
-2. **No write path exists for `principal` or `principal_grant`.**
-   `principal_grant.created_by` is `NOT NULL` with no default (`0019:97`), so
-   some writer must supply it, and there is no admin endpoint, no seeding
-   routine, and no repository method that inserts either row. Until that exists,
-   the DAL in item 1 can only read rows nobody can create through the product.
-   This may be acceptable for a first cut (operator SQL) but should be a
-   deliberate choice, not a discovery.
+   **UPDATE (2026-09-19).** Passing it directly is now safe on the provisioning
+   side, though the caveat "nothing enforces it" is only partly retired. Every
+   writer of `principal_id` is bound to the same derivation,
+   `users.user_id::text` — migrations 0020 and 0031, and
+   `provision_owner_principal` — and a unit test asserts registration produces
+   exactly that. What is still absent is a *schema-level* constraint: nothing in
+   Postgres prevents a hand-written row from using a different identifier. The
+   agreement is upheld by convention plus tests, not by the database.
+
+2. ~~**No write path exists for `principal` or `principal_grant`.**~~
+   **RESOLVED (2026-09-19) for one path; still open for the other.** The
+   deliberate choice this item asked for has now been made, and it was forced by
+   a live failure rather than chosen in the abstract: `principal` was found
+   EMPTY on the dev database while two org owners existed, so
+   `snapshot_for` raised `PrincipalNotFound` for every human and the co-work
+   surface was unreachable. Migration 0020 was not wrong — it ran before either
+   user registered, matched zero rows, and committed as a legitimate no-op.
+
+   **Resolved — "operator pre-creates the tenant, then the owner registers".**
+   Two mechanisms, both bound to migration 0020's identity rule
+   (`principal_id = users.user_id::text`):
+
+   * `0031_backfill_owner_principal.py` re-executes 0020's seed now that owners
+     exist, repairing the live database. Idempotent by construction (ON CONFLICT
+     / WHERE NOT EXISTS), so it is safe on a populated or empty database.
+   * `PgPrincipalRepository.provision_owner_principal` (`dal/principal.py`) is
+     the runtime write path, called by `UserAuthService.register` after
+     `create_owner_of_new_org` succeeds. It writes `principal` +
+     `principal_grant` only, and `created_by` — the `NOT NULL` column this item
+     flagged — is supplied as `'seed'`, matching both migrations so an auditor
+     sees one marker for one kind of row whichever path wrote it.
+
+   The write method lives on a SEPARATE port (`PrincipalProvisioner`), not on
+   `PrincipalRepository`. The read port is what token minting depends on, and a
+   component that resolves authority must not also be able to grant it.
+
+   Grants are exactly the co-work manifest (`{llm.generate, memory.search}`) and
+   no `spend_envelope` row is ever written: a principal existing must not imply
+   that a budget was configured.
+
+   TRANSACTION SAFETY, recorded because it is not atomic and that is deliberate.
+   The `users` INSERT goes through `admin_session`; the `principal` INSERT must
+   go through `tenant_session`, because `principal` carries FORCE ROW LEVEL
+   SECURITY whose `WITH CHECK` requires `skylize.org_id` (migration 0019) and
+   `admin_session` sets no such GUC. Each helper acquires its own pooled
+   connection (`dal/connection.py:71-88`), so one transaction cannot span both
+   without restructuring `Database` — a change to the module every query flows
+   through. The sequence is instead made crash-RECOVERABLE: the user row is the
+   sole source of truth, the principal write is idempotent, and a failure is
+   logged and swallowed rather than raised (raising would report failure for a
+   registration that actually succeeded). Residual state after a crash is "owner
+   can log in, co-work denied", repaired by re-running either writer.
+
+   **STILL OPEN — true self-service registration.** None of the above lets a
+   stranger create an organisation. `users.org_id` is a FK onto `tenants`, and
+   `POST /api/v1/tenants` remains gated by `get_context`, so registering into an
+   org with no tenant row still fails with a ForeignKeyViolationError exactly as
+   before — asserted as a REQUIREMENT in
+   `tests/integration/test_registration_provisions_principal_pg.py`, so that it
+   cannot be "fixed" by accident. Relaxing that gate (the declined "Option 1")
+   would re-create the unauthenticated org-creation surface
+   `ops/bootstrap_api_key.py:40-51` documents as a deadlock and
+   `edge/routes/auth.py` closes with "Do not reopen this route". Whether
+   self-service org creation should exist, and behind what governance, is a
+   distinct and still-deferred decision.
 
 3. **`rehydrate` does not restore authority fingerprints.**
    `GovernanceAuthority.rehydrate` (`app/governance/authority.py:207-219`)
