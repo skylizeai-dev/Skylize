@@ -23,16 +23,46 @@ effective-dated because it is keyed by billing period
 (dal/org_spend_ceiling.py:19-22, 26-34). These tables have no period
 dimension: a refund limit is current config, and the audit trail is what
 reconstructs history.
+
+`RefundLimitsReader` IS A PROTOCOL, DELIBERATELY, unlike `OrgSpendCeilingDAL`
+which this module's setter pattern otherwise mirrors. `OrgRefundLimitsDAL`
+is read from `tools/proxy.py`'s `_authorize_stripe` gate, which sits on the
+live request path (`app/agents/execution.py` -> `tools/proxy.py`) - the
+same path `import-linter`'s "Application logic contains no SQL" contract
+polices. A concrete class typed against `Database` (even only under
+`TYPE_CHECKING`, which import-linter's static AST scan does not special-case
+and still flags) would make `skylize.app` transitively reach
+`skylize.dal.connection` -> `asyncpg` through that gate, exactly the
+violation CI caught on this file's first version (2026-09-19). `db: Any` on
+the concrete class and a same-module `Protocol` for the read surface the
+gate needs is the same fix `GcpWifRepository`/`PgGcpWifRepository`
+(dal/gcp_wif.py:128,222) and `StripeAccountRepository`/
+`PgStripeAccountRepository` (dal/stripe_accounts.py) already use for the
+same reason - this file should have matched them from the start rather than
+`OrgSpendCeilingDAL`, which is never reached from `tools/proxy.py`.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import Any, Protocol
 from uuid import UUID
 
-if TYPE_CHECKING:
-    from ..app.audit.service import AuditService
-    from .connection import Database
+from ..app.audit.service import AuditService
+
+
+class RefundLimitsReader(Protocol):
+    """The read-only surface `ToolProxy._authorize_stripe` needs. Deliberately
+    NOT the full `OrgRefundLimitsDAL` - the gate only ever reads, never writes
+    (writes are an operator/ops action through the audited setters), and a
+    narrower port is what keeps `tools/proxy.py` off `Database`/`asyncpg`."""
+
+    async def read_authority_limit_minor(
+        self, org_id: str, currency: str, authority_level: str
+    ) -> int | None: ...
+
+    async def read_review_threshold_minor(
+        self, org_id: str, currency: str
+    ) -> int | None: ...
 
 
 class NonMonotonicAuthorityLadder(ValueError):
@@ -47,7 +77,12 @@ class NonMonotonicAuthorityLadder(ValueError):
 
 
 class OrgRefundLimitsDAL:
-    def __init__(self, db: "Database") -> None:
+    """The concrete Postgres-backed DAL. `db: Any` deliberately, matching
+    `PgGcpWifRepository`/`PgStripeAccountRepository` - see module docstring
+    for why this file must not type-reference `Database` even under
+    `TYPE_CHECKING`."""
+
+    def __init__(self, db: Any) -> None:
         self._db = db
 
     async def read_authority_limit_minor(
@@ -91,7 +126,7 @@ class OrgRefundLimitsDAL:
         currency: str,
         authority_level: str,
         max_refund_minor: int,
-        audit: "AuditService",
+        audit: AuditService,
         correlation_id: UUID,
         source_agent_id: str | None = None,
         governance_token_id: UUID | None = None,
@@ -163,7 +198,7 @@ class OrgRefundLimitsDAL:
         org_id: str,
         currency: str,
         review_above_minor: int,
-        audit: "AuditService",
+        audit: AuditService,
         correlation_id: UUID,
         source_agent_id: str | None = None,
         governance_token_id: UUID | None = None,

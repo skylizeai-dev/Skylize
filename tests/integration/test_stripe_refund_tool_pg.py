@@ -58,7 +58,7 @@ from skylize.tools.proxy import ToolProxy
 from skylize.tools.registry import ToolRegistry
 
 from .conftest import APP_DB_URL, requires_app_role
-from .test_tool_proxy_spend_pg import PRINCIPAL, _drop_org, _seed_envelope
+from .test_tool_proxy_spend_pg import PRINCIPAL, _drop_org, _envelope_row, _seed_envelope
 
 pytestmark = pytest.mark.integration
 
@@ -249,14 +249,14 @@ async def test_settlement_commits_the_actual_refunded_amount_not_the_reservation
         )
         assert result.output.actual_refunded_minor == 300  # type: ignore[attr-defined]
 
-        envelope = await ledger.get_envelope(
-            org_id=org, principal_id=PRINCIPAL, now=datetime.now(timezone.utc),
-        )
-        assert envelope is not None
+        # Read as an independent observer (admin role, raw SQL), not through
+        # the same ledger/repo path under test - test_tool_proxy_spend_pg.py's
+        # own established pattern (_envelope_row).
+        envelope = await _envelope_row(org)
         # Only 300 was ever really spent - the 200 difference must be back in
         # the spendable pool, not held against a refund that only partially
         # went through.
-        assert envelope.spent_minor == 300
+        assert envelope["spent_minor"] == 300
     finally:
         await pool.close()
         await _drop_org(org)

@@ -48,7 +48,7 @@ from ..app.principal.spend import SpendLedger
 from ..contracts.base import AgentContract, GovernanceToken
 from ..contracts.token import LiveStateChecker, validate_tool_call
 from ..dal.gcp_wif import GcpWifRepository
-from ..dal.refund_limits import OrgRefundLimitsDAL
+from ..dal.refund_limits import RefundLimitsReader
 from ..dal.stripe_accounts import StripeAccountRepository
 from .base import (
     PermissionGrant,
@@ -197,7 +197,7 @@ class ToolProxy:
         wif_repo: "GcpWifRepository | None" = None,
         stripe_repo: "StripeAccountRepository | None" = None,
         stripe_livemode: bool = False,
-        refund_limits: "OrgRefundLimitsDAL | None" = None,
+        refund_limits: "RefundLimitsReader | None" = None,
     ) -> None:
         self._registry = registry
         self._audit = audit
