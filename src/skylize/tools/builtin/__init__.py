@@ -18,6 +18,7 @@ from .asana_tools import (
     build_asana_create_task_tool,
 )
 from ...dal.gcp_wif import GcpWifRepository
+from ...dal.stripe_accounts import StripeAccountRepository
 from .datetime_tool import CURRENT_DATETIME_TOOL
 from .gcp_tools import build_gcp_tools
 from .drive_tools import build_drive_create_file_tool, build_drive_share_file_tool
@@ -28,6 +29,7 @@ from .notion_tools import (
     build_notion_create_page_tool,
 )
 from .memory_recall import MemoryRecallPort, NullMemoryRecallPort, build_memory_recall_tool
+from .stripe_tools import build_stripe_refund_tool
 from .web_search import NullWebSearchPort, WebSearchPort, build_web_search_tool
 
 
@@ -38,6 +40,9 @@ def build_builtin_tools(
     oauth_credentials: OAuthCredentialService | None = None,
     wif_repo: "GcpWifRepository | None" = None,
     gcp_executor_factory: object | None = None,
+    stripe_repo: "StripeAccountRepository | None" = None,
+    stripe_executor_factory: object | None = None,
+    stripe_livemode: bool = False,
 ) -> list[ToolDefinition]:
     tools = [
         build_memory_recall_tool(memory_recall_port or NullMemoryRecallPort()),
@@ -69,6 +74,16 @@ def build_builtin_tools(
     tools.extend(build_gcp_tools(
         wif_repo=wif_repo, executor_factory=gcp_executor_factory,
     ))
+    # Stripe refunds. NOT the OAuth service, NOT a stored grant: a Stripe
+    # Connect trust is identity + authority (org_stripe_accounts, design
+    # 4.0.2), not a bearer token (design 4.0.1) - its own repository and its
+    # own gate, same reasoning as GCP WIF above. Registers only when BOTH the
+    # account store and an executor factory are wired, so a deployment
+    # without Stripe has no such tool in the registry at all.
+    tools.extend(build_stripe_refund_tool(
+        stripe_repo=stripe_repo, executor_factory=stripe_executor_factory,
+        stripe_livemode=stripe_livemode,
+    ))
     return tools
 
 
@@ -79,11 +94,15 @@ def default_tool_registry(
     oauth_credentials: OAuthCredentialService | None = None,
     wif_repo: "GcpWifRepository | None" = None,
     gcp_executor_factory: object | None = None,
+    stripe_repo: "StripeAccountRepository | None" = None,
+    stripe_executor_factory: object | None = None,
+    stripe_livemode: bool = False,
 ) -> ToolRegistry:
     registry = ToolRegistry(
         build_builtin_tools(
             memory_recall_port, web_search_port, credential_vault, oauth_credentials,
             wif_repo, gcp_executor_factory,
+            stripe_repo, stripe_executor_factory, stripe_livemode,
         )
     )
     registry.validate_schemas()

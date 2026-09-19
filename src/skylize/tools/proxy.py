@@ -48,6 +48,8 @@ from ..app.principal.spend import SpendLedger
 from ..contracts.base import AgentContract, GovernanceToken
 from ..contracts.token import LiveStateChecker, validate_tool_call
 from ..dal.gcp_wif import GcpWifRepository
+from ..dal.refund_limits import RefundLimitsReader
+from ..dal.stripe_accounts import StripeAccountRepository
 from .base import (
     PermissionGrant,
     ToolCallLimitExceeded,
@@ -63,6 +65,9 @@ from .base import (
     ToolPermissionDenied,
     ToolPermissionTierDenied,
     ToolPermissionUnavailable,
+    ToolStripeChargeTypeForbidden,
+    ToolStripeNotConnected,
+    ToolStripeScopeInsufficient,
     ToolWifNotConnected,
     ToolWifTargetNotAllowed,
     ToolWifTrustBroken,
@@ -85,6 +90,22 @@ LiveStateFor = Callable[[str], LiveStateChecker]
 # workflow). Injected as a callback so the proxy stays decoupled from the full
 # Authority — it only needs this one hot-path hook.
 RecordAction = Callable[..., Awaitable[bool]]
+
+
+def _scope_covers(*, granted: str, required: str) -> bool:
+    """Does the scope Stripe actually GRANTED cover what a tool REQUIRES?
+
+    `read_write` covers both `read_only` and `read_write`; `read_only` covers
+    only itself. Two literal values today (design 3.0.1's `scope=read_write`
+    request and Stripe's `read_only` default), so a simple rank rather than a
+    set - matching the platform's own attenuation invariant (design 4.5.4,
+    integration_inputs.md:31-35): the effective permission is an intersection
+    that includes the provider grant actually held.
+    """
+    rank = {"read_only": 0, "read_write": 1}
+    if granted not in rank or required not in rank:
+        return False
+    return rank[granted] >= rank[required]
 
 
 def _settlement_amount(
@@ -174,6 +195,9 @@ class ToolProxy:
         oauth_credentials: OAuthCredentialService | None = None,
         permission_gate: PermissionGate | None = None,
         wif_repo: "GcpWifRepository | None" = None,
+        stripe_repo: "StripeAccountRepository | None" = None,
+        stripe_livemode: bool = False,
+        refund_limits: "RefundLimitsReader | None" = None,
     ) -> None:
         self._registry = registry
         self._audit = audit
@@ -200,6 +224,29 @@ class ToolProxy:
         # rather than mutating a customer's infrastructure through a trust
         # nobody checked — same reasoning as the three gates above.
         self._wif_repo = wif_repo
+        # None where no Stripe infrastructure is wired. A tool declaring a
+        # `stripe` profile then FAILS CLOSED in `_authorize_stripe` rather than
+        # moving a customer's money through a trust nobody checked — same
+        # reasoning as the gates above.
+        self._stripe_repo = stripe_repo
+        # Which mode THIS PROCESS runs in. A property of the running process,
+        # never of a tool or a request (see `ToolStripeProfile` docstring on why
+        # there is deliberately no `livemode` field to override it per-call).
+        self._stripe_livemode = stripe_livemode
+        # None where no refund-limits infrastructure is wired. Without it the
+        # [INTERIM-RULE] large-refund review trigger (design 7.5.4) cannot run
+        # at all, so a refund tool with a `stripe` profile but no
+        # `refund_limits` wired skips straight to the spend gate below —
+        # acceptable ONLY because Q2.1c (7.0.1) already makes every refund
+        # defer to a human on the HITL-replay path regardless; this DAL adds an
+        # ADDITIONAL, narrower review trigger on top of that, not the only gate
+        # standing between an agent and a refund. Deliberately NOT wired to any
+        # fraud signal (`fraud_detection_agent` / `FraudVerdictOut`) — that
+        # pilot lives in `app.autonomy` and does not reach `ToolProxy.invoke`
+        # (design 7.5.4's 2026-09-18 re-verification flag); this is a simple,
+        # explicit, org-configurable absolute threshold, by design, not a
+        # shortcut standing in for a real fraud-signal integration.
+        self._refund_limits = refund_limits
         # LATE-BOUND, never a constructor argument. See
         # `set_containment_trigger` for the cycle this breaks.
         self._containment: Any | None = None
@@ -373,6 +420,21 @@ class ToolProxy:
         # instead of after a round trip to Google at the worst possible moment.
         if tool.wif is not None:
             await self._authorize_wif(
+                tool=tool, validated_input=validated_input, contract=contract,
+                org_id=org_id, correlation_id=correlation_id,
+                governance_token=governance_token,
+            )
+
+        # Stripe Connect trust (org_stripe_accounts). Only for tools declaring a
+        # `stripe` profile. Placed AFTER WIF and BEFORE the spend reservation,
+        # for the same reason WIF sits before spend: a broken trust, an
+        # insufficient scope, a forbidden charge type, or a large-refund review
+        # trigger are all denials, and ordering any of them after the spend hold
+        # would reserve budget against the customer's ceiling only to discover
+        # the call could never run, leaving a hold to unwind. Every check here is
+        # a tenant-scoped DB read or a field inspection - cheaper than the hold.
+        if tool.stripe is not None:
+            await self._authorize_stripe(
                 tool=tool, validated_input=validated_input, contract=contract,
                 org_id=org_id, correlation_id=correlation_id,
                 governance_token=governance_token,
@@ -827,6 +889,157 @@ class ToolProxy:
                 f"{org_id!r}; add it to the GCP target list to authorize this action"
             ))
 
+    async def _authorize_stripe(
+        self,
+        *,
+        tool: ToolDefinition,
+        validated_input: Any,
+        contract: AgentContract,
+        org_id: str,
+        correlation_id: UUID,
+        governance_token: GovernanceToken,
+    ) -> None:
+        """Refuse unless a live Stripe Connect trust covers this exact call.
+
+        Mirrors `_authorize_wif` in structure: every exit that is not a silent
+        return denies, and each denial is audited before it is raised, so a
+        refused Stripe call leaves the same trail a refused scope check does.
+
+        Design doc 4.5.4's four checks, in order: unwired repository, no live
+        connection for the running mode, insufficient granted scope, the
+        direct-charge invariant (design 2.0), and - for refund verbs only,
+        last in the stage and still before the spend reservation - the
+        [INTERIM-RULE] large-refund review trigger (design 7.5.4). The
+        [INTERIM-RULE] check is a SIMPLE ABSOLUTE THRESHOLD read from
+        `org_refund_authority_limits` / `org_refund_review_thresholds`, per org,
+        per currency - deliberately NOT wired to any fraud signal (see
+        `_refund_limits` docstring on `ToolProxy.__init__`).
+        """
+        profile = tool.stripe
+        assert profile is not None  # caller checks; narrows for the type checker
+
+        async def deny(exc: ToolPermissionDenied) -> ToolPermissionDenied:
+            await self._audit_call(
+                tool_id=tool.tool_id, contract=contract, org_id=org_id,
+                correlation_id=correlation_id, governance_token=governance_token,
+                result="denied", reason=str(exc),
+            )
+            return exc
+
+        if self._stripe_repo is None:
+            # FAIL CLOSED, exactly like the other proxy-enforced gates on a
+            # missing dependency. A tool that moves a customer's money must
+            # never dispatch because the check itself was not wired.
+            raise await deny(ToolStripeNotConnected(
+                f"tool {tool.tool_id!r} declares a stripe profile but no Stripe "
+                "account store is wired; refusing to act on customer money "
+                "through an unchecked trust"
+            ))
+
+        row = await self._stripe_repo.get_connected(org_id, livemode=self._stripe_livemode)
+        if row is None:
+            raise await deny(ToolStripeNotConnected(
+                f"org {org_id!r} has no Stripe account connected for "
+                f"{'live' if self._stripe_livemode else 'test'} mode; connect "
+                "Stripe before this action can be authorized"
+            ))
+
+        if not _scope_covers(granted=row.scope, required=profile.required_scope):
+            raise await deny(ToolStripeScopeInsufficient(
+                f"org {org_id!r}'s connected Stripe account granted scope "
+                f"{row.scope!r}, which does not cover the "
+                f"{profile.required_scope!r} this tool requires; the customer "
+                "must re-consent for a wider scope"
+            ))
+
+        if profile.mutates_money:
+            forbidden = [
+                field_name
+                for field_name in ("on_behalf_of", "transfer_data", "application_fee_amount")
+                if getattr(validated_input, field_name, None) is not None
+            ]
+            if forbidden:
+                raise await deny(ToolStripeChargeTypeForbidden(
+                    f"tool {tool.tool_id!r} input carries {forbidden!r}, which "
+                    "would create a destination/separate charge rather than a "
+                    "direct charge (design doc 2.0); refusing to invert dispute "
+                    "and fraud liability onto Skylize"
+                ))
+
+        # [INTERIM-RULE] large-refund review trigger (design 7.5.4). Refund
+        # verbs only - identified by the tool also declaring a spend profile,
+        # since the amount this rule compares against IS
+        # ToolSpendProfile.amount_field, read off the SAME validated input
+        # rather than a second, divergence-prone field.
+        if self._refund_limits is not None and tool.spend is not None:
+            amount = getattr(validated_input, tool.spend.amount_field, None)
+            if isinstance(amount, int) and not isinstance(amount, bool) and amount > 0:
+                await self._check_refund_review_threshold(
+                    tool=tool, contract=contract, org_id=org_id,
+                    correlation_id=correlation_id, governance_token=governance_token,
+                    currency=tool.spend.currency, amount_minor=amount,
+                )
+
+    async def _check_refund_review_threshold(
+        self,
+        *,
+        tool: ToolDefinition,
+        contract: AgentContract,
+        org_id: str,
+        correlation_id: UUID,
+        governance_token: GovernanceToken,
+        currency: str,
+        amount_minor: int,
+    ) -> None:
+        """Route to a human when EITHER the authority-level cap OR the
+        org-wide review threshold is exceeded (design 7.5.4's rule, in full).
+
+        A missing row on EITHER lookup routes to a human - neither lookup ever
+        falls back to another currency, another authority level, or a platform
+        default (design 7.5.2, 7.5.3). Raises `ToolSpendDeferredToHuman` rather
+        than a hard denial, landing on the existing deferred-to-human path
+        (design 7.5.4) - the SAME type the spend gate below raises for the
+        `defer_to_human` ceiling disposition, so a caller branching on it does
+        not need to know which gate produced it.
+
+        Deliberately does NOT fire `_schedule_containment`: no ceiling has been
+        breached here, and firing containment on a routine review would
+        "propose shutting things down every time an agent asked for a refund
+        above a routine threshold" (design 7.5.4) - the same over-triggering
+        `_schedule_containment`'s own docstring warns against.
+        """
+        assert self._refund_limits is not None  # caller checks
+
+        async def deny(exc: ToolPermissionDenied) -> ToolPermissionDenied:
+            await self._audit_call(
+                tool_id=tool.tool_id, contract=contract, org_id=org_id,
+                correlation_id=correlation_id, governance_token=governance_token,
+                result="denied", reason=f"refund review: {exc}",
+            )
+            return exc
+
+        authority_cap = await self._refund_limits.read_authority_limit_minor(
+            org_id, currency, governance_token.authority_level
+        )
+        if authority_cap is None or amount_minor > authority_cap:
+            raise await deny(ToolSpendDeferredToHuman(
+                f"refund of {amount_minor} {currency} exceeds the "
+                f"{governance_token.authority_level!r} authority cap "
+                f"({authority_cap!r} minor units; a missing cap denies "
+                "authority-level authorization outright) for org "
+                f"{org_id!r}; deferring to a human"
+            ))
+
+        review_threshold = await self._refund_limits.read_review_threshold_minor(
+            org_id, currency
+        )
+        if review_threshold is None or amount_minor >= review_threshold:
+            raise await deny(ToolSpendDeferredToHuman(
+                f"refund of {amount_minor} {currency} is at or above the "
+                f"org-wide review threshold ({review_threshold!r} minor units; "
+                "a missing threshold means review everything) for org "
+                f"{org_id!r}; deferring to a human regardless of authority level"
+            ))
 
     async def _reserve_spend(
         self,
