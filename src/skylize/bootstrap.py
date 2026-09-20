@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any, Mapping
 if TYPE_CHECKING:
     from .dal.connection import Database
     from .dal.cost_ledger import CostLedgerDAL
+    from .dal.model_routing import ModelRoutingDAL
     from .dal.org_autonomy_mode import OrgAutonomyModeDAL
     from .dal.org_spend_ceiling import OrgSpendCeilingDAL
 
@@ -375,6 +376,13 @@ class Container:
     # The autonomy route reads and sets it through this DAL. NOT yet consumed by
     # any enforcement path -- this ships the capability, not the wiring.
     autonomy_mode_dal: "OrgAutonomyModeDAL | None" = None
+    # Org-scoped logical-model routing (migration 0032), None on the memory
+    # backend. The models route reads the catalogue and the rules through this
+    # DAL. NOT yet consumed by the LLM egress path -- the Anthropic adapter
+    # still maps logical -> concrete straight from Settings
+    # (anthropic_adapter.py:267-271), so this ships the store and the read, not
+    # the enforcement.
+    model_routing_dal: "ModelRoutingDAL | None" = None
     # GCP Workload Identity Federation issuer key, or None when the feature is
     # off (no SKYLIZE_WIF_ISSUER_BASE_URL). DELIBERATELY NOT REACHABLE FROM
     # `authority`: the governance signing key and this key serve different trust
@@ -747,12 +755,14 @@ async def build_container(settings: Settings | None = None) -> Container:
     from .dal.activity_signals import AuditActivitySignalDAL
     from .dal.content_signals import DeliverableContentSignalDAL
     from .dal.cost_ledger import CostLedgerDAL
+    from .dal.model_routing import ModelRoutingDAL
     from .dal.org_autonomy_mode import OrgAutonomyModeDAL
     from .dal.org_spend_ceiling import OrgSpendCeilingDAL
 
     cost_ledger = CostLedgerDAL(db) if db is not None else None
     spend_ceiling_dal = OrgSpendCeilingDAL(db) if db is not None else None
     autonomy_mode_dal = OrgAutonomyModeDAL(db) if db is not None else None
+    model_routing_dal = ModelRoutingDAL(db) if db is not None else None
     # Read-only signal sources for the scheduled autonomous shapes. Constructed
     # unconditionally on the postgres backend and EMPTY on memory, which is the
     # truth there: neither `audit_log` nor `deliverables` exists to read. Holding
@@ -955,6 +965,7 @@ async def build_container(settings: Settings | None = None) -> Container:
         llm=llm, work_journal=work_journal, _closers=closers, db=db,
         cost_ledger=cost_ledger, spend_ceiling_dal=spend_ceiling_dal,
         autonomy_mode_dal=autonomy_mode_dal,
+        model_routing_dal=model_routing_dal,
         wif_signing_key=wif_signing_key, wif_repo=wif_repo,
         github_app_key=github_app_key, github_app_repo=github_app_repo,
         gcp_containment=gcp_containment,

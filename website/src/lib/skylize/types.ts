@@ -106,6 +106,80 @@ export interface SetAutonomyModeInput {
   mode: AutonomyMode;
 }
 
+/**
+ * The three LOGICAL model names the LLM gateway accepts. A CLOSED set: they are
+ * exactly the keys of `AnthropicAdapter._model_map`
+ * (src/skylize/adapters/llm/anthropic_adapter.py:267-271), and a fourth name
+ * raises `ValueError` at `_concrete_model` before any request leaves. The same
+ * three are the CHECK constraint in migration 0032.
+ *
+ * These are NOT product model names. The concrete provider model id each one
+ * resolves to arrives on the wire in `concrete_model`, from Settings
+ * (config.py:311-313), because it changes with provider releases and must never
+ * be hardcoded in the browser.
+ */
+export const LOGICAL_MODELS = ["default", "fast", "reasoning"] as const;
+
+export type LogicalModel = (typeof LOGICAL_MODELS)[number];
+
+/**
+ * One `model_pricing` row (migration 0012), in that table's own units:
+ * micro-currency per 1,000,000 tokens, so every real quoted price is an exact
+ * integer and no float touches money ($3.00/Mtok == 3_000_000). The console
+ * formats this; it does not receive a pre-rounded number.
+ */
+export interface BackendModelPricing {
+  input_price_micros_per_mtok: number;
+  output_price_micros_per_mtok: number;
+  currency: string;
+  pricing_version: number;
+}
+
+/**
+ * One catalogue entry from GET /api/v1/models (ModelCatalogueEntry).
+ *
+ * `pricing` is NULL whenever `model_pricing` has no row covering this concrete
+ * model. That table is seeded EMPTY by design (migration 0012's Seed note), so
+ * null is the EXPECTED value on an unseeded deployment and means "nobody has
+ * priced this model". The console must say that out loud; rendering a blank
+ * cost cell that reads as zero would be a claim the backend cannot support.
+ *
+ * There is deliberately no `latency_ms` and no `context_window`: nothing in the
+ * backend measures or stores either one (edge/routes/models.py's docstring).
+ */
+export interface BackendModelCatalogueEntry {
+  logical_name: LogicalModel;
+  concrete_model: string;
+  provider: string;
+  pricing: BackendModelPricing | null;
+}
+
+/**
+ * One routing rule from GET /api/v1/models (ModelRoutingRuleResponse).
+ *
+ * All three classes are ALWAYS present. `configured: false` means no row exists
+ * and this is the fail-closed identity mapping (`target === routing_class`) --
+ * exactly what the adapter does today. Display only.
+ *
+ * There is deliberately no `traffic_share_pct`: traffic share is not a
+ * configured value. It is derivable from `ai_cost_ledger`, which holds one
+ * immutable row per real provider call, so the only honest version of that
+ * number is an aggregate over what actually ran.
+ */
+export interface BackendModelRoutingRule {
+  routing_class: LogicalModel;
+  target_logical_model: LogicalModel;
+  fallback_logical_model: LogicalModel | null;
+  configured: boolean;
+}
+
+/** GET /api/v1/models response (ModelsResponse). */
+export interface BackendModelsResponse {
+  catalogue: BackendModelCatalogueEntry[];
+  routing: BackendModelRoutingRule[];
+  pricing_configured: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // BFF response shapes exposed to the browser (FROZEN CONTRACT — the console UI
 // is built against these exact names; do not rename).
@@ -143,6 +217,18 @@ export interface ConsoleKillSwitchResponse {
 export interface ConsoleAutonomyResponse {
   mode: AutonomyMode;
   configured: boolean;
+}
+
+/**
+ * GET /api/console/models. Passed through unchanged from the backend: every
+ * field is already exactly what the Models screen needs, and there is nothing
+ * to project away because the backend already refuses to send a field it cannot
+ * source.
+ */
+export interface ConsoleModelsResponse {
+  catalogue: BackendModelCatalogueEntry[];
+  routing: BackendModelRoutingRule[];
+  pricing_configured: boolean;
 }
 
 // ---------------------------------------------------------------------------

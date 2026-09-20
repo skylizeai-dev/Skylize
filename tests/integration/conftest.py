@@ -255,6 +255,7 @@ _TENANT_CHILD_TABLES: tuple[str, ...] = (
     "journal_cursor",
     "memory_records",
     "model_pricing",
+    "model_routing_rules",
     "oauth_credentials",
     "org_autonomy_mode",
     "org_credentials",

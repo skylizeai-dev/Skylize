@@ -34,6 +34,7 @@ from .routes import (
     hitl,
     kill_switch,
     knowledge,
+    models,
     spend,
     tenants,
     wif_oidc,
@@ -98,6 +99,7 @@ def create_app() -> FastAPI:
     app.include_router(audit.router)
     app.include_router(spend.router)
     app.include_router(autonomy.router)
+    app.include_router(models.router)
     app.include_router(brief.router)
     app.include_router(cowork.router)
     return app
