@@ -433,9 +433,64 @@ export interface BackendKnowledgeIndexHealth {
   truncated: boolean;
 }
 
+/**
+ * GET /api/v1/billing/usage — BillingUsageResponse (edge/routes/billing.py).
+ *
+ * MONEY UNIT: every `*_micros` field is MICRO-currency — millionths of one
+ * currency unit, the unit `ai_cost_ledger.cost_micros` and
+ * `org_spend_ceiling.ceiling_micros` store (ADR-0006). It is NOT cents. To show
+ * a currency amount, divide by 1_000_000; to show cents, divide by 10_000. A
+ * component that treats one of these as cents is off by 10,000x.
+ *
+ * WHAT IS NOT HERE. There is no plan tier, no invoice list, no seat count and
+ * no agent-slot count — those have NO backing table anywhere in this repo, so
+ * the response has no field for them rather than a null that would read as
+ * "unset". `unavailable_sections` names them; the Billing screen must render
+ * each as explicitly unavailable and must NOT substitute a placeholder.
+ */
+export interface BackendModelUsage {
+  provider: string;
+  model: string;
+  /** Micro-currency, NOT cents. Charges net of reversals. */
+  cost_micros: number;
+  input_tokens: number;
+  output_tokens: number;
+  /** Read from the ledger rows — never assumed to be USD. */
+  currency: string;
+}
+
+export interface BackendPeriodUsage {
+  /** Calendar month as "%Y-%m", e.g. "2026-07". */
+  billing_period: string;
+  /** Micro-currency, NOT cents. */
+  cost_micros: number;
+  input_tokens: number;
+  output_tokens: number;
+}
+
+export interface BackendBillingUsage {
+  billing_period: string;
+  /** All-zero is a REAL answer, not a loading state — see billing.py. */
+  current_period: BackendPeriodUsage;
+  models: BackendModelUsage[];
+  /** Newest first, including the current month. */
+  history: BackendPeriodUsage[];
+  /** False => the LLM egress gate fails closed; no ceiling has been set. */
+  ceiling_configured: boolean;
+  /** GOVERNANCE cap (migration 0014), NOT a plan allowance. Micro-currency. */
+  ceiling_micros: number | null;
+  /** May be NEGATIVE — the ceiling is a soft cap with bounded overshoot. */
+  remaining_micros: number | null;
+  /** Billing-screen sections with no backend: render as unavailable. */
+  unavailable_sections: string[];
+  detail: string | null;
+}
+
 export type ConsoleAuditList = BackendAuditListResponse;
 export type ConsoleKnowledgeIndexHealth = BackendKnowledgeIndexHealth;
 export type ConsoleCoworkTurn = BackendCoworkTurnResponse;
 export type ConsoleApiKeyList = BackendApiKey[];
 export type ConsoleIssuedApiKey = BackendIssuedApiKey;
 export type ConsoleOrgUserList = BackendOrgUser[];
+/** GET /api/console/billing — forwarded verbatim; nothing to project away. */
+export type ConsoleBillingUsage = BackendBillingUsage;

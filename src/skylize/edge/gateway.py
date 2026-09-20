@@ -27,6 +27,7 @@ from .routes import (
     audit,
     auth,
     autonomy,
+    billing,
     brief,
     cowork,
     credentials,
@@ -98,6 +99,10 @@ def create_app() -> FastAPI:
     app.include_router(audit.router)
     app.include_router(spend.router)
     app.include_router(autonomy.router)
+    # Read-only, ledger-backed usage for the console's Billing screen. Reads the
+    # same two sources as spend.router (ai_cost_ledger + org_spend_ceiling) at a
+    # wider grain; it invents no plan or invoice data (see billing.py).
+    app.include_router(billing.router)
     app.include_router(brief.router)
     app.include_router(cowork.router)
     return app
