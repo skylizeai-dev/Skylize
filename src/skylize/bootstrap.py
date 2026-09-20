@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from .dal.cost_ledger import CostLedgerDAL
     from .dal.org_autonomy_mode import OrgAutonomyModeDAL
     from .dal.org_spend_ceiling import OrgSpendCeilingDAL
+    from .dal.workflow_runs import WorkflowRunsDAL
 
 from .adapters.llm.content_gate import GuardedLLMGateway, LLMContentGate
 from .adapters.llm.demo_adapter import DemoLLMAdapter
@@ -375,6 +376,11 @@ class Container:
     # The autonomy route reads and sets it through this DAL. NOT yet consumed by
     # any enforcement path -- this ships the capability, not the wiring.
     autonomy_mode_dal: "OrgAutonomyModeDAL | None" = None
+    # Workflow run history (migration 0033), None on the memory backend. Written
+    # best-effort by Orchestrator.invoke (which holds it directly, as a
+    # WorkflowRunWriter port) and READ by edge/routes/workflows.py through this
+    # field. On memory the orchestrator still runs; no run row is kept.
+    workflow_runs_dal: "WorkflowRunsDAL | None" = None
     # GCP Workload Identity Federation issuer key, or None when the feature is
     # off (no SKYLIZE_WIF_ISSUER_BASE_URL). DELIBERATELY NOT REACHABLE FROM
     # `authority`: the governance signing key and this key serve different trust
@@ -749,10 +755,12 @@ async def build_container(settings: Settings | None = None) -> Container:
     from .dal.cost_ledger import CostLedgerDAL
     from .dal.org_autonomy_mode import OrgAutonomyModeDAL
     from .dal.org_spend_ceiling import OrgSpendCeilingDAL
+    from .dal.workflow_runs import WorkflowRunsDAL
 
     cost_ledger = CostLedgerDAL(db) if db is not None else None
     spend_ceiling_dal = OrgSpendCeilingDAL(db) if db is not None else None
     autonomy_mode_dal = OrgAutonomyModeDAL(db) if db is not None else None
+    workflow_runs_dal = WorkflowRunsDAL(db) if db is not None else None
     # Read-only signal sources for the scheduled autonomous shapes. Constructed
     # unconditionally on the postgres backend and EMPTY on memory, which is the
     # truth there: neither `audit_log` nor `deliverables` exists to read. Holding
@@ -825,6 +833,9 @@ async def build_container(settings: Settings | None = None) -> Container:
     orchestrator = Orchestrator(
         registry=registry, authority=authority, audit=audit, bus=bus,
         runner=LLMStepRunner(llm),
+        # Run history is BEST EFFORT inside invoke and None-safe: on the memory
+        # backend the orchestrator runs exactly as before and keeps no row.
+        run_writer=workflow_runs_dal,
     )
     # Governed tool dispatch (IF-TOOL). Every tool_use block from the LLM passes
     # through the proxy: token signature/expiry/revocation/scope/budget checks
@@ -955,6 +966,7 @@ async def build_container(settings: Settings | None = None) -> Container:
         llm=llm, work_journal=work_journal, _closers=closers, db=db,
         cost_ledger=cost_ledger, spend_ceiling_dal=spend_ceiling_dal,
         autonomy_mode_dal=autonomy_mode_dal,
+        workflow_runs_dal=workflow_runs_dal,
         wif_signing_key=wif_signing_key, wif_repo=wif_repo,
         github_app_key=github_app_key, github_app_repo=github_app_repo,
         gcp_containment=gcp_containment,
