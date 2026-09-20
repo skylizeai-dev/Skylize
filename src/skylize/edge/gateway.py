@@ -36,6 +36,7 @@ from .routes import (
     kill_switch,
     knowledge,
     models,
+    notifications,
     security,
     spend,
     tenants,
@@ -109,6 +110,7 @@ def create_app() -> FastAPI:
     app.include_router(models.router)
     app.include_router(brief.router)
     app.include_router(cowork.router)
+    app.include_router(notifications.router)
     return app
 
 

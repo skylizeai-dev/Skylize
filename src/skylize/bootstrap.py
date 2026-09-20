@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from .dal.connection import Database
     from .dal.cost_ledger import CostLedgerDAL
     from .dal.model_routing import ModelRoutingDAL
+    from .dal.notifications import NotificationsDAL
     from .dal.org_autonomy_mode import OrgAutonomyModeDAL
     from .dal.org_spend_ceiling import OrgSpendCeilingDAL
     from .dal.workflow_runs import WorkflowRunsDAL
@@ -398,6 +399,12 @@ class Container:
     # WorkflowRunWriter port) and READ by edge/routes/workflows.py through this
     # field. On memory the orchestrator still runs; no run row is kept.
     workflow_runs_dal: "WorkflowRunsDAL | None" = None
+    # The console's notification feed (migration 0034), None on the memory
+    # backend. Read by the notifications route and WRITTEN by
+    # AgentExecutionService at the two points where the system already knows
+    # something noteworthy happened: a HITL escalation and a governance refusal.
+    # Nothing seeds it, so a fresh environment's feed is legitimately empty.
+    notifications_dal: "NotificationsDAL | None" = None
     # GCP Workload Identity Federation issuer key, or None when the feature is
     # off (no SKYLIZE_WIF_ISSUER_BASE_URL). DELIBERATELY NOT REACHABLE FROM
     # `authority`: the governance signing key and this key serve different trust
@@ -771,6 +778,7 @@ async def build_container(settings: Settings | None = None) -> Container:
     from .dal.content_signals import DeliverableContentSignalDAL
     from .dal.cost_ledger import CostLedgerDAL
     from .dal.model_routing import ModelRoutingDAL
+    from .dal.notifications import NotificationsDAL
     from .dal.org_autonomy_mode import OrgAutonomyModeDAL
     from .dal.org_spend_ceiling import OrgSpendCeilingDAL
     from .dal.workflow_runs import WorkflowRunsDAL
@@ -786,6 +794,7 @@ async def build_container(settings: Settings | None = None) -> Container:
     security_activity_dal = AuditActivitySignalDAL(db) if db is not None else None
     model_routing_dal = ModelRoutingDAL(db) if db is not None else None
     workflow_runs_dal = WorkflowRunsDAL(db) if db is not None else None
+    notifications_dal = NotificationsDAL(db) if db is not None else None
     # Read-only signal sources for the scheduled autonomous shapes. Constructed
     # unconditionally on the postgres backend and EMPTY on memory, which is the
     # truth there: neither `audit_log` nor `deliverables` exists to read. Holding
@@ -930,6 +939,7 @@ async def build_container(settings: Settings | None = None) -> Container:
         governed_org_ids=frozenset(settings.decision_engine_org_ids),
         principal_authority=principal_authority,
         slack_notifier=slack_notifier,
+        notifications=notifications_dal,
     )
     # The human side of the gate: list pending escalations, approve (which
     # replays the stored request through the SAME agent_execution path with the
@@ -994,6 +1004,7 @@ async def build_container(settings: Settings | None = None) -> Container:
         security_activity_dal=security_activity_dal,
         model_routing_dal=model_routing_dal,
         workflow_runs_dal=workflow_runs_dal,
+        notifications_dal=notifications_dal,
         wif_signing_key=wif_signing_key, wif_repo=wif_repo,
         github_app_key=github_app_key, github_app_repo=github_app_repo,
         gcp_containment=gcp_containment,

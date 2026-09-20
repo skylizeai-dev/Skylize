@@ -476,6 +476,35 @@ export interface BackendWorkflowRunListResponse {
 }
 
 /**
+ * One row of GET /api/v1/notifications — NotificationResponse
+ * (notifications.py). ORG-SCOPED, not per-user (migration 0034): `read_at` is
+ * "somebody with console access acknowledged this", not a per-person flag.
+ *
+ * `kind` is one of exactly two values with a real producer today —
+ * "hitl.approval_requested" and "governance.action_denied" — both written by
+ * AgentExecutionService at the point the governance gate already knows the
+ * fact. There is no scheduled or demo producer behind any other kind.
+ */
+export interface BackendNotification {
+  notification_id: string;
+  kind: string;
+  severity: string;
+  title: string;
+  body: string;
+  correlation_id: string | null;
+  created_at: string;
+  read_at: string | null;
+}
+
+/** GET /api/v1/notifications — NotificationListResponse. `next_before` is the
+ *  cursor for the next (older) page; null means there are no more rows. */
+export interface BackendNotificationListResponse {
+  notifications: BackendNotification[];
+  unread_count: number;
+  next_before: string | null;
+}
+
+/**
  * GET /api/v1/workflows — one workflow the backend can ACTUALLY run.
  *
  * The backend derives this list from the single graph the orchestrator builds,
@@ -682,6 +711,8 @@ export interface BackendBillingUsage {
 
 export type ConsoleAuditList = BackendAuditListResponse;
 export type ConsoleKnowledgeIndexHealth = BackendKnowledgeIndexHealth;
+export type ConsoleNotificationList = BackendNotificationListResponse;
+export type ConsoleNotification = BackendNotification;
 export type ConsoleCoworkTurn = BackendCoworkTurnResponse;
 export type ConsoleApiKeyList = BackendApiKey[];
 export type ConsoleIssuedApiKey = BackendIssuedApiKey;
