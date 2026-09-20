@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from .dal.activity_signals import AuditActivitySignalDAL
     from .dal.connection import Database
     from .dal.cost_ledger import CostLedgerDAL
+    from .dal.model_routing import ModelRoutingDAL
     from .dal.org_autonomy_mode import OrgAutonomyModeDAL
     from .dal.org_spend_ceiling import OrgSpendCeilingDAL
 
@@ -384,6 +385,13 @@ class Container:
     # resolves it by agent id, and sharing the object means the console and the
     # sweep can never read the audit trail through differently-built readers.
     security_activity_dal: "AuditActivitySignalDAL | None" = None
+    # Org-scoped logical-model routing (migration 0032), None on the memory
+    # backend. The models route reads the catalogue and the rules through this
+    # DAL. NOT yet consumed by the LLM egress path -- the Anthropic adapter
+    # still maps logical -> concrete straight from Settings
+    # (anthropic_adapter.py:267-271), so this ships the store and the read, not
+    # the enforcement.
+    model_routing_dal: "ModelRoutingDAL | None" = None
     # GCP Workload Identity Federation issuer key, or None when the feature is
     # off (no SKYLIZE_WIF_ISSUER_BASE_URL). DELIBERATELY NOT REACHABLE FROM
     # `authority`: the governance signing key and this key serve different trust
@@ -756,6 +764,7 @@ async def build_container(settings: Settings | None = None) -> Container:
     from .dal.activity_signals import AuditActivitySignalDAL
     from .dal.content_signals import DeliverableContentSignalDAL
     from .dal.cost_ledger import CostLedgerDAL
+    from .dal.model_routing import ModelRoutingDAL
     from .dal.org_autonomy_mode import OrgAutonomyModeDAL
     from .dal.org_spend_ceiling import OrgSpendCeilingDAL
 
@@ -768,6 +777,7 @@ async def build_container(settings: Settings | None = None) -> Container:
     # `security_activity_dal`. Constructed once and shared so the two can never
     # diverge into differently-built readers of the same append-only trail.
     security_activity_dal = AuditActivitySignalDAL(db) if db is not None else None
+    model_routing_dal = ModelRoutingDAL(db) if db is not None else None
     # Read-only signal sources for the scheduled autonomous shapes. Constructed
     # unconditionally on the postgres backend and EMPTY on memory, which is the
     # truth there: neither `audit_log` nor `deliverables` exists to read. Holding
@@ -971,6 +981,7 @@ async def build_container(settings: Settings | None = None) -> Container:
         cost_ledger=cost_ledger, spend_ceiling_dal=spend_ceiling_dal,
         autonomy_mode_dal=autonomy_mode_dal,
         security_activity_dal=security_activity_dal,
+        model_routing_dal=model_routing_dal,
         wif_signing_key=wif_signing_key, wif_repo=wif_repo,
         github_app_key=github_app_key, github_app_repo=github_app_repo,
         gcp_containment=gcp_containment,

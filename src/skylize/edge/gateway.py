@@ -35,6 +35,7 @@ from .routes import (
     hitl,
     kill_switch,
     knowledge,
+    models,
     security,
     spend,
     tenants,
@@ -105,6 +106,7 @@ def create_app() -> FastAPI:
     # same two sources as spend.router (ai_cost_ledger + org_spend_ceiling) at a
     # wider grain; it invents no plan or invoice data (see billing.py).
     app.include_router(billing.router)
+    app.include_router(models.router)
     app.include_router(brief.router)
     app.include_router(cowork.router)
     return app
