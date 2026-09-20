@@ -59,9 +59,14 @@ cowork_agent = AgentContract(
             max_calls_per_run=10,
         ),
     ],
-    # Both are offered to the model. Every one still goes through ToolProxy.invoke
-    # and the full ordered validation -- there is no chat fast path.
-    invocable_tools=["llm.generate", "memory.search"],
+    # Only memory.search is offered to the model. `llm.generate` is a capability
+    # name (contracts/base.py CAPABILITY_NAMES), not a registered tool, so listing
+    # it here never offered it -- AgentExecutionService drops an unregistered id
+    # with a warning (app/agents/execution.py:1133-1137). It stays in
+    # allowed_tools, where it carries governance scope as it always did. What IS
+    # offered still goes through ToolProxy.invoke and the full ordered
+    # validation -- there is no chat fast path.
+    invocable_tools=["memory.search"],
     max_token_budget=40_000,
     max_execution_time_seconds=120,
     # Straight to the human. Deliberately names NO agent, so an escalation from a
@@ -86,11 +91,12 @@ cowork_agent = AgentContract(
     # re-run every turn with the real running total.
     #
     # ACCEPTED COST: LOW_CONFIDENCE_IRREVERSIBLE loses its request-time backstop
-    # for this agent. That costs nothing while the manifest above is
-    # llm.generate + memory.search -- one generative, one read-only, neither
-    # irreversible -- and stops costing nothing the moment a side-effecting tool
-    # joins it. test_cowork_contract.py pins the manifest so that day fails
-    # loudly instead of silently. See
+    # for this agent. That costs nothing while the only tool offered to the model
+    # is memory.search -- read-only, not irreversible -- and stops costing
+    # nothing the moment a side-effecting tool joins it. The grant of
+    # llm.generate does not weaken this: it produces text, and it is not
+    # invocable at all. test_cowork_contract.py pins both the grant set and the
+    # offered set so that day fails loudly instead of silently. See
     # docs/architecture/principal_dal_and_hitl_per_turn.md.
     defers_on_trigger_presence=False,
 )

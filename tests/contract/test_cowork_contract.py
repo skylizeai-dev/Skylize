@@ -79,11 +79,18 @@ def test_cowork_invocable_tools_are_tools_not_agents() -> None:
 # The manifest pin -- this test IS the mitigation, not a description of one
 # ---------------------------------------------------------------------------
 
-#: Tools a co-work turn may hold while `defers_on_trigger_presence=False`.
+#: Tools a co-work turn may HOLD while `defers_on_trigger_presence=False`.
 #: Both are non-irreversible: `llm.generate` produces text, `memory.search`
 #: only reads. That property is the entire reason dropping the request-time
 #: LOW_CONFIDENCE_IRREVERSIBLE backstop costs nothing today.
 REVERSIBLE_MANIFEST = frozenset({"llm.generate", "memory.search"})
+
+#: What is actually OFFERED to the model. Narrower than the grant set because
+#: `llm.generate` is a capability name, not a registered tool, so it is dropped
+#: at runtime (app/agents/execution.py) and was never offered even when the
+#: contract listed it. Pinned separately: the accepted cost above is bounded by
+#: what the model can call, which is this set, not the grant set.
+OFFERED_MANIFEST = frozenset({"memory.search"})
 
 
 def test_cowork_manifest_is_exactly_the_reversible_pair() -> None:
@@ -103,7 +110,9 @@ def test_cowork_manifest_is_exactly_the_reversible_pair() -> None:
     assert {g.tool_id for g in cowork_agent.allowed_tools} == REVERSIBLE_MANIFEST
     # invocable_tools is what is actually offered to the model; a tool could be
     # granted but not offered, so pin both rather than infer one from the other.
-    assert set(cowork_agent.invocable_tools) == REVERSIBLE_MANIFEST
+    # They genuinely differ here: llm.generate is granted but not offered.
+    assert set(cowork_agent.invocable_tools) == OFFERED_MANIFEST
+    assert OFFERED_MANIFEST <= REVERSIBLE_MANIFEST
 
 
 def test_cowork_opt_out_is_tied_to_the_pinned_manifest() -> None:
