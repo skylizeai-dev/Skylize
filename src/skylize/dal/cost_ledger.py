@@ -135,6 +135,40 @@ class PriceSnapshot(BaseModel):
     currency: str
 
 
+class PeriodSpend(BaseModel):
+    """One billing period's org-wide totals — the console's usage history row.
+
+    Every number is an EXACT integer: ``cost_micros`` is micro-currency (ADR-0006),
+    NOT cents and NOT the minor units that ``budget_ledger`` uses. Token counts are
+    raw provider tokens. All three are charges NET of reversals, so a reversed
+    period can legitimately report a smaller (or negative) total.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    billing_period: str                # "%Y-%m", e.g. "2026-07"
+    cost_micros: int
+    input_tokens: int
+    output_tokens: int
+
+
+class ModelSpend(BaseModel):
+    """One (provider, model) pair's totals inside a single billing period.
+
+    Same unit discipline as ``PeriodSpend``: ``cost_micros`` is micro-currency.
+    ``currency`` comes from the rows themselves — it is never assumed to be USD.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    provider: str
+    model: str
+    cost_micros: int
+    input_tokens: int
+    output_tokens: int
+    currency: str
+
+
 class CostRecord(BaseModel):
     """Result of recording (or reversing) one entry. Money is Decimal, never float."""
 
@@ -517,3 +551,116 @@ class CostLedgerDAL:
                 billing_period,
             )
         return int(total)
+
+    async def org_period_history(
+        self, org_id: str, *, limit: int = 12
+    ) -> list[PeriodSpend]:
+        """Org-wide spend + token totals GROUPED BY billing_period, newest first.
+
+        The console's usage history. Structurally the GROUP BY form of
+        ``org_period_total_micros`` and scoped identically:
+
+          * runs inside ``tenant_session(org_id)`` so the RLS ``tenant_isolation``
+            policy on ``ai_cost_ledger`` scopes every group to this org — the
+            query itself carries NO ``org_id`` predicate, exactly as the existing
+            period aggregate does;
+          * sums ``cost_micros`` so reversals net out of their own period (a
+            reversal carries the ORIGINAL row's ``billing_period``, cost_ledger
+            reverse_entry, so a correction lands in the period it corrects, never
+            in the month the correction was made);
+          * exact integer micro-currency, never a float, never pre-rounded to
+            cents. Cents are derived ONCE at the display boundary via
+            ``micros_to_minor`` (ADR-0006 §"Money & rounding").
+
+        ``billing_period`` is a zero-padded ``"%Y-%m"`` string, so DESC text order
+        IS reverse chronological order — no date parsing in SQL.
+
+        Served by ``idx_ai_cost_ledger_org_period`` (migration 0016,
+        ``(org_id, billing_period) INCLUDE (cost_micros)``) for the leading key and
+        the money column; the token columns are heap fetches, which is acceptable
+        because this read is a console page load, not the LLM hot path that index
+        was measured for.
+
+        ``limit`` bounds the answer so a long-lived org cannot return an unbounded
+        list; it must be >= 1.
+        """
+        if limit < 1:
+            raise ValueError(f"limit must be >= 1; got {limit}")
+        async with self._db.tenant_session(org_id) as conn:
+            rows = await conn.fetch(
+                """
+                SELECT billing_period,
+                       COALESCE(SUM(cost_micros), 0)   AS cost_micros,
+                       COALESCE(SUM(input_tokens), 0)  AS input_tokens,
+                       COALESCE(SUM(output_tokens), 0) AS output_tokens
+                FROM ai_cost_ledger
+                GROUP BY billing_period
+                ORDER BY billing_period DESC
+                LIMIT $1
+                """,
+                limit,
+            )
+        return [
+            PeriodSpend(
+                billing_period=row["billing_period"],
+                cost_micros=int(row["cost_micros"]),
+                input_tokens=int(row["input_tokens"]),
+                output_tokens=int(row["output_tokens"]),
+            )
+            for row in rows
+        ]
+
+    async def org_period_model_breakdown(
+        self, org_id: str, billing_period: str
+    ) -> list[ModelSpend]:
+        """Per-(provider, model) totals WITHIN one billing period, dearest first.
+
+        The "what did the money go on" half of the console's usage read. Scoped
+        exactly like ``org_period_history``: ``tenant_session`` so RLS supplies the
+        org predicate, ``SUM(cost_micros)`` so reversals net out, exact integers in
+        micro-currency.
+
+        ``currency`` is read from the rows rather than assumed: the ledger stores
+        it per row (migration 0012) and grouping by it means a period that somehow
+        held two currencies yields two DISTINCT rows instead of one silently
+        summed nonsense total. Nothing here converts between currencies.
+
+        Ordered by ``cost_micros DESC`` then ``(provider, model)`` so the ordering
+        is TOTAL and the output is deterministic when several models cost the same
+        (including the all-zero case a fresh environment produces — see below).
+
+        NOTE on zeros: ``model_pricing`` ships deliberately EMPTY (migration 0012
+        §"Seed"), so in an environment where ops has not seeded prices there are no
+        ledger rows at all and this returns ``[]``. That empty list is the honest
+        answer, not a failure to report.
+
+        Served by ``idx_ai_cost_ledger_reconcile`` (``(org_id, provider,
+        billing_period)``, migration 0012).
+        """
+        async with self._db.tenant_session(org_id) as conn:
+            rows = await conn.fetch(
+                """
+                SELECT provider,
+                       model,
+                       currency,
+                       COALESCE(SUM(cost_micros), 0)   AS cost_micros,
+                       COALESCE(SUM(input_tokens), 0)  AS input_tokens,
+                       COALESCE(SUM(output_tokens), 0) AS output_tokens
+                FROM ai_cost_ledger
+                WHERE billing_period = $1
+                GROUP BY provider, model, currency
+                ORDER BY cost_micros DESC, provider ASC, model ASC
+                """,
+                billing_period,
+            )
+        return [
+            ModelSpend(
+                provider=row["provider"],
+                model=row["model"],
+                cost_micros=int(row["cost_micros"]),
+                input_tokens=int(row["input_tokens"]),
+                output_tokens=int(row["output_tokens"]),
+                currency=row["currency"],
+            )
+            for row in rows
+        ]
