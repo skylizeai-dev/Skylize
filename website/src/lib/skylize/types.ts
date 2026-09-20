@@ -309,6 +309,57 @@ export interface BackendAuditListResponse {
 }
 
 /**
+ * One row of `recent_events` in GET /api/v1/security/activity —
+ * GovernanceEventResponse (edge/routes/security.py).
+ *
+ * Same two absences as `BackendAuditEntry`, for the same reasons: there is no
+ * human actor behind `source_agent_id`, and the content hashes that would be
+ * the nearest thing to a signature are not carried on this route at all.
+ */
+export interface BackendGovernanceEvent {
+  event_id: string;
+  correlation_id: string;
+  action_type: string;
+  result: string;
+  occurred_at: string;
+  source_agent_id: string | null;
+  authority_level: string | null;
+  governance_token_id: string | null;
+  result_reason: string | null;
+}
+
+/**
+ * GET /api/v1/security/activity — SecurityActivityResponse.
+ *
+ * THERE IS NO SCORE FIELD, NO CONTROLS ARRAY AND NO COMPLIANCE BADGE ARRAY, and
+ * the console must not synthesize any of them. The mocked security screen
+ * carried a hardcoded posture score of 94, eight named controls (SSO, SCIM,
+ * encryption at rest, data residency, HITL, PII redaction, sandbox isolation,
+ * pen test) and four compliance badges (SOC 2, ISO 27001, GDPR, HIPAA-READY).
+ * NONE of the three has a source of truth anywhere in the backend — no table,
+ * no scoring methodology, no auditor. They were deliberately not built, and
+ * their absence here is the honest signal the screen should render.
+ *
+ * What IS real: counts of every audited outcome over the stated window, and the
+ * actual most recent non-success rows from the append-only `audit_log`.
+ */
+export interface BackendSecurityActivityResponse {
+  window_start: string;
+  window_end: string;
+  total_actions: number;
+  /** Keyed by audit result — success, denied, escalated, failed. Always all four. */
+  by_result: Record<string, number>;
+  distinct_action_types: number;
+  distinct_agents: number;
+  /** Newest-first sample of the non-success rows; bounded by `limit`. */
+  recent_events: BackendGovernanceEvent[];
+  /** True when the window holds more non-success rows than were returned. */
+  recent_events_truncated: boolean;
+}
+
+export type ConsoleSecurityActivity = BackendSecurityActivityResponse;
+
+/**
  * POST /api/v1/cowork/turns request body — CoworkTurnIn.
  *
  * `message` IS THE ONLY FIELD, and that is a design decision rather than an
