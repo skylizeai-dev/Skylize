@@ -119,6 +119,21 @@ class HumanInLoopTrigger(str, Enum):
     PAYMENT_INSTRUMENT_CHANGE = "payment_instrument_change"
 
 
+# Governance-scope strings the tool proxy never resolves against the tool
+# registry: they name a capability, not an invocable tool, so a contract that
+# lists one in `invocable_tools` has it dropped at runtime
+# (app/agents/execution.py) rather than offered to the model.
+LLM_GENERATE = "llm.generate"
+ORCHESTRATOR_DELEGATE = "orchestrator.delegate"
+
+CAPABILITY_NAMES: frozenset[str] = frozenset(
+    {
+        LLM_GENERATE,
+        ORCHESTRATOR_DELEGATE,
+    }
+)
+
+
 class ToolGrant(BaseModel):
     """One entry in an agent's tool manifest (agent_governance.md §6)."""
 
