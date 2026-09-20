@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Mapping
 
 if TYPE_CHECKING:
+    from .dal.activity_signals import AuditActivitySignalDAL
     from .dal.connection import Database
     from .dal.cost_ledger import CostLedgerDAL
     from .dal.org_autonomy_mode import OrgAutonomyModeDAL
@@ -375,6 +376,14 @@ class Container:
     # The autonomy route reads and sets it through this DAL. NOT yet consumed by
     # any enforcement path -- this ships the capability, not the wiring.
     autonomy_mode_dal: "OrgAutonomyModeDAL | None" = None
+    # Read-only `audit_log` aggregation for the console's security-posture
+    # screen (edge/routes/security.py). None on the memory backend, where there
+    # is no `audit_log` table to aggregate. The SAME DAL TYPE the scheduled
+    # fraud sweep uses via `signal_sources` below, and the SAME INSTANCE — held
+    # under its own name because the route resolves it by field while the sweep
+    # resolves it by agent id, and sharing the object means the console and the
+    # sweep can never read the audit trail through differently-built readers.
+    security_activity_dal: "AuditActivitySignalDAL | None" = None
     # GCP Workload Identity Federation issuer key, or None when the feature is
     # off (no SKYLIZE_WIF_ISSUER_BASE_URL). DELIBERATELY NOT REACHABLE FROM
     # `authority`: the governance signing key and this key serve different trust
@@ -753,6 +762,12 @@ async def build_container(settings: Settings | None = None) -> Container:
     cost_ledger = CostLedgerDAL(db) if db is not None else None
     spend_ceiling_dal = OrgSpendCeilingDAL(db) if db is not None else None
     autonomy_mode_dal = OrgAutonomyModeDAL(db) if db is not None else None
+    # ONE audit_log reader, TWO consumers. The scheduled fraud sweep harvests
+    # its window through `signal_sources` below; the console's security-posture
+    # route reads the same window plus the rows behind it through
+    # `security_activity_dal`. Constructed once and shared so the two can never
+    # diverge into differently-built readers of the same append-only trail.
+    security_activity_dal = AuditActivitySignalDAL(db) if db is not None else None
     # Read-only signal sources for the scheduled autonomous shapes. Constructed
     # unconditionally on the postgres backend and EMPTY on memory, which is the
     # truth there: neither `audit_log` nor `deliverables` exists to read. Holding
@@ -760,10 +775,10 @@ async def build_container(settings: Settings | None = None) -> Container:
     # they are inert until the Temporal worker serves the activity.
     signal_sources: "dict[str, Any]" = (
         {
-            PILOT_AGENT_ID: AuditActivitySignalDAL(db),
+            PILOT_AGENT_ID: security_activity_dal,
             CONTENT_REVIEW_AGENT_ID: DeliverableContentSignalDAL(db),
         }
-        if db is not None
+        if db is not None and security_activity_dal is not None
         else {}
     )
 
@@ -955,6 +970,7 @@ async def build_container(settings: Settings | None = None) -> Container:
         llm=llm, work_journal=work_journal, _closers=closers, db=db,
         cost_ledger=cost_ledger, spend_ceiling_dal=spend_ceiling_dal,
         autonomy_mode_dal=autonomy_mode_dal,
+        security_activity_dal=security_activity_dal,
         wif_signing_key=wif_signing_key, wif_repo=wif_repo,
         github_app_key=github_app_key, github_app_repo=github_app_repo,
         gcp_containment=gcp_containment,

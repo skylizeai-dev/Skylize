@@ -579,6 +579,34 @@ class AuditWindowCounts:
 
 
 @dataclass(frozen=True)
+class GovernanceEventRow:
+    """One audited action the security-posture screen shows verbatim.
+
+    A PROJECTION OF ``audit_log``, NOT A NEW FACT. Every field below is a column
+    migration 0001 already writes (0001_initial_schema.py:298-316); nothing here
+    is computed, scored or classified. ``inputs_hash``/``outputs_hash`` are
+    deliberately ABSENT: they are SHA-256 CONTENT hashes, and a posture screen
+    that showed them under the word "security" would invite reading them as
+    signatures, which they are not (edge/routes/audit.py:5-7).
+
+    Lives in ``ports`` for the same reason ``AuditWindowCounts`` does -- the row
+    is the contract between the DAL and its callers, and the "Application logic
+    contains no SQL" import-linter contract forbids reaching ``dal.connection``
+    from above.
+    """
+
+    event_id: UUID
+    correlation_id: UUID
+    action_type: str
+    result: str
+    occurred_at: datetime
+    source_agent_id: str | None
+    authority_level: str | None
+    governance_token_id: UUID | None
+    result_reason: str | None
+
+
+@dataclass(frozen=True)
 class UncheckedContentRow:
     """One authored deliverable a content reviewer has not yet ruled on.
 
