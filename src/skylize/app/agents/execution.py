@@ -50,6 +50,7 @@ from ...app.notifications.slack import SlackApprovalNotifier
 from ...contracts.base import AgentContract, SessionKind
 from ...contracts.registry import AgentRegistry, resolve_model
 from ...contracts.token import ValidationStage, validate_tool_call
+from ...dal.notifications import NotificationsDAL
 from ...dal.ports import DeliverableRow, HitlEscalation, HitlQueueRepository
 from ...events.bus import EventBus
 from ...schemas.hitl import HitlReplayEnvelope, HitlResumptionPoint
@@ -234,6 +235,7 @@ class AgentExecutionService:
         governed_org_ids: frozenset[str] = frozenset(),
         principal_authority: AuthorityProvider | None = None,
         slack_notifier: SlackApprovalNotifier | None = None,
+        notifications: NotificationsDAL | None = None,
     ) -> None:
         self._registry = registry
         self._llm = llm
@@ -253,6 +255,11 @@ class AgentExecutionService:
         # SLACK_APPROVAL_CHANNEL_ID are unset — the gate behaves exactly as
         # before, no notification attempted.
         self._slack_notifier = slack_notifier
+        # Optional: the console's notification feed (migration 0034). None on the
+        # memory backend, where there is no table to write to. Every write
+        # through it is BEST EFFORT — NotificationsDAL.record never raises — so
+        # the gate behaves identically whether it is wired or not.
+        self._notifications = notifications
         # Only the per-employee shape needs it. When absent, an execute() that
         # names `on_behalf_of_principal` FAILS CLOSED (_principal_scope_for)
         # rather than falling back to an ungated agent-rooted token.
@@ -637,9 +644,26 @@ class AgentExecutionService:
         await self._emit_decision(proposal, result, hitl_id=None)
         if result.outcome == "approved":
             return
-        raise AgentGovernanceRejected(
-            "; ".join(result.reasons) or "governance rejected the request"
-        )
+        reason = "; ".join(result.reasons) or "governance rejected the request"
+        # The second real producer of a console notification. A refusal is a
+        # thing the org's owner should be able to see without tailing the audit
+        # log, and by this line the terminal DecisionRejected event and its audit
+        # record are already emitted, so the fact is established independently of
+        # whether this row lands. Best effort: `record` never raises, so the 403
+        # below is reached identically either way.
+        if self._notifications is not None:
+            await self._notifications.record(
+                org_id=proposal.org_id,
+                kind="governance.action_denied",
+                severity="critical",
+                title=f"Action denied: {result.action_kind}",
+                body=(
+                    f"Governance refused {result.proposing_agent}'s proposed "
+                    f"{result.action_kind}: {reason}"
+                ),
+                correlation_id=proposal.correlation_id,
+            )
+        raise AgentGovernanceRejected(reason)
 
     # -- Mid-loop suspension gate (owner decision D1) -------------------------
 
@@ -944,6 +968,11 @@ class AgentExecutionService:
                 ),
             )
         )
+        trigger_reason = (
+            result.hitl_trigger or "; ".join(result.reasons) or "deferred_to_human"
+        )
+        expires_at = now + timedelta(hours=_HITL_EXPIRY_HOURS)
+
         # Best-effort notification — the row above is already durable, so a
         # Slack outage must never fail the request that produced the 202. See
         # SlackApprovalNotifier's docstring for why failures are logged, not
@@ -954,10 +983,30 @@ class AgentExecutionService:
                 org_id=proposal.org_id,
                 proposing_agent=result.proposing_agent,
                 action_kind=result.action_kind,
-                trigger_reason=(
-                    result.hitl_trigger or "; ".join(result.reasons) or "deferred_to_human"
+                trigger_reason=trigger_reason,
+                expires_at=expires_at,
+            )
+
+        # The console's own notification feed (migration 0034) — the SAME event
+        # the Slack post announces, persisted for the org instead of fired at one
+        # platform channel. Deliberately here rather than in a bus consumer:
+        # this is the point at which the escalation is already durable and its
+        # facts are in hand, and nothing subscribes to the bus today that could
+        # do it honestly. Best effort by construction: `record` swallows and logs
+        # every failure and returns None, so it cannot fail the 202 the caller is
+        # about to receive.
+        if self._notifications is not None:
+            await self._notifications.record(
+                org_id=proposal.org_id,
+                kind="hitl.approval_requested",
+                severity="warning",
+                title=f"Approval needed: {result.action_kind}",
+                body=(
+                    f"{result.proposing_agent} is waiting on a human decision "
+                    f"({trigger_reason}). Expires {expires_at.isoformat()}. "
+                    f"HITL id {hitl_id}."
                 ),
-                expires_at=now + timedelta(hours=_HITL_EXPIRY_HOURS),
+                correlation_id=proposal.correlation_id,
             )
 
     async def _emit_decision(

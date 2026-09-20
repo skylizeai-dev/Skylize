@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any, Mapping
 if TYPE_CHECKING:
     from .dal.connection import Database
     from .dal.cost_ledger import CostLedgerDAL
+    from .dal.notifications import NotificationsDAL
     from .dal.org_autonomy_mode import OrgAutonomyModeDAL
     from .dal.org_spend_ceiling import OrgSpendCeilingDAL
 
@@ -375,6 +376,12 @@ class Container:
     # The autonomy route reads and sets it through this DAL. NOT yet consumed by
     # any enforcement path -- this ships the capability, not the wiring.
     autonomy_mode_dal: "OrgAutonomyModeDAL | None" = None
+    # The console's notification feed (migration 0034), None on the memory
+    # backend. Read by the notifications route and WRITTEN by
+    # AgentExecutionService at the two points where the system already knows
+    # something noteworthy happened: a HITL escalation and a governance refusal.
+    # Nothing seeds it, so a fresh environment's feed is legitimately empty.
+    notifications_dal: "NotificationsDAL | None" = None
     # GCP Workload Identity Federation issuer key, or None when the feature is
     # off (no SKYLIZE_WIF_ISSUER_BASE_URL). DELIBERATELY NOT REACHABLE FROM
     # `authority`: the governance signing key and this key serve different trust
@@ -747,12 +754,14 @@ async def build_container(settings: Settings | None = None) -> Container:
     from .dal.activity_signals import AuditActivitySignalDAL
     from .dal.content_signals import DeliverableContentSignalDAL
     from .dal.cost_ledger import CostLedgerDAL
+    from .dal.notifications import NotificationsDAL
     from .dal.org_autonomy_mode import OrgAutonomyModeDAL
     from .dal.org_spend_ceiling import OrgSpendCeilingDAL
 
     cost_ledger = CostLedgerDAL(db) if db is not None else None
     spend_ceiling_dal = OrgSpendCeilingDAL(db) if db is not None else None
     autonomy_mode_dal = OrgAutonomyModeDAL(db) if db is not None else None
+    notifications_dal = NotificationsDAL(db) if db is not None else None
     # Read-only signal sources for the scheduled autonomous shapes. Constructed
     # unconditionally on the postgres backend and EMPTY on memory, which is the
     # truth there: neither `audit_log` nor `deliverables` exists to read. Holding
@@ -894,6 +903,7 @@ async def build_container(settings: Settings | None = None) -> Container:
         governed_org_ids=frozenset(settings.decision_engine_org_ids),
         principal_authority=principal_authority,
         slack_notifier=slack_notifier,
+        notifications=notifications_dal,
     )
     # The human side of the gate: list pending escalations, approve (which
     # replays the stored request through the SAME agent_execution path with the
@@ -955,6 +965,7 @@ async def build_container(settings: Settings | None = None) -> Container:
         llm=llm, work_journal=work_journal, _closers=closers, db=db,
         cost_ledger=cost_ledger, spend_ceiling_dal=spend_ceiling_dal,
         autonomy_mode_dal=autonomy_mode_dal,
+        notifications_dal=notifications_dal,
         wif_signing_key=wif_signing_key, wif_repo=wif_repo,
         github_app_key=github_app_key, github_app_repo=github_app_repo,
         gcp_containment=gcp_containment,
