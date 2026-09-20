@@ -557,6 +557,51 @@ class WorkflowRepository(Protocol):
 
     async def record_step(self, row: WorkflowRunStepRow) -> None: ...
 
+
+# ---------------------------------------------------------------------------
+# Workflow run lifecycle (LIVE orchestrator path) — run identity
+# ---------------------------------------------------------------------------
+#
+# A DIFFERENT record from WorkflowRepository above, not a superset of it. That
+# one is the PAUSED Temporal engine's per-node step trail (`workflow_run_steps`,
+# migration 0010, run_id in Temporal's id space). This one is the LIVE
+# `Orchestrator.invoke` path's run row (`workflow_runs`, migration 0033, run_id
+# IS the invocation's correlation_id). No join exists between them and none is
+# implied; see migration 0033's docstring for why the FK was declined.
+#
+# Declared here as a Protocol rather than imported concretely because
+# `Orchestrator` lives in `skylize.app`, which the import-linter contract
+# "Application logic contains no SQL" forbids from reaching `dal.connection`.
+
+
+class WorkflowRunWriter(Protocol):
+    """Open and close a run row on the live orchestrator path.
+
+    The implementation (`dal/workflow_runs.py`) raises on failure like any DAL.
+    Resilience is the CALLER's contract: `Orchestrator.invoke` swallows and
+    audits, so a lost run row never costs a run.
+    """
+
+    async def start_run(
+        self,
+        *,
+        run_id: UUID,
+        org_id: str,
+        workflow_name: str,
+        agent_id: str,
+        correlation_id: UUID,
+    ) -> None: ...
+
+    async def finish_run(
+        self,
+        *,
+        run_id: UUID,
+        org_id: str,
+        status: str,
+        failure_stage: str | None = None,
+        reason: str | None = None,
+    ) -> None: ...
+
 @dataclass(frozen=True)
 class AuditWindowCounts:
     """One org's audited activity over ``[since, until)``. Counts only.

@@ -446,6 +446,63 @@ export interface BackendSecurityActivityResponse {
 export type ConsoleSecurityActivity = BackendSecurityActivityResponse;
 
 /**
+ * GET /api/v1/workflows/runs — one row of REAL run history from `workflow_runs`
+ * (migration 0033), written best-effort by `Orchestrator.invoke`.
+ *
+ * `failure_stage` IS NOT PROGRESS. It names where a run STOPPED, and it is null
+ * on every run that completed. Nothing on the live orchestrator path records
+ * that a run reached a given stage, so a UI must not derive a stage-by-stage
+ * pipeline (done / in progress / pending) from this field or from the
+ * catalogue's static `stages`.
+ */
+export interface BackendWorkflowRun {
+  run_id: string;
+  workflow_name: string;
+  agent_id: string;
+  /** running | completed | denied | failed */
+  status: string;
+  correlation_id: string;
+  started_at: string;
+  finished_at: string | null;
+  failure_stage: string | null;
+  reason: string | null;
+}
+
+/** GET /api/v1/workflows/runs — WorkflowRunListResponse. `next_before` is the
+ *  keyset cursor for the next (older) page; null means no more rows. */
+export interface BackendWorkflowRunListResponse {
+  runs: BackendWorkflowRun[];
+  next_before: string | null;
+}
+
+/**
+ * GET /api/v1/workflows — one workflow the backend can ACTUALLY run.
+ *
+ * The backend derives this list from the single graph the orchestrator builds,
+ * so it has ONE entry today. A console must render what arrives; padding it to
+ * match a mock would advertise triggers that do not exist.
+ */
+export interface BackendWorkflowDefinition {
+  name: string;
+  agent_id: string;
+  agent_role: string;
+  department: string;
+  authority_level: string;
+  trigger_path: string;
+  /** The graph's STATIC node sequence — the workflow's shape, not any run's
+   *  position in it. See `stage_progress_supported`. */
+  stages: string[];
+}
+
+/** GET /api/v1/workflows — WorkflowDefinitionListResponse. */
+export interface BackendWorkflowDefinitionListResponse {
+  workflows: BackendWorkflowDefinition[];
+  /** Always false today. Stated by the backend so a client cannot infer stage
+   *  tracking from the presence of `stages`. */
+  stage_progress_supported: boolean;
+}
+
+/**
  * POST /api/v1/cowork/turns request body — CoworkTurnIn.
  *
  * `message` IS THE ONLY FIELD, and that is a design decision rather than an
@@ -631,3 +688,5 @@ export type ConsoleIssuedApiKey = BackendIssuedApiKey;
 export type ConsoleOrgUserList = BackendOrgUser[];
 /** GET /api/console/billing — forwarded verbatim; nothing to project away. */
 export type ConsoleBillingUsage = BackendBillingUsage;
+export type ConsoleWorkflowRunList = BackendWorkflowRunListResponse;
+export type ConsoleWorkflowDefinitionList = BackendWorkflowDefinitionListResponse;
