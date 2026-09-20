@@ -389,7 +389,52 @@ export interface BackendOrgUser {
   role: string;
 }
 
+/**
+ * One row of GET /api/v1/knowledge/index-health — SourcePathHealth.
+ *
+ * `source_path` IS NOT A DATA SOURCE. It is the origin string whoever ingested
+ * the document supplied: an upload's filename, the literal
+ * "onboarding-interview", or a webhook-supplied path (knowledge.py
+ * `upload_knowledge` / `interview_knowledge`). Nothing in the platform
+ * registers, connects to, polls or syncs anything named here — there is no
+ * connector registry, no sync cadence, and no knowledge of the origin's true
+ * size. So there is no connector type, no SYNCED/INDEXING status and no
+ * coverage percentage to send, and the console must not render one.
+ *
+ * `last_ingested_at` is when Skylize last WROTE this path's chunks. It is not
+ * a freshness-versus-origin figure: the origin may have changed since, and the
+ * platform has no way to know that it did.
+ */
+export interface BackendKnowledgeSourcePath {
+  source_path: string;
+  /** Vector points stored under this origin string. */
+  chunks: number;
+  /** Distinct `parent_doc_id` values — the unit a caller ingested. */
+  documents: number;
+  departments: string[];
+  last_ingested_at: string | null;
+}
+
+/**
+ * GET /api/v1/knowledge/index-health — IndexHealthResponse.
+ *
+ * A census of the org's Qdrant index, derived entirely from stored payload
+ * fields: every number is a count or a max over points that really exist.
+ *
+ * `truncated` true means the backend's walk hit its point cap, so every count
+ * here is a LOWER BOUND over a prefix of the tenant's points. The console must
+ * surface that rather than present the totals as complete.
+ */
+export interface BackendKnowledgeIndexHealth {
+  total_chunks: number;
+  total_documents: number;
+  source_paths: BackendKnowledgeSourcePath[];
+  last_ingested_at: string | null;
+  truncated: boolean;
+}
+
 export type ConsoleAuditList = BackendAuditListResponse;
+export type ConsoleKnowledgeIndexHealth = BackendKnowledgeIndexHealth;
 export type ConsoleCoworkTurn = BackendCoworkTurnResponse;
 export type ConsoleApiKeyList = BackendApiKey[];
 export type ConsoleIssuedApiKey = BackendIssuedApiKey;

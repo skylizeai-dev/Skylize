@@ -33,6 +33,26 @@ class _FakeSvc:
     async def search(self, *a, **k):
         return []
 
+    async def index_health(self, *, org_id):
+        from skylize.memory.knowledge_ingestion import IndexHealth, SourcePathStats
+
+        self.calls.append(("index_health", org_id))
+        return IndexHealth(
+            total_chunks=3,
+            total_documents=2,
+            source_paths=[
+                SourcePathStats(
+                    source_path="handbook.md",
+                    chunks=2,
+                    documents=1,
+                    departments=["support"],
+                    last_ingested_at="2026-09-17T10:00:00+00:00",
+                )
+            ],
+            last_ingested_at="2026-09-17T10:00:00+00:00",
+            truncated=False,
+        )
+
 
 _WEBHOOK_SECRET = "test-webhook-secret"
 
@@ -135,3 +155,51 @@ def test_ingest_webhook_rejects_bad_signature(client: TestClient, container: _Fa
     )
     assert resp.status_code == 401
     assert container.knowledge_ingestion.calls == []
+
+
+def test_index_health_scopes_to_the_callers_org_not_a_parameter(
+    client: TestClient, container: _FakeContainer
+) -> None:
+    """The org comes from the authenticated context, so it cannot be asked for.
+
+    A query parameter would make one tenant's census reachable from another's
+    session; the route takes none, and the service is called with ctx.org_id.
+    """
+    resp = client.get("/api/v1/knowledge/index-health?org_id=org_b")
+    assert resp.status_code == 200, resp.text
+    assert container.knowledge_ingestion.calls == [("index_health", "org_a")]
+
+
+def test_index_health_returns_only_counts(client: TestClient) -> None:
+    """The honesty gate at the wire: counts and timestamps, nothing invented."""
+    body = client.get("/api/v1/knowledge/index-health").json()
+
+    assert body["total_chunks"] == 3
+    assert body["total_documents"] == 2
+    assert body["truncated"] is False
+    row = body["source_paths"][0]
+    assert row == {
+        "source_path": "handbook.md",
+        "chunks": 2,
+        "documents": 1,
+        "departments": ["support"],
+        "last_ingested_at": "2026-09-17T10:00:00+00:00",
+    }
+    # The console mock's fabrications must not appear anywhere in the response.
+    serialized = str(body)
+    for invented in ("connector", "coverage", "SYNCED", "INDEXING", "recall", "p95"):
+        assert invented not in serialized, f"{invented} has no backend source"
+
+
+def test_index_health_503s_when_knowledge_is_unconfigured(
+    client: TestClient, container: _FakeContainer
+) -> None:
+    """Same degradation as every other route here: 503, never a crash.
+
+    knowledge_ingestion is None whenever QDRANT_URL/OPENAI_API_KEY are unset
+    (bootstrap.py), which is the default in a dev or CI process.
+    """
+    container.knowledge_ingestion = None
+    resp = client.get("/api/v1/knowledge/index-health")
+    assert resp.status_code == 503
+    assert "not configured" in resp.json()["detail"]

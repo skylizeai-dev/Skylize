@@ -75,6 +75,35 @@ class InterviewResponse(BaseModel):
     ingested: int
 
 
+class SourcePathHealth(BaseModel):
+    """One ingested ``source_path`` and the counts really stored under it.
+
+    NOT A DATA SOURCE. `source_path` is the origin string the ingesting caller
+    supplied (an upload's filename, the literal "onboarding-interview", a
+    webhook path). No connector is registered against it, nothing syncs it, and
+    the platform does not know the origin's size — so there is no connector
+    type, no sync status and no coverage figure to report, only what was
+    ingested. `last_ingested_at` is when Skylize last WROTE, not when the origin
+    last changed.
+    """
+
+    source_path: str
+    chunks: int
+    documents: int
+    departments: list[str]
+    last_ingested_at: str | None = None
+
+
+class IndexHealthResponse(BaseModel):
+    total_chunks: int
+    total_documents: int
+    source_paths: list[SourcePathHealth]
+    last_ingested_at: str | None = None
+    #: True when the census hit the adapter's point cap: every count is then a
+    #: LOWER BOUND, and a caller must not present it as a complete total.
+    truncated: bool
+
+
 class SearchHit(BaseModel):
     score: float
     source_path: str | None = None
@@ -227,6 +256,42 @@ async def interview_knowledge(
             department=department,
         )
     return InterviewResponse(ingested=len(body.answers))
+
+
+@router.get("/index-health", response_model=IndexHealthResponse)
+async def knowledge_index_health(
+    ctx: RequestContext = Depends(enforce_rate_limit),
+    container: Container = Depends(get_container),
+) -> IndexHealthResponse:
+    """What this org has actually ingested — counts derived from stored payloads.
+
+    Same auth posture as GET /search in this module: `enforce_rate_limit`
+    resolves the caller and the org scope comes from `ctx.org_id`, never from a
+    parameter, so one tenant cannot ask about another's index.
+
+    EVERY FIELD IS A COUNT OR A MAX over real points. There is intentionally no
+    connector type, sync status, coverage percentage or recall latency here:
+    the platform stores none of those, and a read endpoint is the wrong place
+    to invent them.
+    """
+    svc = _svc(container)
+    health = await svc.index_health(org_id=ctx.org_id)
+    return IndexHealthResponse(
+        total_chunks=health.total_chunks,
+        total_documents=health.total_documents,
+        source_paths=[
+            SourcePathHealth(
+                source_path=s.source_path,
+                chunks=s.chunks,
+                documents=s.documents,
+                departments=s.departments,
+                last_ingested_at=s.last_ingested_at,
+            )
+            for s in health.source_paths
+        ],
+        last_ingested_at=health.last_ingested_at,
+        truncated=health.truncated,
+    )
 
 
 @router.get("/search", response_model=SearchResponse)

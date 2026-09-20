@@ -66,6 +66,31 @@ class FakeVectorStore:
         ]
         return hits[:top_k]
 
+    async def scroll_payloads(
+        self,
+        fields: list[str],
+        *,
+        org_id: str,
+        page_size: int = 256,
+        max_points: int = 10_000,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Mirrors the adapter: org-scoped, field-projected, capped walk.
+
+        The projection is applied here too, so a test cannot accidentally prove
+        an aggregate over a payload key the real adapter never transfers.
+        """
+        effective = scoped_filters(org_id, None)
+        matching = [
+            payload
+            for payload in self.points.values()
+            if all(payload.get(k) == v for k, v in effective.items())
+        ]
+        truncated = len(matching) > max_points
+        return (
+            [{k: p[k] for k in fields if k in p} for p in matching[:max_points]],
+            truncated,
+        )
+
     # ── internals ───────────────────────────────────────────────────────────
     def _scoped_payload(self, point_id: str, org_id: str) -> dict[str, Any] | None:
         require_org(org_id)

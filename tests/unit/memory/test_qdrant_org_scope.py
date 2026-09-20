@@ -67,6 +67,9 @@ class FakeClient:
         self.search_filters: list[Any] = []
         self.delete_filters: list[Any] = []
         self.upserted_payloads: list[dict[str, Any]] = []
+        self.scroll_filters: list[Any] = []
+        self.scroll_with_vectors: list[Any] = []
+        self.scroll_with_payload: list[Any] = []
 
     async def get_collections(self) -> _Collections:
         return _Collections()
@@ -88,6 +91,50 @@ class FakeClient:
     async def delete(self, *, collection_name: str, points_selector: Any) -> _Result:
         self.delete_filters.append(points_selector.filter)
         return _Result()
+
+    async def scroll(
+        self,
+        *,
+        collection_name: str,
+        scroll_filter: Any,
+        limit: int,
+        with_payload: Any,
+        with_vectors: Any,
+        offset: Any,
+    ) -> tuple[list[_Record], Any]:
+        """Real cursor paging over an ordered view, so the adapter's loop runs.
+
+        A one-shot fake would let a broken pagination loop (dropped pages, an
+        infinite cursor, an ignored cap) pass untested.
+        """
+        self.scroll_filters.append(scroll_filter)
+        self.scroll_with_vectors.append(with_vectors)
+        self.scroll_with_payload.append(with_payload)
+        conditions = {c.key: c.match.value for c in (scroll_filter.must or [])}
+        ordered = sorted(self.points.items())
+        matching = [
+            (pid, payload)
+            for pid, payload in ordered
+            if all(payload.get(k) == v for k, v in conditions.items())
+        ]
+        start = 0
+        if offset is not None:
+            start = next(
+                (i for i, (pid, _) in enumerate(matching) if pid == offset), len(matching)
+            )
+        page = matching[start : start + limit]
+        # Project the payload exactly as Qdrant does when with_payload is a
+        # field list; a fake that returned everything would hide a projection bug.
+        records = [
+            _Record(
+                {k: v for k, v in payload.items() if k in with_payload}
+                if isinstance(with_payload, (list, tuple))
+                else dict(payload)
+            )
+            for _, payload in page
+        ]
+        nxt = matching[start + limit][0] if start + limit < len(matching) else None
+        return records, nxt
 
     async def search(
         self,
@@ -315,3 +362,100 @@ async def test_verify_document_is_false_for_a_foreign_tenant(
     await adapter.upsert_vector("shared-doc", VECTOR, {"content_hash": "h1"}, org_id=ORG_A)
     assert await adapter.verify_document("shared-doc", "h1", org_id=ORG_A) is True
     assert await adapter.verify_document("shared-doc", "h1", org_id=ORG_B) is False
+
+
+# ---------------------------------------------------------------------------
+# 4. scroll_payloads — the one non-semantic read, under the same org condition
+# ---------------------------------------------------------------------------
+
+
+async def test_scroll_payloads_is_org_filtered_on_the_wire(
+    adapter: QdrantAdapter, client: FakeClient
+) -> None:
+    await adapter.scroll_payloads(["source_path"], org_id=ORG_A)
+    assert _conditions(client.scroll_filters[0]) == {"org_id": ORG_A}
+
+
+async def test_scroll_payloads_cannot_return_another_tenants_points(
+    adapter: QdrantAdapter,
+) -> None:
+    """The whole point of an enumerating read: it must enumerate ONE tenant."""
+    await adapter.upsert_points([_point(ORG_A, "p-a", source_path="a.md")])
+    await adapter.upsert_points([_point(ORG_B, "p-b", source_path="b.md")])
+
+    payloads, truncated = await adapter.scroll_payloads(["source_path"], org_id=ORG_B)
+    assert [p["source_path"] for p in payloads] == ["b.md"]
+    assert truncated is False
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+async def test_scroll_payloads_blank_scope_fails_closed(
+    adapter: QdrantAdapter, blank: str
+) -> None:
+    with pytest.raises(OrgScopeRequired):
+        await adapter.scroll_payloads(["source_path"], org_id=blank)
+
+
+async def test_scroll_payloads_never_transfers_vectors(
+    adapter: QdrantAdapter, client: FakeClient
+) -> None:
+    """An inventory has no use for 1536-float vectors or document bodies."""
+    await adapter.upsert_points(
+        [_point(ORG_A, "p-a", source_path="a.md", content_text="the whole document")]
+    )
+    payloads, _ = await adapter.scroll_payloads(["source_path"], org_id=ORG_A)
+
+    assert client.scroll_with_vectors == [False]
+    assert client.scroll_with_payload == [["source_path"]]
+    assert payloads == [{"source_path": "a.md"}]
+    assert "content_text" not in payloads[0]
+
+
+async def test_scroll_payloads_pages_through_every_point(
+    adapter: QdrantAdapter, client: FakeClient
+) -> None:
+    """Multi-page walk: a dropped or repeated page shows up as a wrong count."""
+    await adapter.upsert_points(
+        [_point(ORG_A, f"p-{i:03d}", source_path=f"doc-{i}.md") for i in range(25)]
+    )
+
+    payloads, truncated = await adapter.scroll_payloads(
+        ["source_path"], org_id=ORG_A, page_size=10
+    )
+
+    assert truncated is False
+    assert len(payloads) == 25
+    assert len({p["source_path"] for p in payloads}) == 25
+    assert len(client.scroll_filters) == 3  # 10 + 10 + 5, then the cursor closed
+
+
+async def test_scroll_payloads_reports_truncation_at_the_cap(
+    adapter: QdrantAdapter,
+) -> None:
+    """Hitting the cap must be REPORTED, not silently returned as a total."""
+    await adapter.upsert_points(
+        [_point(ORG_A, f"p-{i:03d}", source_path=f"doc-{i}.md") for i in range(25)]
+    )
+
+    payloads, truncated = await adapter.scroll_payloads(
+        ["source_path"], org_id=ORG_A, page_size=10, max_points=15
+    )
+
+    assert len(payloads) == 15
+    assert truncated is True, "a partial census reported as complete is a false total"
+
+
+async def test_scroll_payloads_at_an_exact_cap_is_not_falsely_truncated(
+    adapter: QdrantAdapter,
+) -> None:
+    """Exactly `max_points` stored points is a COMPLETE census, not a partial one."""
+    await adapter.upsert_points(
+        [_point(ORG_A, f"p-{i:03d}", source_path=f"doc-{i}.md") for i in range(10)]
+    )
+
+    payloads, truncated = await adapter.scroll_payloads(
+        ["source_path"], org_id=ORG_A, page_size=4, max_points=10
+    )
+
+    assert len(payloads) == 10
+    assert truncated is False
