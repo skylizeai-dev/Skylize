@@ -85,6 +85,47 @@ def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
+class SourcePathStats(BaseModel):
+    """What the index really knows about one ``source_path``.
+
+    ``source_path`` IS NOT A CONFIGURED DATA SOURCE. It is the origin string the
+    ingesting caller supplied — an uploaded file's ``filename`` (knowledge.py
+    ``upload_knowledge``), the literal ``"onboarding-interview"`` (
+    ``interview_knowledge``), or a webhook-supplied path. Nothing in this
+    platform registers, connects to, polls, or syncs anything named here: there
+    is no connector, no cadence, no last-sync, and no notion of the origin's
+    total size, so no coverage or freshness-against-source figure is derivable.
+    ``last_ingested_at`` is when WE last wrote, not when the origin last changed.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_path: str
+    chunks: int
+    documents: int
+    departments: list[str]
+    last_ingested_at: str | None
+
+
+class IndexHealth(BaseModel):
+    """Org-scoped census of the knowledge index. Counts only; no status."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    total_chunks: int
+    total_documents: int
+    source_paths: list[SourcePathStats]
+    last_ingested_at: str | None
+    #: True when the walk hit the adapter's point cap, so every count above is a
+    #: LOWER BOUND over a prefix of the tenant's points, not a complete census.
+    truncated: bool
+
+
+# The only payload keys index health reads. content_text and the vectors are
+# deliberately excluded: an inventory has no business shipping document bodies.
+_HEALTH_FIELDS = ["parent_doc_id", "source_path", "department", "ingested_at"]
+
+
 class KnowledgeIngestionService:
     def __init__(
         self,
@@ -234,3 +275,76 @@ class KnowledgeIngestionService:
         if department is not None:
             filters["department"] = department
         return await self._qdrant.search(vector, top_k, filters, org_id=org_id)
+
+    async def index_health(self, *, org_id: str) -> IndexHealth:
+        """Org-scoped census of what has actually been ingested.
+
+        Derived ENTIRELY from stored payload fields — every number here is a
+        count or a max over points this tenant really holds. Nothing is
+        estimated, projected, or scored.
+
+        What this deliberately does NOT report, because no backend fact
+        supports it: a connector type for a source_path, a sync status, a
+        coverage percentage, a recall latency, or a "next sync" time. See
+        ``SourcePathStats`` on why a source_path is not a data source.
+
+        Documents are counted by DISTINCT ``parent_doc_id``, which is the unit
+        a caller ingested (``ingest_document`` writes N chunks under one
+        parent_doc_id; ``ingest`` writes a single point whose parent_doc_id is
+        its own doc_id). Chunks are the raw point count.
+        """
+        payloads, truncated = await self._qdrant.scroll_payloads(
+            _HEALTH_FIELDS, org_id=org_id
+        )
+
+        chunks: dict[str, int] = {}
+        docs: dict[str, set[str]] = {}
+        depts: dict[str, set[str]] = {}
+        latest: dict[str, str] = {}
+        all_docs: set[str] = set()
+        org_latest: str | None = None
+
+        for p in payloads:
+            raw_source = p.get("source_path")
+            # A pre-existing point written before a field existed reads as None.
+            # It is still a real chunk, so it is counted — under an explicit
+            # "(unknown)" bucket rather than being dropped from the totals.
+            source = raw_source if isinstance(raw_source, str) and raw_source else "(unknown)"
+            chunks[source] = chunks.get(source, 0) + 1
+
+            parent = p.get("parent_doc_id")
+            if isinstance(parent, str) and parent:
+                docs.setdefault(source, set()).add(parent)
+                all_docs.add(parent)
+
+            dept = p.get("department")
+            if isinstance(dept, str) and dept:
+                depts.setdefault(source, set()).add(dept)
+
+            at = p.get("ingested_at")
+            if isinstance(at, str) and at:
+                # ISO-8601 UTC from _now_iso(), so lexical max is chronological.
+                if at > latest.get(source, ""):
+                    latest[source] = at
+                if org_latest is None or at > org_latest:
+                    org_latest = at
+
+        stats = [
+            SourcePathStats(
+                source_path=source,
+                chunks=count,
+                documents=len(docs.get(source, ())),
+                departments=sorted(depts.get(source, ())),
+                last_ingested_at=latest.get(source),
+            )
+            for source, count in chunks.items()
+        ]
+        stats.sort(key=lambda s: (-s.chunks, s.source_path))
+
+        return IndexHealth(
+            total_chunks=len(payloads),
+            total_documents=len(all_docs),
+            source_paths=stats,
+            last_ingested_at=org_latest,
+            truncated=truncated,
+        )

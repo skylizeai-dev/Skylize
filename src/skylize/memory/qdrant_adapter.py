@@ -67,6 +67,11 @@ log = structlog.get_logger(__name__)
 _COLLECTION = "platform_knowledge"
 _DIMENSION = 1536
 _UPSERT_BATCH = 256  # points per Qdrant upsert request
+_SCROLL_PAGE = 256  # payloads per Qdrant scroll request
+# Hard ceiling on a single index-health walk. A request-path read must not be
+# able to pull an unbounded result set; past this the answer is reported as
+# partial rather than silently truncated into a wrong total.
+_SCROLL_MAX_POINTS = 10_000
 
 
 def _scoped_filter(org_id: str, extra: dict[str, Any] | None) -> Filter:
@@ -238,6 +243,56 @@ class QdrantAdapter:
             with_payload=True,
         )
         return [{"score": h.score, **(h.payload or {})} for h in hits]
+
+    async def scroll_payloads(
+        self,
+        fields: list[str],
+        *,
+        org_id: str,
+        page_size: int = _SCROLL_PAGE,
+        max_points: int = _SCROLL_MAX_POINTS,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Enumerate this tenant's payloads, projected to ``fields``, no vectors.
+
+        The one NON-SEMANTIC read on the collection. ``search`` cannot answer
+        "what is in the index" — it needs a query vector and returns only the
+        ``top_k`` nearest, so any aggregate built on it would be a sample
+        dressed up as a census. This walks the tenant's points instead, via
+        Qdrant's cursor-paged ``scroll`` under the same adapter-built org
+        condition as every other read.
+
+        ``with_vectors=False`` and a payload projection keep the transfer to the
+        few keys an aggregate needs; the 1536-float vectors and the full
+        ``content_text`` never leave the store.
+
+        Returns ``(payloads, truncated)``. ``truncated`` is True when the walk
+        hit ``max_points`` and stopped with a cursor still open — the caller
+        then holds a PARTIAL census and must say so rather than report its
+        totals as complete. The cap is what keeps one enormous tenant from
+        pulling an unbounded result set into the request path.
+        """
+        require_org(org_id)
+        await self._ensure_collection()
+        condition = _scoped_filter(org_id, None)
+        payloads: list[dict[str, Any]] = []
+        offset: Any = None
+        while True:
+            remaining = max_points - len(payloads)
+            if remaining <= 0:
+                # Stopped at the cap with the cursor still live: truncated iff
+                # the store has at least one more point for this tenant.
+                return payloads, offset is not None
+            records, offset = await self._client.scroll(
+                collection_name=_COLLECTION,
+                scroll_filter=condition,
+                limit=min(page_size, remaining),
+                with_payload=fields,
+                with_vectors=False,
+                offset=offset,
+            )
+            payloads.extend(dict(r.payload or {}) for r in records)
+            if offset is None:
+                return payloads, False
 
     async def verify_document(self, doc_id: str, content_hash: str, *, org_id: str) -> bool:
         """True if doc_id exists UNDER ``org_id`` with matching content_hash.
