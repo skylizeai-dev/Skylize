@@ -107,6 +107,50 @@ export interface SetAutonomyModeInput {
 }
 
 /**
+ * Retention bounds mirroring the CHECK constraint in migration 0035
+ * (`org_policy_settings.retention_days`) and
+ * `dal/org_policy_settings.py` (`RETENTION_MIN_DAYS` / `RETENTION_MAX_DAYS`).
+ * MIN is the documented compliance floor for audit/governance retention
+ * (docs/02_architecture/event_driven_architecture.md section 11: 7 years).
+ * MAX is an engineering default, not sourced from any document, pending real
+ * compliance input.
+ */
+export const RETENTION_DAYS_MIN = 2555;
+export const RETENTION_DAYS_MAX = 3650;
+
+/**
+ * One guardrail value plus whether it is backed by a real enforcement point
+ * today (edge/routes/org_policy_settings.py `GuardrailField`). `enforced:
+ * false` means this is currently a stored preference only -- toggling it
+ * changes no system behavior yet. As of migration 0035 all four guardrails
+ * are `enforced: false`; the console should render that honestly rather than
+ * imply any of them are wired.
+ */
+export interface BackendGuardrailField {
+  value: boolean;
+  enforced: boolean;
+}
+
+/** GET|PUT /api/v1/org-policy-settings response (OrgPolicySettingsResponse). */
+export interface BackendOrgPolicySettingsResponse {
+  spend_cap_alert_enabled: BackendGuardrailField;
+  email_domain_restriction_enabled: BackendGuardrailField;
+  pii_redaction_enabled: BackendGuardrailField;
+  silent_fallback_suppressed: BackendGuardrailField;
+  retention_days: number;
+  configured: boolean;
+}
+
+/** PUT /api/v1/org-policy-settings request body (SetOrgPolicySettingsRequest). */
+export interface SetOrgPolicySettingsInput {
+  spend_cap_alert_enabled: boolean;
+  email_domain_restriction_enabled: boolean;
+  pii_redaction_enabled: boolean;
+  silent_fallback_suppressed: boolean;
+  retention_days: number;
+}
+
+/**
  * The three LOGICAL model names the LLM gateway accepts. A CLOSED set: they are
  * exactly the keys of `AnthropicAdapter._model_map`
  * (src/skylize/adapters/llm/anthropic_adapter.py:267-271), and a fourth name
@@ -218,6 +262,16 @@ export interface ConsoleAutonomyResponse {
   mode: AutonomyMode;
   configured: boolean;
 }
+
+/**
+ * GET|PUT /api/console/org-policy-settings. Passed through unchanged from the
+ * backend -- every field, including each guardrail's `enforced` flag, is
+ * already exactly what the Org Settings screen needs to render honestly.
+ * There is deliberately no `region` field: verified against real infra
+ * (see migrations/versions/0035_org_policy_settings.py) that region is a
+ * per-environment Terraform variable, not a per-org concept.
+ */
+export type ConsoleOrgPolicySettingsResponse = BackendOrgPolicySettingsResponse;
 
 /**
  * GET /api/console/models. Passed through unchanged from the backend: every
