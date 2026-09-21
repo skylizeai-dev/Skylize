@@ -721,3 +721,44 @@ export type ConsoleOrgUserList = BackendOrgUser[];
 export type ConsoleBillingUsage = BackendBillingUsage;
 export type ConsoleWorkflowRunList = BackendWorkflowRunListResponse;
 export type ConsoleWorkflowDefinitionList = BackendWorkflowDefinitionListResponse;
+
+/**
+ * GET /api/v1/permissions/matrix — PermissionMatrixResponse
+ * (src/skylize/edge/routes/permissions.py, src/skylize/edge/permission_matrix.py).
+ *
+ * MECHANICALLY DERIVED, NOT HAND-TRANSCRIBED. Every field here is a direct
+ * rendering of an `ast` scan over `src/skylize/edge/routes/*.py`: `route_group`
+ * is the route file's own module name (never a business-action label), and
+ * `access[role].read`/`.write` is true only when a REAL
+ * `Depends(require_role(...))` / `Depends(require_any_role(...))` /
+ * `Depends(require_any_role_or_user(...))` call site in that file names that
+ * role on a GET/HEAD (`read`) or POST/PUT/PATCH/DELETE (`write`) route. A route
+ * group with zero role-gated routes (e.g. "auth", "knowledge") still appears,
+ * with every role false — its presence says the scanner looked, not that a
+ * gate exists.
+ *
+ * `generated_at` is the timestamp of THIS scan; the backend re-parses the
+ * route tree on every request rather than caching, so there is no staler
+ * cached copy to distrust.
+ */
+export interface BackendRoleAccess {
+  read: boolean;
+  write: boolean;
+}
+
+export interface BackendRouteGroup {
+  route_group: string;
+  route_count: number;
+  /** Keyed by role name; always exactly the 5 platform roles. */
+  access: Record<string, BackendRoleAccess>;
+}
+
+export interface BackendPermissionMatrixResponse {
+  /** UTC ISO-8601 timestamp of this scan. */
+  generated_at: string;
+  /** The 5 platform roles, in column order. */
+  roles: string[];
+  route_groups: BackendRouteGroup[];
+}
+
+export type ConsolePermissionMatrix = BackendPermissionMatrixResponse;

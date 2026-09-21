@@ -37,6 +37,7 @@ from .routes import (
     knowledge,
     models,
     notifications,
+    permissions,
     security,
     spend,
     tenants,
@@ -111,6 +112,9 @@ def create_app() -> FastAPI:
     app.include_router(brief.router)
     app.include_router(cowork.router)
     app.include_router(notifications.router)
+    # Read-only description of the RBAC gates on every route above — see
+    # permissions.py for why its own gate is not cosmetic.
+    app.include_router(permissions.router)
     return app
 
 
