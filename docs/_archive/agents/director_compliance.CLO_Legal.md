@@ -1,3 +1,12 @@
+> **ARCHIVED 2026-09-21.** Duplicate `agent_id`. This CLO/Legal copy and the
+> surviving `CSO_Security/managers/director_compliance.md` differed only in
+> header, escalation path and schema namespace — all derived from directory
+> position. Its BODY is security content (SOC2 controls,
+> `SECURITY_SEVERITY_HIGH`), so the CSO_Security location was kept. Moved out of
+> `docs/03_agents/` because `gen_manifest.js` walks every directory under that
+> root and would re-emit the duplicate row. Kept in case a genuinely separate
+> legal-compliance agent is wanted later.
+
 # Agent: `director_compliance`
 
 **Authority level:** `director` · **Department:** `legal` · **Escalation path:** `chief_legal_officer > human_owner`

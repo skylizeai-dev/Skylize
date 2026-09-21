@@ -1,3 +1,12 @@
+> **ARCHIVED 2026-09-21.** Duplicate `agent_id`. This COO/Operations copy and the
+> surviving `COO/Procurement/director_vendor_management.md` differed only in
+> header, escalation path and schema namespace — all derived from directory
+> position; mission, responsibilities, KPIs and governance were byte-identical.
+> Procurement was kept as the more specific escalation chain for a
+> vendor-management role. Moved out of `docs/03_agents/` because
+> `gen_manifest.js` walks every directory under that root and would re-emit the
+> duplicate row.
+
 # Agent: `director_vendor_management`
 
 **Authority level:** `director` · **Department:** `operations` · **Escalation path:** `vp_operations > coo > human_owner`
