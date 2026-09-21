@@ -20,22 +20,26 @@ export default function Settings({ vm }) {
                   focusStyle={sx('border-color:var(--accent,#3D6BFF)')}
                 />
               </div>
+              {/* NO REGION FIELD. Verified against real infra that region is a
+                  per-environment Terraform variable (us-east-1), not a
+                  per-org concept -- there is nothing here to pick. */}
               <div>
-                <div style={sx('font-size:11px;color:#8B93A7;margin-bottom:5px')}>Primary region · data residency</div>
-                <select value={vm.region} onChange={vm.onRegion} style={sx("width:100%;height:32px;padding:0 8px;border:1px solid #232939;border-radius:6px;background:rgba(255,255,255,0.02);font-family:'Geist Mono',ui-monospace,monospace;font-size:11px;color:#C7CBD6;cursor:pointer")}>
-                  <option value="eu-central">EU-CENTRAL · FRANKFURT</option>
-                  <option value="us-east">US-EAST · VIRGINIA</option>
-                  <option value="ap-south">AP-SOUTH · SINGAPORE</option>
-                </select>
+                <div style={sx('font-size:11px;color:#8B93A7;margin-bottom:5px')}>
+                  Data retention (days) &middot; floor is the {vm.retentionMin}-day compliance minimum
+                </div>
+                <input
+                  type="number"
+                  min={vm.retentionMin}
+                  max={vm.retentionMax}
+                  value={vm.retention}
+                  onChange={vm.onRetention}
+                  disabled={vm.policyLoading || vm.policySaving}
+                  style={sx("width:100%;height:32px;padding:0 11px;border:1px solid #232939;border-radius:6px;background:rgba(255,255,255,0.02);font-family:'Geist Mono',ui-monospace,monospace;font-size:11px;color:#C7CBD6")}
+                />
               </div>
-              <div>
-                <div style={sx('font-size:11px;color:#8B93A7;margin-bottom:5px')}>Log retention</div>
-                <select value={vm.retention} onChange={vm.onRetention} style={sx("width:100%;height:32px;padding:0 8px;border:1px solid #232939;border-radius:6px;background:rgba(255,255,255,0.02);font-family:'Geist Mono',ui-monospace,monospace;font-size:11px;color:#C7CBD6;cursor:pointer")}>
-                  <option value="90">90 DAYS</option>
-                  <option value="365">365 DAYS</option>
-                  <option value="forever">INDEFINITE · WORM</option>
-                </select>
-              </div>
+              {vm.policyError && (
+                <div style={sx("font-family:'Geist Mono',ui-monospace,monospace;font-size:10px;color:#E15A52;line-height:1.55")}>{vm.policyError}</div>
+              )}
             </div>
           </div>
           <div style={sx('background:#0C0F16;border:1px solid rgba(225,90,82,0.3);border-radius:10px;padding:15px 16px')}>
@@ -114,8 +118,11 @@ export default function Settings({ vm }) {
                 <div style={sx('flex:1;min-width:0')}>
                   <div style={sx('font-size:12.5px;font-weight:500;color:#E9EBF2')}>{gr.name}</div>
                   <div style={sx('font-size:11px;color:#77809A;margin-top:2px')}>{gr.desc}</div>
+                  {/* Real enforcement status. Never implies a toggle changes
+                      system behavior it does not yet change. */}
+                  <div style={sx(`font-family:'Geist Mono',ui-monospace,monospace;font-size:8.5px;letter-spacing:0.06em;margin-top:3px;color:${gr.enforced ? '#34C579' : '#D19A3F'}`)}>{gr.enforcedLabel}</div>
                 </div>
-                <button onClick={gr.toggle} aria-label="Toggle" style={sx(`position:relative;width:34px;height:19px;border-radius:10px;border:1px solid ${gr.trackBd};background: ${gr.trackBg};cursor:pointer;flex-shrink:0;transition:background-color .18s;padding:0`)}>
+                <button onClick={gr.toggle} disabled={gr.disabled} aria-label="Toggle" style={sx(`position:relative;width:34px;height:19px;border-radius:10px;border:1px solid ${gr.trackBd};background: ${gr.trackBg};cursor:pointer;flex-shrink:0;transition:background-color .18s;padding:0`)}>
                   <span style={sx(`position:absolute;top:2px;width:13px;height:13px;border-radius:50%;background:#E9EBF2;transition:left .18s cubic-bezier(0.2,0.8,0.2,1);left: ${gr.knobX}`)}></span>
                 </button>
               </div>
