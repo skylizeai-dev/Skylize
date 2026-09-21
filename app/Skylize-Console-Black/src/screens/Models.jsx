@@ -8,6 +8,13 @@ export default function Models({ vm }) {
         <h1 style={sx('margin:0;font-size:15px;font-weight:600;letter-spacing:-0.01em')}>Model Registry</h1>
         <span style={sx("font-family:'Geist Mono',ui-monospace,monospace;font-size:10px;letter-spacing:0.1em;color:#77809A")}>ROUTING POLICY · ACTIVE</span>
       </div>
+      {vm.modLoading ? (
+        <div style={sx('font-size:12px;color:#77809A;margin-bottom:12px')}>Reading the model catalogue&hellip;</div>
+      ) : vm.modError ? (
+        <div role="alert" style={sx("background:#0C0F16;border:1px solid rgba(225,90,82,0.35);border-radius:10px;padding:12px 14px;font-size:11.5px;color:#E9A9A4;margin-bottom:12px")}>{vm.modError}</div>
+      ) : vm.modEmpty ? (
+        <div style={sx('font-size:12px;color:#77809A;margin-bottom:12px')}>No models configured.</div>
+      ) : (
       <div style={sx('display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:12px;margin-bottom:12px;perspective:1200px')}>
         {vm.modelCards.map((mc, i) => (
           <Interactive
@@ -34,6 +41,7 @@ export default function Models({ vm }) {
           </Interactive>
         ))}
       </div>
+      )}
       <div style={sx('background:#0C0F16;border:1px solid #1B2130;border-radius:10px;overflow:hidden')}>
         <div style={sx("padding:10px 16px;border-bottom:1px solid #161A26;font-family:'Geist Mono',ui-monospace,monospace;font-size:9.5px;letter-spacing:0.13em;color:#77809A")}>ROUTING POLICY</div>
         <div style={sx("display:grid;grid-template-columns:minmax(150px,1.6fr) 130px 130px minmax(160px,2fr);gap:0 12px;padding:8px 16px;border-bottom:1px solid #1B2130;font-family:'Geist Mono',ui-monospace,monospace;font-size:9px;letter-spacing:0.12em;color:#77809A;background:rgba(255,255,255,0.015)")}>

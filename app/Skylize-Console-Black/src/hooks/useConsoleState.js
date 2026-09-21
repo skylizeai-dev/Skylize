@@ -8,14 +8,25 @@ import {
 } from '../lib/autonomyClient.js';
 import {
   AUTH_HEADER_DOC,
+  RETENTION_DAYS_MAX,
+  RETENTION_DAYS_MIN,
   approveHitl,
   engageKillSwitch,
   fetchAgents,
   fetchApiKeys,
   fetchApprovals,
   fetchAudit,
+  fetchBillingUsage,
+  fetchKnowledgeIndexHealth,
+  fetchModels,
+  fetchNotifications,
+  fetchOrgPolicySettings,
   fetchOrgUsers,
+  fetchPermissionMatrix,
+  fetchSecurityActivity,
+  fetchWorkflowRuns,
   issueApiKey,
+  putOrgPolicySettings,
   rejectHitl,
   revokeApiKey,
   sendCoworkTurn,
@@ -36,13 +47,6 @@ const CONNECTORS = [
   { name: 'Google Drive', mono: 'GD', color: '#D19A3F' },
 ];
 
-const WFS = [
-  { name: 'Campaign Launch', meta: 'MARKETING · 6 STAGES', desc: 'Brief to live campaign with brand and budget gates before spend.', active: 2, stages: [['Brief intake', 'Director, Growth'], ['Creative sprint', 'Creative Director'], ['Brand gate', 'Brand Guardian'], ['Budget gate', 'VP Finance'], ['Human approval', 'Operator'], ['Launch & monitor', 'Dir, Performance Mktg']] },
-  { name: 'Vendor Onboarding', meta: 'PROCUREMENT · 5 STAGES', desc: 'Discovery through contract with risk scoring at every step.', active: 3, stages: [['Discovery', 'Vendor Discovery'], ['Evaluation', 'Vendor Evaluation'], ['Risk score', 'Vendor Risk'], ['Contract review', 'Director, Contracts'], ['Human approval', 'Operator']] },
-  { name: 'Monthly Close', meta: 'FINANCE · 5 STAGES', desc: 'Ledger reconciliation to CFO summary, fully signed.', active: 1, stages: [['Reconcile', 'Director, Treasury'], ['Variance scan', 'Director, Risk'], ['Forecast update', 'Director, FP&A'], ['CFO review', 'CFO'], ['Owner sign-off', 'Operator']] },
-  { name: 'Incident Response', meta: 'ENGINEERING · 4 STAGES', desc: 'Detect, contain, and post-mortem with security co-sign.', active: 0, stages: [['Detect & triage', 'Director, DevOps'], ['Contain', 'Dir, Agent Infrastructure'], ['Root cause', 'Director, Backend'], ['Post-mortem', 'CTO']] },
-  { name: 'Content Pipeline', meta: 'CREATIVE · 5 STAGES', desc: 'Hooks to published assets with QC and style gates.', active: 4, stages: [['Hooks', 'Hook Generator'], ['Draft', 'Script Writer'], ['Style gate', 'Style Guardian'], ['Visual QC', 'Visual QC'], ['Publish', 'Creative Ops Manager']] },
-];
 
 // The backend `proposal_summary` is an open dict, not a typed shape, so it is
 // rendered as its own key/value pairs rather than mapped onto invented fields.
@@ -170,7 +174,6 @@ function initialState() {
     netSel: persisted.netSel || null,
     starDeptIdx: (function (list) { const i = list.findIndex((d) => d.id === persisted.netSel); return i < 0 ? 0 : i; })(DEPARTMENTS),
     starQ: '',
-    wfSel: 0,
     // ── approvals: the real HITL queue ──────────────────────────────────
     // The six sample rows that used to live here carried risk/amount/chain,
     // none of which exists behind /api/v1/hitl. They are gone rather than
@@ -188,8 +191,25 @@ function initialState() {
     auditLoading: true,
     auditError: null,
     pulse: seedPulse,
-    orgName: persisted.orgName || 'Aventra Retail Group', region: persisted.region || 'eu-central',
-    retention: persisted.retention || '365',
+    orgName: persisted.orgName || 'Aventra Retail Group',
+    // NO REGION FIELD. Verified against real infra that region is a
+    // per-environment Terraform variable (us-east-1), not a per-org concept
+    // -- see migrations/versions/0035_org_policy_settings.py's citation
+    // trail. There is nothing here to persist or render.
+    //
+    // retention/guardrails are ORG-WIDE, server-owned state, same reasoning
+    // as autonomy below: fail closed to the DAL's own safest defaults until
+    // the server answers, never read from persisted localStorage.
+    retentionDays: null,
+    spendCapAlert: { value: true, enforced: false },
+    emailDomainRestriction: { value: true, enforced: false },
+    piiRedaction: { value: true, enforced: false },
+    silentFallbackSuppressed: { value: true, enforced: false },
+    policyConfigured: false,
+    policyLoading: true,
+    policySaving: false,
+    policyError: null,
+    policyErrorKind: null,
     // Fail closed until the server answers (ruling 7). A persisted value is
     // deliberately NOT read here -- see the note above STORAGE_KEY.
     autonomy: DEFAULT_AUTONOMY_MODE,
@@ -202,8 +222,43 @@ function initialState() {
     // just not the one that was asked for. Saying "fail-closed default" for a
     // write failure would misreport the org's actual setting.
     autonomyErrorKind: null,
-    guards: persisted.guards || { cap: true, email: true, pii: true, fallback: false },
     pausedAll: false, pauseArm: false, toast: null,
+
+    // ── security posture: real audit_log-derived counts ────────────────
+    secActivity: null,
+    secLoading: true,
+    secError: null,
+
+    // ── knowledge: real per-source_path ingestion census ────────────────
+    knowledge: null,
+    knowledgeLoading: true,
+    knowledgeError: null,
+
+    // ── models: real logical->concrete catalogue + routing rules ────────
+    models: null,
+    modelsLoading: true,
+    modelsError: null,
+
+    // ── workflows: real run history (workflow_runs, migration 0033) ─────
+    workflowRuns: [],
+    workflowRunsLoading: true,
+    workflowRunsError: null,
+
+    // ── notifications: real feed, empty until a real event fires ────────
+    notifications: [],
+    notifUnreadCount: 0,
+    notifLoading: true,
+    notifError: null,
+
+    // ── billing: real ai_cost_ledger usage ───────────────────────────────
+    billing: null,
+    billingLoading: true,
+    billingError: null,
+
+    // ── permission matrix: mechanically derived from route source ───────
+    permMatrix: null,
+    permMatrixLoading: true,
+    permMatrixError: null,
 
     // ── live agent registry ─────────────────────────────────────────────
     // GET /api/v1/agents. The generated 151-agent fixture is still imported
@@ -254,9 +309,12 @@ export function useConsoleState(props) {
   const persist = useCallback(() => {
     const s = stateRef.current;
     try {
+      // region/retention/guards are ORG-WIDE, server-owned (org_policy_settings,
+      // migration 0035) and are never persisted here -- same reasoning as
+      // autonomy above. orgName remains a per-operator UI label with no
+      // backend counterpart.
       localStorage.setItem(STORAGE_KEY, JSON.stringify({
         screen: s.screen, sidebarOpen: s.sidebarOpen, netSel: s.netSel, orgName: s.orgName,
-        region: s.region, retention: s.retention, guards: s.guards,
       }));
     } catch (e) {}
   }, []);
@@ -633,6 +691,81 @@ export function useConsoleState(props) {
     );
   }, [setState]);
 
+  // ── org policy settings: guardrails + retention, read on mount ─────────
+  //
+  // FAIL CLOSED on a read failure, same reasoning as autonomy: the initial
+  // state already holds the DAL's own safest defaults, so a failure leaves
+  // the console showing them with `policyError` set, never silently claiming
+  // they are the org's actual stored choice.
+  const policyAliveRef = useRef(true);
+  useEffect(() => {
+    policyAliveRef.current = true;
+    fetchOrgPolicySettings().then(
+      (result) => {
+        if (!policyAliveRef.current) return;
+        setState({
+          retentionDays: result.retentionDays,
+          spendCapAlert: result.spendCapAlert,
+          emailDomainRestriction: result.emailDomainRestriction,
+          piiRedaction: result.piiRedaction,
+          silentFallbackSuppressed: result.silentFallbackSuppressed,
+          policyConfigured: result.configured,
+          policyLoading: false,
+          policyError: null,
+          policyErrorKind: null,
+        });
+      },
+      (error) => {
+        if (!policyAliveRef.current) return;
+        setState({
+          policyLoading: false,
+          policyError: error.message || 'Could not read the org policy settings.',
+          policyErrorKind: 'read',
+        });
+      },
+    );
+    return () => { policyAliveRef.current = false; };
+  }, [setState]);
+
+  // Write guardrails + retention. NOT optimistic, same reasoning as
+  // setAutonomy: every field is only ever assigned from what the backend
+  // actually persisted.
+  const setOrgPolicySettings = useCallback((patch) => {
+    const s = stateRef.current;
+    if (s.policySaving) return;
+    setState({ policySaving: true, policyError: null, policyErrorKind: null });
+    putOrgPolicySettings({
+      spendCapAlertEnabled: 'spendCapAlertEnabled' in patch ? patch.spendCapAlertEnabled : s.spendCapAlert.value,
+      emailDomainRestrictionEnabled: 'emailDomainRestrictionEnabled' in patch ? patch.emailDomainRestrictionEnabled : s.emailDomainRestriction.value,
+      piiRedactionEnabled: 'piiRedactionEnabled' in patch ? patch.piiRedactionEnabled : s.piiRedaction.value,
+      silentFallbackSuppressed: 'silentFallbackSuppressed' in patch ? patch.silentFallbackSuppressed : s.silentFallbackSuppressed.value,
+      retentionDays: 'retentionDays' in patch ? patch.retentionDays : s.retentionDays,
+    }).then(
+      (result) => {
+        if (!policyAliveRef.current) return;
+        setState({
+          retentionDays: result.retentionDays,
+          spendCapAlert: result.spendCapAlert,
+          emailDomainRestriction: result.emailDomainRestriction,
+          piiRedaction: result.piiRedaction,
+          silentFallbackSuppressed: result.silentFallbackSuppressed,
+          policyConfigured: result.configured,
+          policySaving: false,
+          policyError: null,
+          policyErrorKind: null,
+        });
+      },
+      (error) => {
+        if (!policyAliveRef.current) return;
+        setState({
+          policySaving: false,
+          policyError: error.message || 'Could not save the org policy settings.',
+          policyErrorKind: 'write',
+        });
+      },
+    );
+  }, [setState]);
+
   // ── approvals: load + verdict ────────────────────────────────────
   const aliveRef = useRef(true);
 
@@ -822,6 +955,117 @@ export function useConsoleState(props) {
     loadApprovals();
     loadAudit();
 
+    fetchKnowledgeIndexHealth().then(
+      (knowledge) => {
+        if (!aliveRef.current) return;
+        setState({ knowledge, knowledgeLoading: false, knowledgeError: null });
+      },
+      (error) => {
+        if (!aliveRef.current) return;
+        setState({
+          knowledge: null,
+          knowledgeLoading: false,
+          knowledgeError: error.message || 'Could not read the knowledge index.',
+        });
+      },
+    );
+
+    fetchBillingUsage(12).then(
+      (billing) => {
+        if (!aliveRef.current) return;
+        setState({ billing, billingLoading: false, billingError: null });
+      },
+      (error) => {
+        if (!aliveRef.current) return;
+        setState({
+          billing: null,
+          billingLoading: false,
+          billingError: error.message || 'Could not read the billing summary.',
+        });
+      },
+    );
+
+    fetchSecurityActivity(24, 20).then(
+      (secActivity) => {
+        if (!aliveRef.current) return;
+        setState({ secActivity, secLoading: false, secError: null });
+      },
+      (error) => {
+        if (!aliveRef.current) return;
+        setState({
+          secActivity: null,
+          secLoading: false,
+          secError: error.message || 'Could not read the security summary.',
+        });
+      },
+    );
+
+    fetchModels().then(
+      (models) => {
+        if (!aliveRef.current) return;
+        setState({ models, modelsLoading: false, modelsError: null });
+      },
+      (error) => {
+        if (!aliveRef.current) return;
+        setState({
+          models: null,
+          modelsLoading: false,
+          modelsError: error.message || 'Could not read the model catalogue.',
+        });
+      },
+    );
+
+    fetchWorkflowRuns(50).then(
+      (result) => {
+        if (!aliveRef.current) return;
+        setState({ workflowRuns: result.runs, workflowRunsLoading: false, workflowRunsError: null });
+      },
+      (error) => {
+        if (!aliveRef.current) return;
+        setState({
+          workflowRuns: [],
+          workflowRunsLoading: false,
+          workflowRunsError: error.message || 'Could not read the workflow run history.',
+        });
+      },
+    );
+
+    fetchNotifications(50).then(
+      (result) => {
+        if (!aliveRef.current) return;
+        setState({
+          notifications: result.notifications,
+          notifUnreadCount: result.unreadCount,
+          notifLoading: false,
+          notifError: null,
+        });
+      },
+      (error) => {
+        if (!aliveRef.current) return;
+        setState({
+          notifications: [],
+          notifUnreadCount: 0,
+          notifLoading: false,
+          notifError: error.message || 'Could not read notifications.',
+        });
+      },
+    );
+
+    fetchPermissionMatrix().then(
+      (permMatrix) => {
+        if (!aliveRef.current) return;
+        setState({ permMatrix, permMatrixLoading: false, permMatrixError: null });
+      },
+      (error) => {
+        if (!aliveRef.current) return;
+        setState({
+          permMatrix: null,
+          permMatrixLoading: false,
+          permMatrixError: error.message || 'Could not read the permission matrix.',
+        });
+      },
+    );
+
     return () => { aliveRef.current = false; };
   }, [setState, loadApprovals, loadAudit]);
 
@@ -879,7 +1123,7 @@ export function useConsoleState(props) {
 
   return buildViewModel({
     state, accent, chatElRef, fileInputElRef, starTiltElRef, starPlaneElRef,
-    setState, set, setAutonomy, nav, tiltMove, tiltLeave,
+    setState, set, setAutonomy, setOrgPolicySettings, nav, tiltMove, tiltLeave,
     onAttachClick, onFileChange, removeAttachment, toggleTagMenu, toggleConnMenu, onTagQ, addTag, removeTag, addConnector, removeConnector,
     doSend, starGeom, starStep, starGo, starTilt, starTiltReset, netGeom, decide, dangerPause, showToast, sparks, spend30,
     loadApprovals, loadAudit, mintKey, revokeKey, setPauseReason, dismissMintedKey,
@@ -889,7 +1133,7 @@ export function useConsoleState(props) {
 function buildViewModel(ctx) {
   const {
     state: s, accent: acc, chatElRef, fileInputElRef, starTiltElRef, starPlaneElRef,
-    setState, set, setAutonomy, nav, tiltMove, tiltLeave,
+    setState, set, setAutonomy, setOrgPolicySettings, nav, tiltMove, tiltLeave,
     onAttachClick, onFileChange, removeAttachment, toggleTagMenu, toggleConnMenu, onTagQ, addTag, removeTag, addConnector, removeConnector,
     doSend, starGeom, starStep, starGo, starTilt, starTiltReset, netGeom, decide, dangerPause, showToast, sparks, spend30,
     loadApprovals, loadAudit, mintKey, revokeKey, setPauseReason, dismissMintedKey,
@@ -1059,29 +1303,33 @@ function buildViewModel(ctx) {
   const starExecN = smembers.filter((a) => a.status === 'executing').length;
 
   // ── workflows ──
-  const wf = WFS[s.wfSel];
-  const wfList = WFS.map((w, i) => ({ pick: () => setState({ wfSel: i }), edge: i === s.wfSel ? 'var(--accent,#3D6BFF)' : 'transparent', bg: i === s.wfSel ? 'rgba(255,255,255,0.04)' : 'transparent', c: i === s.wfSel ? '#E9EBF2' : '#9AA1B2', name: w.name, meta: w.meta }));
-  const wfStages = wf.stages.map((st, i) => {
-    const done = i < wf.active, run = i === wf.active;
-    return {
-      n: String(i + 1).padStart(2, '0'), name: st[0], owner: st[1],
-      status: done ? 'COMPLETE' : run ? 'RUNNING' : 'PENDING',
-      stColor: done ? '#34C579' : run ? '#D19A3F' : '#6B7383',
-      dot: done ? '#34C579' : run ? '#D19A3F' : '#3C4150',
-      anim: run ? 'pulseDot 1.4s ease-in-out infinite' : 'none',
-      bd: run ? 'color-mix(in oklab, var(--accent,#3D6BFF) 55%, #1B2130)' : '#1B2130',
-      arrowDisp: i === wf.stages.length - 1 ? 'none' : 'block',
-    };
-  });
-  const wfRuns = [
-    ['Q3 win-back wave 2', 'directive · operator', 'RUNNING', '#D19A3F', '21:02', '—'],
-    ['June close', 'schedule · monthly', 'COMPLETE', '#34C579', '18:40', '42m'],
-    ['Packaging vendor shortlist', 'directive · COO', 'COMPLETE', '#34C579', '16:11', '2h 08m'],
-    ['Creator brief — fall drop', 'directive · CMO', 'COMPLETE', '#34C579', '14:56', '1h 12m'],
-    ['Latency regression sweep', 'alert · observability', 'FAILED', '#E15A52', '11:23', '18m'],
-    ['Dormant accounts export', 'workflow · retention', 'COMPLETE', '#34C579', '09:47', '26m'],
-    ['SOC 2 evidence refresh', 'schedule · weekly', 'COMPLETE', '#34C579', '02:00', '51m'],
-  ].map((r) => ({ name: r[0], trigger: r[1], status: r[2], stColor: r[3], when: r[4], dur: r[5] }));
+  //
+  // REAL RUN HISTORY, from workflow_runs (migration 0033) via
+  // GET /api/console/workflows/runs. The 5-workflow-definition catalogue and
+  // the per-run stage-progress bar are GONE, not reshaped: GET /api/v1/workflows
+  // (the real definition list) has no BFF proxy today, and `failure_stage` on a
+  // run is where it STOPPED, never how far it progressed -- there is no
+  // per-stage progress anywhere on the live orchestrator path, so a fabricated
+  // pipeline bar would be exactly the fiction this pass exists to remove.
+  const wfStatusColor = (status) => (
+    status === 'completed' ? '#34C579' : status === 'failed' ? '#E15A52' : status === 'denied' ? '#E15A52' : '#D19A3F'
+  );
+  const wfRuns = s.workflowRuns.map((r) => ({
+    name: r.workflowName || r.agentId || 'workflow',
+    trigger: r.correlationId ? r.correlationId.slice(0, 8) : '—',
+    status: (r.status || '').toUpperCase(),
+    stColor: wfStatusColor(r.status),
+    when: hhmmss(r.startedAt),
+    // Duration is derivable only for a FINISHED run; a still-running one has no
+    // end time to subtract, so it is shown as unknown rather than computed
+    // against "now" and re-labeled every render.
+    dur: r.finishedAt
+      ? Math.round((Date.parse(r.finishedAt) - Date.parse(r.startedAt)) / 60000) + 'm'
+      : '—',
+    // Where a run STOPPED, not a stage-progress bar. Null on every completed run.
+    failureStage: r.failureStage,
+    reason: r.reason,
+  }));
 
   // ── approvals ──
   //
@@ -1144,35 +1392,64 @@ function buildViewModel(ctx) {
   });
 
   // ── models ──
-  const modelCards = [
-    { name: 'atlas-4-frontier', tag: 'REASONING', tagColor: '#7A9BFF', tagBd: 'rgba(122,155,255,0.4)', desc: 'Executive & VP tier reasoning, planning, arbitration.', ctx: '400K', latency: '2.4s', cost: '$9.80', share: '18%', shareW: '18%' },
-    { name: 'nova-2-fast', tag: 'WORKER', tagColor: '#34C579', tagBd: 'rgba(52,197,121,0.4)', desc: 'High-volume worker execution: drafts, checks, routing.', ctx: '128K', latency: '380ms', cost: '$0.55', share: '61%', shareW: '61%' },
-    { name: 'cirrus-embed-3', tag: 'MEMORY', tagColor: '#A78BFA', tagBd: 'rgba(167,139,250,0.4)', desc: 'Embeddings for governed memory and semantic recall.', ctx: '8K', latency: '45ms', cost: '$0.02', share: '14%', shareW: '14%' },
-    { name: 'skylize-slm-1', tag: 'ON-PREM', tagColor: '#D19A3F', tagBd: 'rgba(209,154,63,0.4)', desc: 'Residency-pinned SLM for PII and compliance-sensitive tasks.', ctx: '32K', latency: '210ms', cost: 'flat', share: '7%', shareW: '7%' },
-  ];
-  const routeRows = [
-    { cls: 'Strategic reasoning', model: 'atlas-4-frontier', fallback: 'nova-2-fast', note: 'EXEC/VP tier only · budget-gated per directive' },
-    { cls: 'Worker execution', model: 'nova-2-fast', fallback: 'atlas-4-frontier', note: 'Escalates on 2 failed QC passes' },
-    { cls: 'Memory & recall', model: 'cirrus-embed-3', fallback: '—', note: 'All memory.search calls · consent-gated' },
-    { cls: 'PII / compliance', model: 'skylize-slm-1', fallback: 'human queue', note: 'Never leaves EU-CENTRAL · WORM logged' },
-    { cls: 'Vision & assets', model: 'nova-2-fast', fallback: 'atlas-4-frontier', note: 'Creative dept · style-gate before publish' },
-  ];
+  //
+  // REAL logical->concrete catalogue and routing rules, from
+  // GET /api/console/models. The 4 fictional names (atlas-4-frontier etc.)
+  // and the fabricated latency/context-window/traffic-share numbers are GONE,
+  // not reshaped -- none has a backend source; `models.py`'s own docstring
+  // says so. `pricing: null` means "nobody has priced this model" (model_pricing
+  // ships empty by design), rendered as such rather than as a zero or a blank.
+  const modelTagFor = (logicalName) => (
+    logicalName === 'reasoning' ? { tag: 'REASONING', tagColor: '#7A9BFF', tagBd: 'rgba(122,155,255,0.4)' }
+    : logicalName === 'fast' ? { tag: 'FAST', tagColor: '#34C579', tagBd: 'rgba(52,197,121,0.4)' }
+    : { tag: logicalName.toUpperCase(), tagColor: '#A78BFA', tagBd: 'rgba(167,139,250,0.4)' }
+  );
+  const modelCards = s.models ? s.models.catalogue.map((c) => {
+    const tone = modelTagFor(c.logicalName);
+    return {
+      name: c.concreteModel,
+      tag: tone.tag, tagColor: tone.tagColor, tagBd: tone.tagBd,
+      desc: c.logicalName + ' · ' + c.provider,
+      // No source anywhere in the backend for these three -- shown as unknown,
+      // never a guessed or carried-over number.
+      ctx: '—', latency: '—',
+      cost: c.pricing
+        ? '$' + (c.pricing.inputPriceMicrosPerMtok / 1e6).toFixed(2) + '/Mtok in'
+        : (s.models.pricingConfigured ? '—' : 'not priced'),
+      // Traffic share is derivable from ai_cost_ledger, not a configured value
+      // this route reports -- not shown rather than fabricated.
+      share: '—', shareW: '0%',
+    };
+  }) : [];
+  const routeRows = s.models ? s.models.routing.map((r) => ({
+    cls: r.routingClass,
+    model: r.targetLogicalModel,
+    fallback: r.fallbackLogicalModel || '—',
+    note: r.configured ? 'configured' : 'fail-closed default — not yet set for this org',
+  })) : [];
 
   // ── knowledge ──
-  const kbRows = [
-    { name: 'Orders warehouse (Postgres)', type: 'DATABASE', docs: '2.4M', fresh: '2 min', freshColor: '#34C579', cov: '100%', covW: '100%', status: 'SYNCED', stColor: '#34C579' },
-    { name: 'CRM accounts & pipeline', type: 'CONNECTOR', docs: '184K', fresh: '11 min', freshColor: '#34C579', cov: '98%', covW: '98%', status: 'SYNCED', stColor: '#34C579' },
-    { name: 'Contracts vault (S3)', type: 'OBJECT STORE', docs: '31K', fresh: '1 h', freshColor: '#34C579', cov: '96%', covW: '96%', status: 'SYNCED', stColor: '#34C579' },
-    { name: 'Support transcripts', type: 'STREAM', docs: '912K', fresh: 'live', freshColor: '#34C579', cov: '91%', covW: '91%', status: 'INDEXING', stColor: '#D19A3F' },
-    { name: 'Product analytics events', type: 'WAREHOUSE', docs: '48M', fresh: '26 min', freshColor: '#D19A3F', cov: '84%', covW: '84%', status: 'SYNCED', stColor: '#34C579' },
-    { name: 'Brand & policy wiki', type: 'DOCS', docs: '3.1K', fresh: '3 h', freshColor: '#D19A3F', cov: '100%', covW: '100%', status: 'SYNCED', stColor: '#34C579' },
-  ];
-  const kbStats = [
-    { label: 'SOURCES', value: '6', sub: 'governed', color: '#E9EBF2' },
-    { label: 'OBJECTS INDEXED', value: '51.5M', sub: 'total', color: '#E9EBF2' },
-    { label: 'RECALL P95', value: '212ms', sub: 'memory.search', color: '#E9EBF2' },
-    { label: 'CONSENT GATE', value: 'PASS', sub: 'privacy verified', color: '#34C579' },
-  ];
+  //
+  // REAL per-source_path ingestion census, from GET /api/console/knowledge.
+  // `source_path` is an ORIGIN STRING whoever ingested a document supplied --
+  // an upload's filename, "onboarding-interview", or a webhook path -- NOT a
+  // configured, syncing data source. So there is no connector-type column, no
+  // coverage percentage, no SYNCED/INDEXING status and no recall latency:
+  // none of the five has a backend source, and rendering one would assert an
+  // integration that does not exist. See api/console/knowledge/route.ts.
+  const kbRows = s.knowledge ? s.knowledge.sourcePaths.map((p) => ({
+    name: p.sourcePath || '(unknown)',
+    docs: fk(p.documents),
+    chunks: fk(p.chunks),
+    departments: p.departments.join(', ') || '—',
+    // A write timestamp, not a freshness-vs-origin claim: the origin may have
+    // changed since without the platform ever learning it did.
+    lastIngested: p.lastIngestedAt ? agoFrom(p.lastIngestedAt) : '—',
+  })) : [];
+  const kbStats = s.knowledge ? [
+    { label: 'DOCUMENTS', value: fk(s.knowledge.totalDocuments), sub: 'ingested', color: '#E9EBF2' },
+    { label: 'CHUNKS INDEXED', value: fk(s.knowledge.totalChunks), sub: s.knowledge.truncated ? 'lower bound — census capped' : 'total', color: '#E9EBF2' },
+  ] : [];
 
   // ── integrations ──
   const integDefs = [
@@ -1316,24 +1593,19 @@ function buildViewModel(ctx) {
 
 
   // ── security ──
-  const secScore = 94, circ = 2 * Math.PI * 56;
-  const secControls = [
-    ['SSO — SAML 2.0', 'Enforced for all human operators', 'ENFORCED', '#34C579'],
-    ['SCIM provisioning', 'Directory-synced roles and deprovisioning', 'ENFORCED', '#34C579'],
-    ['Encryption at rest', 'AES-256 · customer-managed keys', 'ENFORCED', '#34C579'],
-    ['Data residency', 'Pinned to EU-CENTRAL · no cross-region', 'ENFORCED', '#34C579'],
-    ['Human-in-the-loop', 'Required for all HIGH-risk actions', 'ENFORCED', '#34C579'],
-    ['PII redaction', 'Applied to logs and learning pipeline', 'ENFORCED', '#34C579'],
-    ['Agent sandbox isolation', 'Per-agent tool proxy, zero shared state', 'ENFORCED', '#34C579'],
-    ['Quarterly pen test', 'Next window opens JUL 15', 'SCHEDULED', '#D19A3F'],
-  ].map((c) => ({ name: c[0], desc: c[1], stLabel: c[2], stColor: c[3] }));
-  const secEvents = [
-    { text: 'Ad Copy Writer error loop contained — sandbox auto-restarted', time: '2 h', sevColor: '#D19A3F' },
-    { text: 'Anomalous token burst flagged on VP Marketing — within ceiling', time: '9 h', sevColor: '#D19A3F' },
-    { text: 'SOC 2 evidence refresh completed and signed', time: '1 d', sevColor: '#34C579' },
-    { text: '3 stale tool grants revoked by policy sweep', time: '3 d', sevColor: '#34C579' },
-  ];
-  const secBadges = ['SOC 2 TYPE II', 'ISO 27001', 'GDPR', 'HIPAA-READY'].map((n) => ({ name: n }));
+  //
+  // REAL audit_log-derived counts, from GET /api/console/security. THE SCORE,
+  // THE 8 CONTROLS AND THE 4 COMPLIANCE BADGES ARE GONE, not reshaped: none
+  // has a scoring methodology, a control inventory or a compliance auditor
+  // behind it anywhere in this system (api/console/security/route.ts spells
+  // out why per element). Rendering any of the three would be inventing a
+  // measurement or a third-party attestation the platform never made.
+  const secByResult = s.secActivity ? s.secActivity.byResult : { success: 0, denied: 0, escalated: 0, failed: 0 };
+  const secEvents = s.secActivity ? s.secActivity.recentEvents.map((e) => ({
+    text: e.actionType + ' · ' + e.result + (e.resultReason ? ' · ' + e.resultReason : ''),
+    time: agoFrom(e.occurredAt),
+    sevColor: e.result === 'failed' || e.result === 'denied' ? '#E15A52' : '#D19A3F',
+  })) : [];
 
   // ── team ──
   //
@@ -1372,20 +1644,39 @@ function buildViewModel(ctx) {
       roleBg: tone[1],
     };
   });
-  const permRows = [];
+  // THE MATRIX IS BACK, REAL THIS TIME. `route_group` is the raw route-file
+  // name the backend's AST scanner produced (edge/permission_matrix.py) --
+  // owner-approved design: no invented business-action vocabulary. Every
+  // cell is mechanically derived from an actual Depends(require_role(...))
+  // call site, never hand-transcribed, so it cannot silently drift from what
+  // the routes actually enforce the way the old hardcoded 6x4 grid did.
+  const PERM_ROLES = ['owner', 'admin', 'operator', 'analyst', 'viewer'];
+  const permRows = s.permMatrix ? s.permMatrix.routeGroups.map((g) => ({
+    name: g.routeGroup,
+    cells: PERM_ROLES.map((role) => {
+      const a = g.access[role] || { read: false, write: false };
+      return { role, read: !!a.read, write: !!a.write };
+    }),
+  })) : [];
 
   // ── billing ──
-  const meters = [
-    { label: 'TOKENS · ANNUAL COMMIT', used: '418M', cap: '675M', w: '62%', color: 'var(--accent,#3D6BFF)' },
-    { label: 'OPERATOR SEATS', used: '6', cap: '25', w: '24%', color: '#34C579' },
-    { label: 'AGENT SLOTS', used: '151', cap: '250', w: '60%', color: '#A78BFA' },
-  ];
-  const invoices = [
-    { id: 'INV-2026-06', period: 'JUN 01 — JUN 30', amount: '$58,410', status: 'PAID', stColor: '#34C579' },
-    { id: 'INV-2026-05', period: 'MAY 01 — MAY 31', amount: '$61,275', status: 'PAID', stColor: '#34C579' },
-    { id: 'INV-2026-04', period: 'APR 01 — APR 30', amount: '$54,890', status: 'PAID', stColor: '#34C579' },
-    { id: 'INV-2026-03', period: 'MAR 01 — MAR 31', amount: '$49,320', status: 'PAID', stColor: '#34C579' },
-  ];
+  //
+  // REAL ai_cost_ledger usage, from GET /api/console/billing. Plan tier,
+  // invoices, seats and agent-slots have NO backing table anywhere in this
+  // repo, so they are NOT reshaped into meters/invoices that no longer mean
+  // what their labels say -- the screen must render `unavailableSections`
+  // as an explicit "not available yet" state instead. A zero-spend period is
+  // a real, true answer (model_pricing ships empty by design), never a
+  // loading or error state.
+  const billingUnavailable = s.billing ? s.billing.unavailableSections : ['plan_tier', 'invoices', 'seats', 'agent_slots'];
+  const billingModelRows = s.billing ? s.billing.models.map((m) => ({
+    name: m.provider + ' · ' + m.model,
+    cost: money(m.costUsd),
+  })) : [];
+  const billingHistoryRows = s.billing ? s.billing.history.map((h) => ({
+    period: h.billingPeriod,
+    cost: money(h.costUsd),
+  })) : [];
 
   // ── settings ──
   const autonomyCopy = {
@@ -1399,29 +1690,55 @@ function buildViewModel(ctx) {
   // be clickable while the value on screen is not yet known to be server truth.
   const autonomyBusy = s.autonomyLoading || s.autonomySaving;
   const autonomyChips = AUTONOMY_MODES.map((mode) => ({ mode, pick: () => setAutonomy(mode), disabled: autonomyBusy, label: mode.replace(/_/g, ' ').toUpperCase(), title: autonomyCopy[mode], bd: s.autonomy === mode ? 'var(--accent,#3D6BFF)' : '#232939', bg: s.autonomy === mode ? 'color-mix(in oklab, var(--accent,#3D6BFF) 18%, transparent)' : 'transparent', c: s.autonomy === mode ? '#E9EBF2' : '#8B93A7', opacity: autonomyBusy ? 0.55 : 1, cursor: autonomyBusy ? 'not-allowed' : 'pointer' }));
+  // REAL guardrails, from GET/PUT /api/console/org-policy-settings
+  // (org_policy_settings, migration 0035). Each carries the backend's own
+  // `enforced` flag: today all four are `enforced: false` -- a stored
+  // preference with no live enforcement point -- and the screen must say so
+  // rather than imply a toggle changes system behavior it does not yet
+  // change. NO REGION FIELD anywhere in this screen: verified against real
+  // infra that region is a per-environment Terraform variable, not a
+  // per-org concept.
   const guardDefs = [
-    ['cap', 'Approval above $10,000', 'Any single commitment over the cap escalates to a human'],
-    ['email', 'Block external sends', 'Outbound email & posts require the brand gate + approval'],
-    ['pii', 'Redact PII in logs', 'Personally identifiable data masked before storage'],
-    ['fallback', 'Silent model fallback', 'Allow automatic downgrade to nova-2 on atlas-4 saturation'],
+    ['spendCapAlertEnabled', s.spendCapAlert, 'Spend cap alert', 'Alert when spend approaches the governance ceiling'],
+    ['emailDomainRestrictionEnabled', s.emailDomainRestriction, 'Restrict email domains', 'Outbound sharing limited to the org’s own domain'],
+    ['piiRedactionEnabled', s.piiRedaction, 'Redact PII in logs', 'Personally identifiable data masked before storage'],
+    ['silentFallbackSuppressed', s.silentFallbackSuppressed, 'Suppress silent model fallback', 'Refuse rather than silently route to an unchosen model'],
   ];
   const guardrails = guardDefs.map((g) => {
-    const on = !!s.guards[g[0]];
-    return { name: g[1], desc: g[2], toggle: () => { const guards = { ...s.guards, [g[0]]: !on }; set({ guards }); }, trackBg: on ? 'var(--accent,#3D6BFF)' : '#141826', trackBd: on ? 'color-mix(in oklab, var(--accent,#3D6BFF) 70%, transparent)' : '#232939', knobX: on ? '17px' : '2px' };
+    const field = g[0], current = g[1], on = !!current.value;
+    return {
+      name: g[2], desc: g[3],
+      // Real enforcement status. Rendered so the screen can never imply a
+      // toggle does something it does not.
+      enforced: current.enforced,
+      enforcedLabel: current.enforced ? 'ENFORCED' : 'STORED PREFERENCE — NOT YET ENFORCED',
+      toggle: () => setOrgPolicySettings({ [field]: !on }),
+      disabled: s.policySaving,
+      trackBg: on ? 'var(--accent,#3D6BFF)' : '#141826',
+      trackBd: on ? 'color-mix(in oklab, var(--accent,#3D6BFF) 70%, transparent)' : '#232939',
+      knobX: on ? '17px' : '2px',
+    };
   });
 
-  const notifItems = [
-    { dot: '#D19A3F', text: 'AP-2216 waiting 14 min — Q3 paid-social budget', when: '14m' },
-    { dot: '#E15A52', text: 'Ad Copy Writer entered error state — auto-restart armed', when: '2h' },
-    { dot: '#34C579', text: 'June close completed and signed by CFO chain', when: '4h' },
-    { dot: '#7A9BFF', text: 'Routing gains: cost per task down 11% this week', when: '1d' },
-  ];
+  // REAL notifications feed, from GET /api/console/notifications
+  // (migration 0034), org-scoped not per-user. Only two `kind` values have a
+  // real producer today -- hitl.approval_requested and
+  // governance.action_denied -- so a fresh org's list is legitimately EMPTY
+  // until one of those two things happens. Never seeded.
+  const notifSevColor = { info: '#7A9BFF', warning: '#D19A3F', critical: '#E15A52' };
+  const notifItems = s.notifications.map((n) => ({
+    dot: notifSevColor[n.severity] || '#8B93A7',
+    text: n.title || n.body || n.kind,
+    when: agoFrom(n.createdAt),
+  }));
 
   return {
     accentVar: acc,
     crumb: crumbs[s.screen] || 'overview',
     activeCount: String(active), tokRateFmt: fk(s.tokRate), costToday: money(cost), clock: s.clock,
     toggleNotif: () => setState({ notifOpen: !s.notifOpen }), notifOpen: s.notifOpen, notifItems,
+    notifLoading: s.notifLoading, notifError: s.notifError,
+    notifEmpty: notifItems.length === 0 && !s.notifLoading && !s.notifError,
     goChat: () => nav('chat'), goApprovals: () => nav('appr'), goAnalytics: () => nav('ana'),
     navGroups, labelDisp: open ? 'block' : 'none', sidebarW: open ? '198px' : '52px',
     toggleSidebar: () => set({ sidebarOpen: !open }), chevRot: open ? '180deg' : '0deg',
@@ -1508,7 +1825,14 @@ function buildViewModel(ctx) {
     starTokFmt: fk(smembers.reduce((tt, a) => tt + a.tokensUsed, 0)), starHead: shead ? shead.name : 'CEO',
     hasSel: !!selA, sel, closeSel: () => setState({ selId: null }),
     // workflows
-    isWf: s.screen === 'wf', wfList, wfSel: { name: wf.name, meta: wf.meta, desc: wf.desc }, wfStages, wfRuns,
+    isWf: s.screen === 'wf', wfRuns,
+    wfLoading: s.workflowRunsLoading,
+    wfError: s.workflowRunsError,
+    wfEmpty: wfRuns.length === 0 && !s.workflowRunsLoading && !s.workflowRunsError,
+    // No workflow-definition list is wired: GET /api/v1/workflows (the real
+    // definition list) has no BFF proxy today. Said out loud rather than
+    // filled with the old 5-workflow mock.
+    wfDefinitionsUnavailable: 'Workflow definitions are not yet exposed to the console.',
     // approvals
     isAppr: s.screen === 'appr', apRiskChips, apStats, apRows,
     // EMPTY and FAILED are different facts and the screen must not merge them:
@@ -1522,8 +1846,14 @@ function buildViewModel(ctx) {
     isAna: s.screen === 'ana', anaCards, spendPts: pts.join(' '), spendArea: '0,140 ' + pts.join(' ') + ' 600,140', spendPeak: money(mx), effRows,
     // models
     isMod: s.screen === 'mod', modelCards, routeRows,
+    modLoading: s.modelsLoading,
+    modError: s.modelsError,
+    modEmpty: modelCards.length === 0 && !s.modelsLoading && !s.modelsError,
     // knowledge
-    isKb: s.screen === 'kb', kbTotalDocs: '51.5M', kbStats, kbRows,
+    isKb: s.screen === 'kb', kbStats, kbRows,
+    kbLoading: s.knowledgeLoading,
+    kbError: s.knowledgeError,
+    kbEmpty: kbRows.length === 0 && !s.knowledgeLoading && !s.knowledgeError,
     // integrations
     isInteg: s.screen === 'integ', integConnN: String(integDefs.filter((x) => x[3]).length), integCards,
     // developers
@@ -1543,19 +1873,57 @@ function buildViewModel(ctx) {
     logEmpty: logRows.length === 0 && !s.auditLoading && !s.auditError,
     logRetry: loadAudit,
     // security
-    isSec: s.screen === 'sec', secBadges, secDash: (circ * secScore / 100).toFixed(1) + ' ' + circ.toFixed(1), secScore: String(secScore), secControls, secEvents,
+    //
+    // NO SCORE GAUGE, NO CONTROL CHECKLIST, NO COMPLIANCE BADGE ROW. Real
+    // audit_log outcome counts and the real recent events behind them, and
+    // nothing else -- see the note above `secByResult`.
+    isSec: s.screen === 'sec',
+    secTotalActions: s.secActivity ? String(s.secActivity.totalActions) : '—',
+    secSuccess: String(secByResult.success), secDenied: String(secByResult.denied),
+    secEscalated: String(secByResult.escalated), secFailed: String(secByResult.failed),
+    secEvents,
+    secLoading: s.secLoading,
+    secError: s.secError,
+    secEmpty: secEvents.length === 0 && !s.secLoading && !s.secError,
+    secScoreUnavailable: 'No scoring methodology exists yet — not shown rather than invented.',
     // team
     isTeam: s.screen === 'team', memberRows, permRows,
     teamLoading: s.membersLoading,
     teamError: s.membersError,
     teamEmpty: memberRows.length === 0 && !s.membersLoading && !s.membersError,
+    permLoading: s.permMatrixLoading,
+    permError: s.permMatrixError,
+    permEmpty: permRows.length === 0 && !s.permMatrixLoading && !s.permMatrixError,
     // billing
-    isBill: s.screen === 'bill', planRenews: 'AUG 01', spendMTD: '$41,900', forecastFmt: '$63,400', meters, invoices,
+    //
+    // Real ai_cost_ledger usage. `billingUnavailable` names the plan/invoice/
+    // seat/slot sections that have no backing table -- rendered as explicit
+    // "not available yet", never as a fabricated meter or invoice row.
+    isBill: s.screen === 'bill',
+    billingPeriod: s.billing ? s.billing.billingPeriod : '',
+    spendMTD: s.billing ? money(s.billing.currentPeriodUsd) : '—',
+    billingModelRows, billingHistoryRows, billingUnavailable,
+    billingCeilingConfigured: s.billing ? s.billing.ceilingConfigured : false,
+    billingCeiling: s.billing && s.billing.ceilingUsd != null ? money(s.billing.ceilingUsd) : null,
+    billingRemaining: s.billing && s.billing.remainingUsd != null ? money(s.billing.remainingUsd) : null,
+    billingLoading: s.billingLoading,
+    billingError: s.billingError,
     // settings
     isSet: s.screen === 'set', orgName: s.orgName, onOrgName: (e) => set({ orgName: e.target.value }),
-    region: s.region, onRegion: (e) => set({ region: e.target.value }),
-    retention: s.retention, onRetention: (e) => set({ retention: e.target.value }),
+    // NO REGION FIELD. Verified against real infra that region is a
+    // per-environment Terraform variable, not a per-org concept -- removed
+    // entirely rather than shown read-only, since there is nothing per-org to
+    // display.
+    retention: s.retentionDays == null ? '' : String(s.retentionDays),
+    onRetention: (e) => {
+      const n = Number(e.target.value);
+      if (Number.isInteger(n)) setOrgPolicySettings({ retentionDays: n });
+    },
+    retentionMin: RETENTION_DAYS_MIN, retentionMax: RETENTION_DAYS_MAX,
     autonomyMode: s.autonomy, autonomyDesc: autonomyCopy[s.autonomy] || autonomyCopy[DEFAULT_AUTONOMY_MODE], autonomyChips, guardrails,
+    policyLoading: s.policyLoading,
+    policySaving: s.policySaving,
+    policyError: s.policyError,
     // Org-wide, server-owned: the screen must be able to say whether what it
     // shows is the org's stored posture, the fail-closed default, or stale.
     autonomyStatus: s.autonomyLoading

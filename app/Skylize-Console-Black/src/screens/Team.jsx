@@ -1,7 +1,7 @@
 import React from 'react';
 import { sx, Interactive } from '../lib/style.jsx';
 
-// FOUR COLUMNS ARE GONE, AND A WHOLE PANEL IS MARKED UNBUILT.
+// FOUR COLUMNS ARE GONE.
 //
 // GET /api/v1/tenants/me/users returns {user_id, role} and nothing else
 // (tenants.py:105-113). The design had MEMBER / EMAIL / ROLE / LAST ACTIVE /
@@ -10,11 +10,12 @@ import { sx, Interactive } from '../lib/style.jsx';
 // dropped rather than blanked -- an empty MFA cell on a security-adjacent
 // screen still reads as "we checked, and there is none".
 //
-// THE ROLE PERMISSION MATRIX is a design comp, not data. It asserted which of
-// four roles may do what across six permissions; the real checks live in the
-// backend route decorators and no endpoint reports them. It is labelled
-// instead of rendered, because a stale permission matrix on a governance
-// console is worse than no matrix.
+// THE ROLE PERMISSION MATRIX IS REAL NOW, via GET /api/v1/permissions/matrix
+// -- mechanically derived from an `ast` scan of the actual
+// Depends(require_role(...)) call sites in edge/routes/*.py
+// (edge/permission_matrix.py), never hand-transcribed. Rows are the raw
+// route-group names, the owner-approved design: no invented business-action
+// vocabulary.
 export default function Team({ vm }) {
   const COLS = 'display:grid;grid-template-columns:minmax(220px,2.4fr) 130px;gap:0 12px';
   return (
@@ -56,13 +57,36 @@ export default function Team({ vm }) {
         ))}
       </div>
       <div style={sx('background:#0C0F16;border:1px solid #1B2130;border-radius:10px;overflow:hidden')}>
-        <div style={sx("display:flex;align-items:center;justify-content:space-between;padding:10px 16px;border-bottom:1px solid #161A26;font-family:'Geist Mono',ui-monospace,monospace;font-size:9.5px;letter-spacing:0.13em;color:#77809A")}>
-          <span>ROLE PERMISSIONS</span>
-          <span style={sx('color:#4A5162;letter-spacing:0.1em')}>DESIGNED · NOT BUILT</span>
+        <div style={sx("padding:10px 16px;border-bottom:1px solid #161A26;font-family:'Geist Mono',ui-monospace,monospace;font-size:9.5px;letter-spacing:0.13em;color:#77809A")}>
+          ROLE PERMISSIONS &middot; MECHANICALLY DERIVED FROM ROUTE SOURCE
         </div>
-        <div style={sx('padding:20px 16px;font-size:12.5px;color:#8B93A7;line-height:1.65;max-width:640px')}>
-          Role permissions are enforced by the backend on every route, but no endpoint reports the matrix, so there is nothing truthful to render here yet. Showing a hardcoded grid would risk contradicting the checks that actually run.
-        </div>
+        {vm.permLoading ? (
+          <div style={sx("padding:30px;text-align:center;font-family:'Geist Mono',ui-monospace,monospace;font-size:11px;color:#77809A;letter-spacing:0.06em")}>Reading the permission matrix&hellip;</div>
+        ) : vm.permError ? (
+          <div style={sx('padding:26px 20px;text-align:center')}>
+            <div style={sx("font-family:'Geist Mono',ui-monospace,monospace;font-size:10px;letter-spacing:0.1em;color:#E15A52;margin-bottom:8px")}>MATRIX UNAVAILABLE</div>
+            <div style={sx('font-size:12.5px;color:#9AA1B2')}>{vm.permError}</div>
+          </div>
+        ) : vm.permEmpty ? (
+          <div style={sx("padding:30px;text-align:center;font-family:'Geist Mono',ui-monospace,monospace;font-size:11px;color:#616A82;letter-spacing:0.06em")}>No route groups returned.</div>
+        ) : (
+          <div style={sx('overflow-x:auto')}>
+            <div style={sx("display:grid;grid-template-columns:minmax(140px,1.6fr) repeat(5,90px);gap:0 8px;padding:9px 16px;border-bottom:1px solid #1B2130;font-family:'Geist Mono',ui-monospace,monospace;font-size:9px;letter-spacing:0.1em;color:#77809A;background:rgba(255,255,255,0.015)")}>
+              <span>ROUTE GROUP</span>
+              {vm.permRows[0] && vm.permRows[0].cells.map((c, i) => (<span key={i} style={sx('text-align:center')}>{c.role.toUpperCase()}</span>))}
+            </div>
+            {vm.permRows.map((row, i) => (
+              <div key={i} style={sx("display:grid;grid-template-columns:minmax(140px,1.6fr) repeat(5,90px);gap:0 8px;align-items:center;padding:8px 16px;border-bottom:1px solid #12151F")}>
+                <span style={sx('font-size:12px;font-weight:500;color:#E9EBF2')}>{row.name}</span>
+                {row.cells.map((c, j) => (
+                  <span key={j} style={sx('text-align:center;font-family:\'Geist Mono\',ui-monospace,monospace;font-size:10px;color:#9AA1B2')}>
+                    {c.read && c.write ? 'RW' : c.read ? 'R' : c.write ? 'W' : '—'}
+                  </span>
+                ))}
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

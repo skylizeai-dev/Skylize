@@ -55,13 +55,21 @@ export default function TopBar({ vm }) {
       {vm.notifOpen && (
         <div style={sx('position:absolute;top:46px;right:16px;width:310px;background:rgba(14,17,25,0.92);backdrop-filter:blur(18px);border:1px solid #232939;border-radius:8px;box-shadow:0 18px 50px rgba(0,0,0,0.55);animation:fadeSlide .16s ease-out;overflow:hidden;z-index:60')}>
           <div style={sx("padding:9px 12px 7px;font-family:'Geist Mono',ui-monospace,monospace;font-size:9.5px;letter-spacing:0.14em;color:#77809A;border-bottom:1px solid #1B2130")}>NOTIFICATIONS</div>
-          {vm.notifItems.map((n, i) => (
-            <div key={i} style={sx('display:flex;align-items:baseline;gap:8px;padding:9px 12px;border-bottom:1px solid #141826;font-size:12px;color:#C7CBD6')}>
-              <span style={sx(`width:5px;height:5px;border-radius:50%;background: ${n.dot};flex-shrink:0;position:relative;top:-1px`)}></span>
-              <span style={sx('flex:1;line-height:1.45')}>{n.text}</span>
-              <span style={sx("font-family:'Geist Mono',ui-monospace,monospace;font-size:10px;color:#77809A;font-variant-numeric:tabular-nums")}>{n.when}</span>
-            </div>
-          ))}
+          {vm.notifLoading ? (
+            <div style={sx('padding:12px;font-size:11.5px;color:#77809A')}>Reading notifications&hellip;</div>
+          ) : vm.notifError ? (
+            <div role="alert" style={sx('padding:12px;font-size:11.5px;color:#E9A9A4')}>{vm.notifError}</div>
+          ) : vm.notifEmpty ? (
+            <div style={sx('padding:12px;font-size:11.5px;color:#616A82')}>No notifications yet.</div>
+          ) : (
+            vm.notifItems.map((n, i) => (
+              <div key={i} style={sx('display:flex;align-items:baseline;gap:8px;padding:9px 12px;border-bottom:1px solid #141826;font-size:12px;color:#C7CBD6')}>
+                <span style={sx(`width:5px;height:5px;border-radius:50%;background: ${n.dot};flex-shrink:0;position:relative;top:-1px`)}></span>
+                <span style={sx('flex:1;line-height:1.45')}>{n.text}</span>
+                <span style={sx("font-family:'Geist Mono',ui-monospace,monospace;font-size:10px;color:#77809A;font-variant-numeric:tabular-nums")}>{n.when}</span>
+              </div>
+            ))
+          )}
         </div>
       )}
     </header>

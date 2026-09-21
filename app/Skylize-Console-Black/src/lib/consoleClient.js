@@ -16,6 +16,15 @@
 // Every function REJECTS on failure. No call resolves with sample data: a
 // screen that cannot reach the backend must say so, never quietly show fiction.
 
+// Mirrors dal/org_policy_settings.py's RETENTION_MIN_DAYS/RETENTION_MAX_DAYS
+// (2555 = the documented 7-year compliance floor for audit/governance
+// retention; 3650 is an engineering default, not sourced from any document --
+// see migrations/versions/0035_org_policy_settings.py). Used to bound the
+// retention input at the edge instead of round-tripping an out-of-range value
+// that the backend would reject with a 422 anyway.
+export const RETENTION_DAYS_MIN = 2555;
+export const RETENTION_DAYS_MAX = 3650;
+
 // The auth header the PUBLIC API expects from a third-party caller, for the
 // Developers panel's copy-paste snippet. This console never sends it -- see the
 // module header: the browser calls the BFF same-origin and the session cookie
@@ -318,4 +327,283 @@ export function engageKillSwitch(scopeType, scopeId, reason) {
     method: 'POST',
     body: { scope_type: scopeType, scope_id: scopeId, reason: why },
   });
+}
+
+// ── knowledge ─────────────────────────────────────────────────────────────
+//
+// A census of ingested chunks, grouped by `source_path` -- an ORIGIN STRING
+// whoever ingested a document supplied, not a configured, syncing data
+// source. There is no connector taxonomy, no coverage percentage, no
+// sync-status and no recall latency anywhere in the backend, so none of
+// those fields exist here -- see api/console/knowledge/route.ts for the full
+// accounting of what this screen used to claim and cannot.
+export async function fetchKnowledgeIndexHealth() {
+  const body = await call('/api/console/knowledge');
+  if (!body || !Array.isArray(body.source_paths)) {
+    throw new Error('The server returned an unreadable knowledge index.');
+  }
+  return {
+    totalChunks: Number(body.total_chunks) || 0,
+    totalDocuments: Number(body.total_documents) || 0,
+    lastIngestedAt: orNull(body.last_ingested_at),
+    truncated: body.truncated === true,
+    sourcePaths: body.source_paths.map((p) => ({
+      sourcePath: String(p.source_path || ''),
+      chunks: Number(p.chunks) || 0,
+      documents: Number(p.documents) || 0,
+      departments: Array.isArray(p.departments) ? p.departments.map(String) : [],
+      lastIngestedAt: orNull(p.last_ingested_at),
+    })),
+  };
+}
+
+// ── billing ───────────────────────────────────────────────────────────────
+//
+// Real ai_cost_ledger usage. Money is MICRO-currency (millionths of a unit,
+// ADR-0006), converted to a display amount HERE and nowhere else -- a
+// component reading `cost_micros` directly as cents would be off by 10,000x.
+// `unavailableSections` names the screen's plan/invoice/seat/slot concepts
+// that have no backing table; the caller must render those as "not available"
+// rather than a zero or a blank.
+function microsToUsd(micros) {
+  return (Number(micros) || 0) / 1e6;
+}
+export async function fetchBillingUsage(periods) {
+  const n = Number.isInteger(periods) ? periods : 12;
+  const body = await call(`/api/console/billing?periods=${n}`);
+  if (!body || !body.current_period || !Array.isArray(body.models)) {
+    throw new Error('The server returned an unreadable billing summary.');
+  }
+  return {
+    billingPeriod: String(body.billing_period || ''),
+    currentPeriodUsd: microsToUsd(body.current_period.cost_micros),
+    currentPeriodInputTokens: Number(body.current_period.input_tokens) || 0,
+    currentPeriodOutputTokens: Number(body.current_period.output_tokens) || 0,
+    models: body.models.map((m) => ({
+      provider: String(m.provider || ''),
+      model: String(m.model || ''),
+      costUsd: microsToUsd(m.cost_micros),
+      currency: String(m.currency || ''),
+    })),
+    history: Array.isArray(body.history)
+      ? body.history.map((h) => ({
+          billingPeriod: String(h.billing_period || ''),
+          costUsd: microsToUsd(h.cost_micros),
+        }))
+      : [],
+    ceilingConfigured: body.ceiling_configured === true,
+    ceilingUsd: body.ceiling_micros == null ? null : microsToUsd(body.ceiling_micros),
+    remainingUsd: body.remaining_micros == null ? null : microsToUsd(body.remaining_micros),
+    unavailableSections: Array.isArray(body.unavailable_sections)
+      ? body.unavailable_sections.map(String)
+      : [],
+  };
+}
+
+// ── security posture ──────────────────────────────────────────────────────
+//
+// Real audit_log-derived counts over a time window, plus the actual recent
+// non-success rows behind them. THERE IS NO SCORE, NO CONTROL INVENTORY AND
+// NO COMPLIANCE BADGE LIST anywhere in this response -- none has a source of
+// truth in the backend, and the screen must render their absence rather than
+// a stale or invented number. See api/console/security/route.ts.
+export async function fetchSecurityActivity(windowHours, limit) {
+  const wh = Number.isInteger(windowHours) ? windowHours : 24;
+  const lim = Number.isInteger(limit) ? limit : 20;
+  const body = await call(`/api/console/security?window_hours=${wh}&limit=${lim}`);
+  if (!body || !body.by_result || !Array.isArray(body.recent_events)) {
+    throw new Error('The server returned an unreadable security summary.');
+  }
+  return {
+    windowStart: String(body.window_start || ''),
+    windowEnd: String(body.window_end || ''),
+    totalActions: Number(body.total_actions) || 0,
+    byResult: {
+      success: Number(body.by_result.success) || 0,
+      denied: Number(body.by_result.denied) || 0,
+      escalated: Number(body.by_result.escalated) || 0,
+      failed: Number(body.by_result.failed) || 0,
+    },
+    distinctActionTypes: Number(body.distinct_action_types) || 0,
+    distinctAgents: Number(body.distinct_agents) || 0,
+    recentEventsTruncated: body.recent_events_truncated === true,
+    recentEvents: body.recent_events.map((e) => ({
+      eventId: String(e.event_id),
+      correlationId: String(e.correlation_id || ''),
+      actionType: String(e.action_type || ''),
+      result: String(e.result || ''),
+      occurredAt: String(e.occurred_at || ''),
+      sourceAgentId: orNull(e.source_agent_id),
+      authorityLevel: orNull(e.authority_level),
+      governanceTokenId: orNull(e.governance_token_id),
+      resultReason: orNull(e.result_reason),
+    })),
+  };
+}
+
+// ── models ────────────────────────────────────────────────────────────────
+//
+// The real logical->concrete map (default/fast/reasoning) and the org's
+// configured routing rules. `pricing` stays null wherever model_pricing has
+// no row -- that table ships empty by design, so null means "nobody has
+// priced this model", never zero. There is deliberately no latency,
+// context-window or traffic-share field: none is measured or configured
+// anywhere in the backend.
+export async function fetchModels() {
+  const body = await call('/api/console/models');
+  if (!body || !Array.isArray(body.catalogue) || !Array.isArray(body.routing)) {
+    throw new Error('The server returned an unreadable model catalogue.');
+  }
+  return {
+    pricingConfigured: body.pricing_configured === true,
+    catalogue: body.catalogue.map((c) => ({
+      logicalName: String(c.logical_name || ''),
+      concreteModel: String(c.concrete_model || ''),
+      provider: String(c.provider || ''),
+      pricing: c.pricing
+        ? {
+            inputPriceMicrosPerMtok: Number(c.pricing.input_price_micros_per_mtok) || 0,
+            outputPriceMicrosPerMtok: Number(c.pricing.output_price_micros_per_mtok) || 0,
+            currency: String(c.pricing.currency || ''),
+          }
+        : null,
+    })),
+    routing: body.routing.map((r) => ({
+      routingClass: String(r.routing_class || ''),
+      targetLogicalModel: String(r.target_logical_model || ''),
+      fallbackLogicalModel: orNull(r.fallback_logical_model),
+      configured: r.configured === true,
+    })),
+  };
+}
+
+// ── workflows: run history ────────────────────────────────────────────────
+//
+// The REAL run-history table (workflow_runs, migration 0033), written
+// best-effort by Orchestrator.invoke. `failureStage` is where a run STOPPED,
+// never how far it progressed -- there is no per-stage progress anywhere on
+// the live path, so a caller must not build a stage-by-stage pipeline from
+// it. This is a SEPARATE path from the dormant n8n admin route at
+// /api/console/workflows (SKYLIZE_ENABLE_N8N_ADMIN, off by default, no
+// governance gate) -- that route is not workflow infrastructure and is not
+// called here.
+export async function fetchWorkflowRuns(limit) {
+  const n = Number.isInteger(limit) ? limit : 50;
+  const body = await call(`/api/console/workflows/runs?limit=${n}`);
+  if (!body || !Array.isArray(body.runs)) {
+    throw new Error('The server returned an unreadable workflow run history.');
+  }
+  return {
+    runs: body.runs.map((r) => ({
+      runId: String(r.run_id),
+      workflowName: String(r.workflow_name || ''),
+      agentId: String(r.agent_id || ''),
+      status: String(r.status || ''),
+      correlationId: String(r.correlation_id || ''),
+      startedAt: String(r.started_at || ''),
+      finishedAt: orNull(r.finished_at),
+      failureStage: orNull(r.failure_stage),
+      reason: orNull(r.reason),
+    })),
+    nextBefore: orNull(body.next_before),
+  };
+}
+
+// ── notifications ─────────────────────────────────────────────────────────
+//
+// ORG-SCOPED, NOT PER-USER (migration 0034): `readAt` means "somebody with
+// console access acknowledged this", not "this signed-in user did". Only two
+// `kind` values have a real producer today -- hitl.approval_requested and
+// governance.action_denied -- so a fresh org's list is legitimately EMPTY
+// until one of those two things happens. Never given a seeded fallback.
+export async function fetchNotifications(limit, unreadOnly) {
+  const n = Number.isInteger(limit) ? limit : 50;
+  const q = unreadOnly ? `&unread_only=true` : '';
+  const body = await call(`/api/console/notifications?limit=${n}${q}`);
+  if (!body || !Array.isArray(body.notifications)) {
+    throw new Error('The server returned an unreadable notification list.');
+  }
+  return {
+    notifications: body.notifications.map((n2) => ({
+      notificationId: String(n2.notification_id),
+      kind: String(n2.kind || ''),
+      severity: String(n2.severity || ''),
+      title: String(n2.title || ''),
+      body: String(n2.body || ''),
+      correlationId: orNull(n2.correlation_id),
+      createdAt: String(n2.created_at || ''),
+      readAt: orNull(n2.read_at),
+    })),
+    unreadCount: Number(body.unread_count) || 0,
+    nextBefore: orNull(body.next_before),
+  };
+}
+
+// ── permission matrix ─────────────────────────────────────────────────────
+//
+// Mechanically derived on the backend from an `ast` scan of the real
+// `Depends(require_role(...))` call sites in edge/routes/*.py
+// (edge/permission_matrix.py). `routeGroup` is the raw route-file name --
+// owner-approved design, no invented business-action vocabulary. This
+// function renames nothing.
+export async function fetchPermissionMatrix() {
+  const body = await call('/api/console/permissions');
+  if (!body || !Array.isArray(body.route_groups)) {
+    throw new Error('The server returned an unreadable permission matrix.');
+  }
+  return {
+    routeGroups: body.route_groups.map((g) => ({
+      routeGroup: String(g.route_group || ''),
+      access: g.access && typeof g.access === 'object' ? g.access : {},
+    })),
+  };
+}
+
+// ── org policy settings (guardrails / retention) ──────────────────────────
+//
+// NO REGION FIELD: verified against real infra that region is a
+// per-environment Terraform variable, not a per-org concept (migration
+// 0035's own docstring cites the files). Each guardrail carries `enforced`
+// alongside its value -- today all four are `enforced: false`, a stored
+// preference with no live enforcement point, and the caller must show that
+// rather than imply the toggle does something it does not.
+export async function fetchOrgPolicySettings() {
+  const body = await call('/api/console/org-policy-settings');
+  if (!body || typeof body.retention_days !== 'number') {
+    throw new Error('The server returned unreadable org policy settings.');
+  }
+  return normaliseOrgPolicySettings(body);
+}
+
+export async function putOrgPolicySettings(input) {
+  const body = await call('/api/console/org-policy-settings', {
+    method: 'PUT',
+    body: {
+      spend_cap_alert_enabled: !!input.spendCapAlertEnabled,
+      email_domain_restriction_enabled: !!input.emailDomainRestrictionEnabled,
+      pii_redaction_enabled: !!input.piiRedactionEnabled,
+      silent_fallback_suppressed: !!input.silentFallbackSuppressed,
+      retention_days: Number(input.retentionDays),
+    },
+  });
+  if (!body || typeof body.retention_days !== 'number') {
+    throw new Error('The server returned unreadable org policy settings.');
+  }
+  // The backend echoes what it actually PERSISTED. Return that, never the
+  // requested value -- the caller must render what was stored.
+  return normaliseOrgPolicySettings(body);
+}
+
+function normaliseOrgPolicySettings(body) {
+  const field = (obj) => (obj && typeof obj === 'object'
+    ? { value: obj.value === true, enforced: obj.enforced === true }
+    : { value: false, enforced: false });
+  return {
+    configured: body.configured === true,
+    retentionDays: Number(body.retention_days) || 0,
+    spendCapAlert: field(body.spend_cap_alert_enabled),
+    emailDomainRestriction: field(body.email_domain_restriction_enabled),
+    piiRedaction: field(body.pii_redaction_enabled),
+    silentFallbackSuppressed: field(body.silent_fallback_suppressed),
+  };
 }
