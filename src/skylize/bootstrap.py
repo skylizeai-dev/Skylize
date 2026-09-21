@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from .dal.model_routing import ModelRoutingDAL
     from .dal.notifications import NotificationsDAL
     from .dal.org_autonomy_mode import OrgAutonomyModeDAL
+    from .dal.org_policy_settings import OrgPolicySettingsDAL
     from .dal.org_spend_ceiling import OrgSpendCeilingDAL
     from .dal.workflow_runs import WorkflowRunsDAL
 
@@ -379,6 +380,12 @@ class Container:
     # The autonomy route reads and sets it through this DAL. NOT yet consumed by
     # any enforcement path -- this ships the capability, not the wiring.
     autonomy_mode_dal: "OrgAutonomyModeDAL | None" = None
+    # Org-wide guardrails + retention policy (migration 0035), None on the
+    # memory backend. The org-policy-settings route reads and sets it through
+    # this DAL. NOT yet consumed by any enforcement path for any of the four
+    # guardrails -- see dal/org_policy_settings.py for the per-guardrail
+    # honesty accounting; this ships the capability, not the wiring.
+    policy_settings_dal: "OrgPolicySettingsDAL | None" = None
     # Read-only `audit_log` aggregation for the console's security-posture
     # screen (edge/routes/security.py). None on the memory backend, where there
     # is no `audit_log` table to aggregate. The SAME DAL TYPE the scheduled
@@ -780,12 +787,14 @@ async def build_container(settings: Settings | None = None) -> Container:
     from .dal.model_routing import ModelRoutingDAL
     from .dal.notifications import NotificationsDAL
     from .dal.org_autonomy_mode import OrgAutonomyModeDAL
+    from .dal.org_policy_settings import OrgPolicySettingsDAL
     from .dal.org_spend_ceiling import OrgSpendCeilingDAL
     from .dal.workflow_runs import WorkflowRunsDAL
 
     cost_ledger = CostLedgerDAL(db) if db is not None else None
     spend_ceiling_dal = OrgSpendCeilingDAL(db) if db is not None else None
     autonomy_mode_dal = OrgAutonomyModeDAL(db) if db is not None else None
+    policy_settings_dal = OrgPolicySettingsDAL(db) if db is not None else None
     # ONE audit_log reader, TWO consumers. The scheduled fraud sweep harvests
     # its window through `signal_sources` below; the console's security-posture
     # route reads the same window plus the rows behind it through
@@ -1001,6 +1010,7 @@ async def build_container(settings: Settings | None = None) -> Container:
         llm=llm, work_journal=work_journal, _closers=closers, db=db,
         cost_ledger=cost_ledger, spend_ceiling_dal=spend_ceiling_dal,
         autonomy_mode_dal=autonomy_mode_dal,
+        policy_settings_dal=policy_settings_dal,
         security_activity_dal=security_activity_dal,
         model_routing_dal=model_routing_dal,
         workflow_runs_dal=workflow_runs_dal,

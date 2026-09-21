@@ -37,6 +37,7 @@ from .routes import (
     knowledge,
     models,
     notifications,
+    org_policy_settings,
     security,
     spend,
     tenants,
@@ -103,6 +104,7 @@ def create_app() -> FastAPI:
     app.include_router(security.router)
     app.include_router(spend.router)
     app.include_router(autonomy.router)
+    app.include_router(org_policy_settings.router)
     # Read-only, ledger-backed usage for the console's Billing screen. Reads the
     # same two sources as spend.router (ai_cost_ledger + org_spend_ceiling) at a
     # wider grain; it invents no plan or invoice data (see billing.py).
