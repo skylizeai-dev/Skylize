@@ -40,7 +40,7 @@ the copy/art/video/brand/creative/ops directors; brand/legal agents.
 - `creative.*` strategy; approvals
 
 ## 11. OPA Governance Requirements
-`allowed_tools`: `llm.generate`, `memory.search`, `bi.query`, `orchestrator.delegate`. Token `scope` ⊆ `allowed_tools`, validated signature → expiry → revocation → scope → budget → delegation. `governance_token_required = true`. `max_token_budget = 80000`, `max_execution_time_seconds = 420`. `human_in_loop_triggers`: `FIRST_EXTERNAL_LAUNCH`, `BRAND_LEGAL_SENSITIVE`.
+`allowed_tools`: `llm.generate`, `memory.search`, `bi.query`, `orchestrator.delegate`. Token `scope` ⊆ `allowed_tools`, validated signature → expiry → revocation → scope → budget → delegation. `governance_token_required = true`. `max_token_budget = 80000`, `max_execution_time_seconds = 420`, `budget_source = "contract"` (the agent's registered AgentContract). `human_in_loop_triggers`: `FIRST_EXTERNAL_LAUNCH`, `BRAND_LEGAL_SENSITIVE`.
 
 ## 12. Memory Requirements
 **Read:** `creative:*`, `brand:*`, `campaign:summary`. **Write:** `creative:strategy`, `creative:approvals`
