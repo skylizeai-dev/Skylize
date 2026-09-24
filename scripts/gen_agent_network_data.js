@@ -28,7 +28,13 @@ const OUT_CONSOLE = "app/Skylize-Console-Black/src/data/agentNetworkData.js";
 const CONTENT = require("./agent_content.js");
 
 /* ── canonical id remaps (mirror gen_agent_specs.js CANON_ID) ───────── */
-const CANON_ID = { vc_procurement: "vp_procurement" };
+// Empty by owner decision: `vc_procurement` is a real agent_id with its own
+// manifest row and five children; it is NOT renamed on any surface.
+const CANON_ID = {};
+// agent_content.js lookup key for ids whose content entry is keyed differently.
+// This is a CONTENT lookup only — it never changes an emitted agent_id.
+const CONTENT_KEY = { vc_procurement: "vp_procurement" };
+const contentFor = (id) => CONTENT[CONTENT_KEY[id] || id];
 // Duplicate role files on disk that should NOT appear as separate nodes.
 // `chief_product_officer` documents the same role as canonical `cpo`.
 const DROP_IDS = new Set(["chief_product_officer"]);
@@ -169,7 +175,8 @@ const TOOL_PURPOSE = {
   "orchestrator.delegate": "delegate work to reports",
 };
 function parseTools(id, lvl) {
-  const raw = (CONTENT[id] && CONTENT[id].tools) || LEVEL_TOOLS[lvl];
+  const c = contentFor(id);
+  const raw = (c && c.tools) || LEVEL_TOOLS[lvl];
   const names = (raw.match(/`([^`]+)`/g) || []).map((s) => s.replace(/`/g, ""));
   return names.map((name, i) => ({
     id: `${id}__t${i}`,
@@ -214,7 +221,7 @@ function humanizeId(id) {
 
 // Display NAME — the clean human title for the card heading.
 function nameFor(id) {
-  const c = CONTENT[id];
+  const c = contentFor(id);
   if (c && c.role) return c.role;
   return humanizeId(id);
 }
@@ -223,7 +230,7 @@ function nameFor(id) {
 // Prefer the first responsibility bullet, else the first sentence of the
 // mission, else a humanized id. Trimmed to keep cards tidy.
 function roleFor(id) {
-  const c = CONTENT[id] || {};
+  const c = contentFor(id) || {};
   let text = "";
   if (Array.isArray(c.resp) && c.resp[0]) text = c.resp[0];
   else if (c.mission) text = c.mission.split(/(?<=\.)\s/)[0];
