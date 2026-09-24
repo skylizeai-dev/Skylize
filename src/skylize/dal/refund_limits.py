@@ -9,7 +9,7 @@ predicate, so the RLS policy and the query agree rather than the query
 relying on RLS alone.
 
 BOTH TABLES ARE MINOR UNITS (cents), NOT MICRO-UNITS - the opposite of
-`org_spend_ceiling.ceiling_micros`. See migration 0031's docstring and design
+`org_spend_ceiling.ceiling_micros`. See migration 0036's docstring and design
 7.5.0's UNIT WARNING.
 
 `None` is never fabricated into a default (design 7.5.5 rule 4), exactly as

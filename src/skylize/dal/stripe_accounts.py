@@ -1,6 +1,6 @@
 """Stripe Connect account repository: identity + authority, no bearer token.
 
-Backs `ToolStripeProfile` (migration 0031, design 4.0.2). Every read and write
+Backs `ToolStripeProfile` (migration 0036, design 4.0.2). Every read and write
 goes through ``Database.tenant_session(org_id)`` AND carries an explicit
 ``org_id`` predicate, so the RLS policy and the query agree rather than the
 query relying on RLS alone - the same discipline as ``PgGcpWifRepository``

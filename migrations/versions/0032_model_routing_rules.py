@@ -1,8 +1,13 @@
 """model_routing_rules — the ORG-SCOPED logical-model routing table (RLS)
 
 Revision ID: 0032
-Revises: 0030
+Revises: 0031
 Create Date: 2026-09-20
+
+Re-chained from 0030 to 0031 during the origin/main sync that brought
+0031_backfill_owner_principal.py in as a sibling of 0030: both originally
+pointed at 0030, giving alembic two heads. Content unchanged; only this
+migration's place in the chain moved.
 
 WHAT THIS IS. The LLM gateway contract (adapters/llm/gateway.py:36) says the
 `model` an agent asks for is a LOGICAL name -- "default", "fast", "reasoning" --
@@ -77,7 +82,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "0032"
-down_revision: str | None = "0030"
+down_revision: str | None = "0031"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

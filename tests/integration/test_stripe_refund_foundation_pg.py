@@ -1,7 +1,9 @@
 """org_stripe_accounts / org_refund_authority_limits / org_refund_review_thresholds
 - REAL Postgres, proven as the app role.
 
-NOT RUN IN THIS SESSION. Written 2026-09-19 against migration 0031 and
+NOT RUN IN THIS SESSION. Written 2026-09-19 against migration 0031
+(renumbered to 0036 during the origin/main sync that resolved a revision-id
+collision with 0031_backfill_owner_principal.py) and
 dal/stripe_accounts.py, dal/refund_limits.py by direct reading, mirroring
 tests/integration/test_gcp_wif_pg.py and test_org_spend_ceiling_pg.py's
 established patterns - but this session has no SKYLIZE_TEST_DB_URL /
@@ -10,7 +12,7 @@ executed against a live database. Do not treat their presence as proof the
 migration applies cleanly or that RLS holds - only a real run against
 Postgres proves that (CLAUDE.md's testing section).
 
-Covers the guarantees only a database can prove (migration 0031):
+Covers the guarantees only a database can prove (migration 0036):
   * migration shape: FORCE RLS and a `tenant_isolation` policy on all three
     tables, the CHECK constraints, and the two org_stripe_accounts uniqueness
     guarantees (global on stripe_account_id, partial on (org_id, livemode));
