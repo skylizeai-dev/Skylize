@@ -625,7 +625,14 @@ async def build_container(settings: Settings | None = None) -> Container:
     work_journal = WorkJournal(journal_repo)
 
     # Human-user auth (register/login/refresh + /me).
-    user_auth = UserAuthService(user_repo, settings)
+    #
+    # `principal_repo` is passed as the PrincipalProvisioner so a newly registered
+    # owner gets a `principal` row and the co-work manifest grants; without one,
+    # every co-work turn is denied with PrincipalNotFound. Both concrete
+    # repositories implement the narrow write port (the read port stays
+    # read-only). This does NOT let registration create a tenant — the org must
+    # already exist, provisioned by an operator.
+    user_auth = UserAuthService(user_repo, settings, provisioner=principal_repo)
 
     # Content gate: deterministic prompt-injection screen. Constructed HERE,
     # ahead of the knowledge store and deliverables, so the very same shared

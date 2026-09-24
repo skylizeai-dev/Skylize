@@ -59,6 +59,29 @@ ScopeId = str
 
 AuthorityLevel = Literal["executive", "vp", "director", "manager", "worker"]
 
+# The scopes an org owner is seeded with when their principal is provisioned:
+# cowork_agent's manifest and nothing more. Both are non-irreversible — one
+# generates text, one only reads — so this seed makes ONE agent usable by the
+# person who owns the org rather than minting a superuser.
+#
+# Stated here as literals rather than imported from `contracts.mvp.cowork`:
+# `models` is the pure kernel, and a contract is a mutable product artifact whose
+# `allowed_tools` may legitimately grow. If it did, an import would silently widen
+# every owner's standing authority as a side effect of a contract edit. A test
+# asserts the two agree, so drift is caught rather than inherited.
+#
+# Migrations 0020 and 0031 write the same two scopes and deliberately do NOT
+# import this constant: a migration must keep running against the schema it
+# shipped with, not follow application code that moves underneath it. This is the
+# constant the RUNTIME path uses; the migrations are history and stay frozen.
+COWORK_SEED_MANIFEST: tuple[str, ...] = ("llm.generate", "memory.search")
+
+# `principal_grant.created_by` is NOT NULL with no default (migration 0019), so
+# every writer must supply provenance. 'seed' marks a platform-provisioned grant
+# as opposed to one a human justified, matching migrations 0020/0031 so an
+# auditor sees one marker for one kind of row whichever path wrote it.
+PRINCIPAL_SEED_CREATED_BY = "seed"
+
 
 class ActorKind(str, Enum):
     """Who performed the journal entry. The co-work agent must be able to say

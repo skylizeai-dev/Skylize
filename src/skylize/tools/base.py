@@ -295,6 +295,37 @@ class ToolApprovalProfile(BaseModel):
     irreversible: bool = True
 
 
+class ToolStripeProfile(BaseModel):
+    """Declares a tool DEPENDENT ON A LIVE STRIPE CONNECT TRUST.
+
+    The fifth PROXY-ENFORCED gate on `ToolProxy.invoke` (the sixth profile on
+    `ToolDefinition`; `approval` is enforced in the agent tool loop, not the
+    proxy - see `ToolApprovalProfile`). A separate profile from
+    `ToolOAuthProfile` for the same reason `ToolWifProfile` is one: a Connect
+    trust is not a stored grant. No token is held, nothing is refreshed, and
+    there is no expiry - every call authenticates with the PLATFORM secret key
+    plus a `Stripe-Account` header naming the connected account
+    (design doc 06_integrations/stripe_connector_design.md 4.5.1).
+
+    Deliberately absent: `label` (4.0.2's partial unique index permits at most
+    one live and one test connection per org, so there is nothing to select
+    between), `livemode` (a property of the running process, never of the
+    tool), and any amount/charge-id field (that already belongs to
+    `ToolSpendProfile.amount_field`; naming it twice invites the two readings
+    to diverge, which on a refund path is a money bug).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    #: The Stripe OAuth scope this tool REQUIRES, checked against the scope
+    #: Stripe actually GRANTED (org_stripe_accounts.scope), never against the
+    #: scope requested. 'read_write' for any mutating verb.
+    required_scope: str = Field(min_length=1)
+    #: True for any verb that creates or modifies a charge, refund, or transfer.
+    #: Turns on the direct-charge invariant check (design doc 2.0) at the gate.
+    mutates_money: bool = True
+
+
 class ToolDefinition(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", arbitrary_types_allowed=True)
 
@@ -328,6 +359,12 @@ class ToolDefinition(BaseModel):
     #: the conversation prefix a resumption needs) exist at once. See
     #: AgentExecutionService._govern_tool_turn.
     approval: ToolApprovalProfile | None = None
+    #: Non-None marks this tool dependent on a live Stripe Connect trust; see
+    #: `ToolStripeProfile`. Defaults to None like the profiles above, so every
+    #: tool registered before this field existed is unaffected. The SIXTH
+    #: profile on `ToolDefinition` but the FIFTH proxy-enforced gate (`approval`
+    #: is not proxy-enforced).
+    stripe: ToolStripeProfile | None = None
 
     @model_validator(mode="after")
     def _spend_fields_exist_on_their_schemas(self) -> ToolDefinition:
@@ -704,4 +741,50 @@ class ToolWifTargetNotAllowed(ToolWifDenied):
 
     Deny-by-default over the customer's own allow-list: an org that has federated
     a project has NOT thereby authorised every machine in it. Absence is denial.
+    """
+
+
+class ToolStripeDenied(ToolPermissionDenied):
+    """A Stripe-dependent tool call was refused at the Connect trust gate.
+
+    Subclasses `ToolPermissionDenied` for the same reason `ToolWifDenied` does:
+    it routes through the SAME denied-call audit path the scope, budget and
+    credential denials use. Never raised directly - always one of the
+    subclasses below, so a caller can branch on the TYPE and an operator is
+    never handed the wrong remedy (design doc 4.5.4: connect the account,
+    re-consent for a wider scope, fix the tool registration).
+    """
+
+
+class ToolStripeNotConnected(ToolStripeDenied):
+    """No live `org_stripe_accounts` row for this org and running mode.
+
+    REMEDY: connect Stripe (for this mode). Deliberately NO fallback between
+    live and test modes in either direction (design 4.0.2) - a live process
+    must never silently act through a test connection, and a test process must
+    never reach live money.
+    """
+
+
+class ToolStripeScopeInsufficient(ToolStripeDenied):
+    """The connected account's GRANTED scope does not cover what this tool
+    requires.
+
+    Checked against `org_stripe_accounts.scope` as Stripe actually granted it,
+    never against what the platform requested - the platform's own attenuation
+    invariant applied at the gate (design 4.5.4, integration_inputs.md:31-35).
+    REMEDY: the customer re-consents for a wider scope.
+    """
+
+
+class ToolStripeChargeTypeForbidden(ToolStripeDenied):
+    """The validated input would create a destination/separate charge, not a
+    direct charge.
+
+    The hard constraint of design doc 2.0: destination charges silently invert
+    dispute and fraud liability onto Skylize. Refused when the input carries
+    `on_behalf_of`, `transfer_data`, or `application_fee_amount` in their
+    destination-charge sense. REMEDY: fix the tool registration or the caller's
+    request - this is never a customer-facing remedy, because a correctly
+    built direct-charge tool cannot trigger it.
     """

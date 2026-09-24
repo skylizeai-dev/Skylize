@@ -31,7 +31,14 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any, cast
 
-from ..app.principal.models import AuthorityLevel, Grant, GrantSource, Principal
+from ..app.principal.models import (
+    COWORK_SEED_MANIFEST,
+    PRINCIPAL_SEED_CREATED_BY,
+    AuthorityLevel,
+    Grant,
+    GrantSource,
+    Principal,
+)
 from .connection import Database
 
 
@@ -103,3 +110,88 @@ class PgPrincipalRepository:
                 principal_id,
             )
             return [_grant(r) for r in rows]
+
+    async def provision_owner_principal(
+        self, *, org_id: str, principal_id: str, display_name: str
+    ) -> bool:
+        """Provision an org owner's principal + co-work grants. Idempotent.
+
+        Returns True when this call created the principal row, False when one was
+        already present. The return value is provenance for the caller's log, not
+        a success flag: False is an ordinary, expected outcome (a retry, or an
+        owner migration 0020/0031 already seeded), and callers must not treat it
+        as an error.
+
+        WHY THIS IS SAFE TO RE-RUN, which is the whole point of it existing.
+        Registration writes `users` and then calls this, and the two writes
+        cannot share a transaction (see `tenant_session` note below). A crash
+        between them must therefore be recoverable by simply calling this again.
+        Both statements are conditional writes, mirroring migration 0020/0031
+        exactly: `principal` uses ON CONFLICT on its (org_id, principal_id)
+        primary key, and `principal_grant` -- which has no natural unique key,
+        since grant_id defaults to gen_random_uuid() -- uses WHERE NOT EXISTS on
+        (org_id, principal_id, scope, source). Calling this twice inserts nothing
+        the second time and violates nothing.
+
+        The grants are inserted unconditionally of whether the principal row was
+        new, deliberately: a crash could have landed the principal and none of
+        its grants, and a principal with no grants is a person the authority
+        kernel knows but who can do nothing. Keying the grant insert off `created`
+        would make that state permanent.
+
+        WHY `tenant_session` AND NOT `admin_session`. `principal` and
+        `principal_grant` carry ENABLE + FORCE ROW LEVEL SECURITY with the
+        `tenant_isolation` policy (migration 0019), whose WITH CHECK requires
+        `org_id = current_setting('skylize.org_id')`. `admin_session` sets no such
+        GUC (dal/connection.py:83-88), and the runtime role is verified at startup
+        to be neither SUPERUSER nor BYPASSRLS (bootstrap.py:291-317), so an INSERT
+        issued there would be refused by the policy rather than silently
+        cross-tenant. Binding the org is mandatory here, not stylistic -- and it
+        is also what makes the write tenant-safe: the policy, not this method,
+        guarantees the row lands in the caller's own org.
+
+        `principal_id` MUST be `str(users.user_id)`. That derivation is fixed by
+        migration 0020's identity decision and repeated in 0031; this is the
+        third site bound by it, and the one an application path uses. Diverging
+        here splits the identity space between registered and seeded owners.
+
+        NO SPEND ENVELOPE. This writes `principal` and `principal_grant` only.
+        A principal existing must not imply a configured budget -- `spend_envelope`
+        carries a ceiling and an `over_ceiling_behavior` that are governance
+        decisions someone has to actually make.
+        """
+        async with self._db.tenant_session(org_id) as conn:
+            created = await conn.fetchval(
+                """
+                INSERT INTO principal (principal_id, org_id, display_name,
+                                       authority_level)
+                VALUES ($1, $2, $3, 'executive')
+                ON CONFLICT (org_id, principal_id) DO NOTHING
+                RETURNING principal_id
+                """,
+                principal_id,
+                org_id,
+                display_name,
+            )
+
+            for scope in COWORK_SEED_MANIFEST:
+                await conn.execute(
+                    """
+                    INSERT INTO principal_grant (org_id, principal_id, scope,
+                                                 source, created_by)
+                    SELECT $1, $2, $3, 'position', $4
+                     WHERE NOT EXISTS (
+                               SELECT 1 FROM principal_grant g
+                                WHERE g.org_id = $1
+                                  AND g.principal_id = $2
+                                  AND g.scope = $3
+                                  AND g.source = 'position'
+                           )
+                    """,
+                    org_id,
+                    principal_id,
+                    scope,
+                    PRINCIPAL_SEED_CREATED_BY,
+                )
+
+        return created is not None
