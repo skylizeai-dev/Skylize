@@ -111,6 +111,40 @@ const LEVEL_BUDGET = {
   executive: [120000, 600], vp: [80000, 420], director: [40000, 300],
   manager: [20000, 180], worker: [10000, 90],
 };
+
+// ---------- REAL contract budgets (the level table above is only a fallback) ----------
+// LEVEL_BUDGET is a per-authority-level GUESS. For an agent that has a registered
+// AgentContract, the guess is usually WRONG (11 of the 15 roster agents with a
+// contract disagreed with it), and a spec printing a wrong number while looking
+// authoritative is worse than one printing nothing.
+//
+// The truth lives in MVP_REGISTRY (Python). This generator cannot read it: the
+// spec gate runs this file in a sandbox holding only docs/ + scripts/
+// (scripts/check_agent_network_data.py:159-169), with no src/. So the values are
+// exported ahead of time by scripts/export_contract_budgets.py into the committed
+// scripts/contract_budgets.json, which the sandbox DOES copy.
+//
+// Mirror any change here in scripts/gen_agent_network_data.js.
+const CONTRACT_BUDGETS = (() => {
+  const p = path.join(__dirname, "contract_budgets.json");
+  return JSON.parse(fs.readFileSync(p, "utf8")).budgets;
+})();
+
+// Resolve an agent's budget envelope plus an HONEST provenance marker.
+//   contract                    -> the agent's real AgentContract values
+//   level_default_unimplemented -> no contract exists; this is the level guess
+function budgetFor(id, lvl) {
+  const c = CONTRACT_BUDGETS[id];
+  if (c) {
+    return {
+      budget: c.max_token_budget,
+      secs: c.max_execution_time_seconds,
+      source: "contract",
+    };
+  }
+  const [budget, secs] = LEVEL_BUDGET[lvl];
+  return { budget, secs, source: "level_default_unimplemented" };
+}
 const LEVEL_HITL = {
   executive: ["SPEND_OVER_CEILING","BRAND_LEGAL_SENSITIVE","LOW_CONFIDENCE_IRREVERSIBLE"],
   vp: ["FIRST_EXTERNAL_LAUNCH","BRAND_LEGAL_SENSITIVE","SPEND_OVER_CEILING"],
@@ -152,7 +186,7 @@ function render(p) {
   const esc = chain(p).join(" > ");
   const d = DATA[id] || DATA[diskId] || DATA[CONTENT_KEY[diskId]] || {};
   const role = d.role || id.replace(/_/g, " ");
-  const [budget, secs] = LEVEL_BUDGET[lvl];
+  const { budget, secs, source: budgetSource } = budgetFor(id, lvl);
   const tools = d.tools || LEVEL_TOOLS[lvl];
   const hitl = (d.hitl || LEVEL_HITL[lvl]);
   const failure = d.failure || LEVEL_FAILURE[lvl];
@@ -177,7 +211,7 @@ function render(p) {
   lines.push(`## 8. Dependencies`); lines.push(d.deps || "The Orchestrator, Governance Authority, Decision Engine, Memory service, and its parent/children in the org tree."); lines.push("");
   lines.push(`## 9. Events Consumed`); lines.push(bullets(d.consumes || ["`decision.approved` (work authorized to proceed)", "relevant departmental events on its channel"])); lines.push("");
   lines.push(`## 10. Events Produced`); lines.push(bullets(d.produces || ["its typed output, wrapped as a department event by the Orchestrator", "`audit.action_recorded` for every action"])); lines.push("");
-  lines.push(`## 11. OPA Governance Requirements`); lines.push(`\`allowed_tools\`: ${tools}. Token \`scope\` ⊆ \`allowed_tools\`, validated signature → expiry → revocation → scope → budget → delegation. \`governance_token_required = true\`. \`max_token_budget = ${budget}\`, \`max_execution_time_seconds = ${secs}\`. \`human_in_loop_triggers\`: ${hitl.length ? hitl.map(h=>"`"+h+"`").join(", ") : "none (bounded task)"}.`); lines.push("");
+  lines.push(`## 11. OPA Governance Requirements`); lines.push(`\`allowed_tools\`: ${tools}. Token \`scope\` ⊆ \`allowed_tools\`, validated signature → expiry → revocation → scope → budget → delegation. \`governance_token_required = true\`. \`max_token_budget = ${budget}\`, \`max_execution_time_seconds = ${secs}\`, \`budget_source = "${budgetSource}"\`${budgetSource === "contract" ? " (the agent's registered AgentContract)" : " (no registered AgentContract — these are authority-level defaults, NOT a governed envelope)"}. \`human_in_loop_triggers\`: ${hitl.length ? hitl.map(h=>"`"+h+"`").join(", ") : "none (bounded task)"}.`); lines.push("");
   // `memoryNote` replaces the whole section-12 body. It exists because an agent
   // whose contract declares memory_read_access=[] AND memory_write_access=[] is
   // making a POSITIVE statement (this agent is deliberately stateless), which the

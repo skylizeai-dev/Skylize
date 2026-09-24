@@ -118,10 +118,42 @@ function deptOf(p) {
 // Mirror any entry added here in scripts/gen_agent_specs.js DEPT_OVERRIDE.
 const DEPT_OVERRIDE = { director_growth: "growth" };
 
-/* ── per-level budget (mirror gen_agent_specs.js LEVEL_BUDGET[0]) ───── */
+/* ── per-level budget FALLBACK (mirror gen_agent_specs.js LEVEL_BUDGET[0]) ── */
+// Only used for an agent with NO registered AgentContract. See below.
 const LEVEL_BUDGET = {
   executive: 120000, vp: 80000, director: 40000, manager: 20000, worker: 10000,
 };
+// mirror gen_agent_specs.js LEVEL_BUDGET[1]
+const LEVEL_SECONDS = {
+  executive: 600, vp: 420, director: 300, manager: 180, worker: 90,
+};
+
+/* ── REAL contract budgets (mirror gen_agent_specs.js CONTRACT_BUDGETS) ── */
+// The level table is a guess and is usually wrong for a contract-backed agent.
+// The truth is MVP_REGISTRY (Python), which no generator can read at generation
+// time (the spec gate sandboxes docs/ + scripts/ only, with no src/ --
+// scripts/check_agent_network_data.py:159-169). scripts/export_contract_budgets.py
+// exports it ahead of time to the committed scripts/contract_budgets.json.
+const CONTRACT_BUDGETS = JSON.parse(
+  fs.readFileSync(path.join(__dirname, "contract_budgets.json"), "utf8"),
+).budgets;
+
+// Same resolution + provenance marker as gen_agent_specs.js budgetFor().
+function budgetFor(id, lvl) {
+  const c = CONTRACT_BUDGETS[id];
+  if (c) {
+    return {
+      tokenBudget: c.max_token_budget,
+      maxExecutionTimeSeconds: c.max_execution_time_seconds,
+      budgetSource: "contract",
+    };
+  }
+  return {
+    tokenBudget: LEVEL_BUDGET[lvl],
+    maxExecutionTimeSeconds: LEVEL_SECONDS[lvl],
+    budgetSource: "level_default_unimplemented",
+  };
+}
 
 /* ── deterministic pseudo-random in [0,1) seeded by string ──────────── */
 function hash(str) {
@@ -147,7 +179,7 @@ function deriveRuntime(id, lvl) {
   else if (r < 0.97) status = "queued";
   else status = "error";
 
-  const budget = LEVEL_BUDGET[lvl];
+  const { tokenBudget: budget, maxExecutionTimeSeconds, budgetSource } = budgetFor(id, lvl);
   // utilisation: executing agents run hotter; workers churn more tasks.
   const baseUtil = status === "executing" ? 0.55 + seeded(id, "util") * 0.4
                  : status === "queued" ? seeded(id, "util") * 0.18
@@ -157,7 +189,14 @@ function deriveRuntime(id, lvl) {
   const taskScale = { executive: 220, vp: 520, director: 460, manager: 900, worker: 2600 }[lvl];
   const tasksCompleted = Math.round(taskScale * (0.35 + seeded(id, "tasks") * 1.3));
 
-  return { status, tokenBudget: budget, tokensUsed, tasksCompleted };
+  return {
+    status,
+    tokenBudget: budget,
+    maxExecutionTimeSeconds,
+    budgetSource,
+    tokensUsed,
+    tasksCompleted,
+  };
 }
 
 /* ── tool parsing: agent_content tools string OR level default ──────── */
@@ -333,6 +372,13 @@ function agentLine(a) {
   return (
     `  { id: ${JSON.stringify(a.id)}, name: ${JSON.stringify(a.name)}, role: ${JSON.stringify(a.role)}, ` +
     `authority: ${JSON.stringify(a.authority)}, department: ${JSON.stringify(a.department)}, ` +
+    // NOTE: `maxExecutionTimeSeconds` and `budgetSource` are computed by
+    // deriveRuntime() but NOT emitted here yet. Emitting them would add excess
+    // properties to the `AgentNode[]` literal in the generated .ts, which
+    // `tsc --noEmit` (website/package.json:10) rejects until the two fields are
+    // declared in website/src/components/console/agent-network.types.ts. That
+    // file is outside this change's ownership; add the fields there and then
+    // append them to this line. `tokenBudget` IS already contract-correct.
     `status: ${JSON.stringify(a.status)}, tokenBudget: ${a.tokenBudget}, tokensUsed: ${a.tokensUsed}, ` +
     `tasksCompleted: ${a.tasksCompleted}, reportsTo: ${a.reportsTo === null ? "null" : JSON.stringify(a.reportsTo)}, ` +
     `escalationPath: [${a.escalationPath.map((s) => JSON.stringify(s)).join(", ")}], ` +

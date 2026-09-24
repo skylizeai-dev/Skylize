@@ -38,7 +38,7 @@ Meta/TikTok adapters; capital allocation.
 - `sales.campaign_proposed`
 
 ## 11. OPA Governance Requirements
-`allowed_tools`: `llm.generate`, `memory.search`, `orchestrator.delegate`. Token `scope` ⊆ `allowed_tools`, validated signature → expiry → revocation → scope → budget → delegation. `governance_token_required = true`. `max_token_budget = 40000`, `max_execution_time_seconds = 300`. `human_in_loop_triggers`: `BRAND_LEGAL_SENSITIVE`, `SPEND_OVER_CEILING`.
+`allowed_tools`: `llm.generate`, `memory.search`, `orchestrator.delegate`. Token `scope` ⊆ `allowed_tools`, validated signature → expiry → revocation → scope → budget → delegation. `governance_token_required = true`. `max_token_budget = 40000`, `max_execution_time_seconds = 300`, `budget_source = "level_default_unimplemented"` (no registered AgentContract — these are authority-level defaults, NOT a governed envelope). `human_in_loop_triggers`: `BRAND_LEGAL_SENSITIVE`, `SPEND_OVER_CEILING`.
 
 ## 12. Memory Requirements
 **Read:** `marketing:paid:*`, `campaign:*`. **Write:** `marketing:paid:plans`
