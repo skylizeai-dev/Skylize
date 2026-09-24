@@ -88,9 +88,13 @@ function deptOf(p) {
 const DEPT_OVERRIDE = { director_growth: "growth" };
 
 // canonical agent_id override for manifest-flagged typos (path preserved on disk)
-const CANON_ID = { vc_procurement: "vp_procurement" };
+// Empty by owner decision: `vc_procurement` is a real agent_id and is NOT
+// renamed on any surface. Mirror any entry in gen_agent_network_data.js.
+const CANON_ID = {};
+// agent_content.js lookup key for ids whose content entry is keyed differently.
+// CONTENT lookup only — it never changes an emitted agent_id.
+const CONTENT_KEY = { vc_procurement: "vp_procurement" };
 const KNOWN_ISSUE = {
-  vc_procurement: "Path uses `vc_procurement` (typo); canonical `agent_id` is `vp_procurement`.",
   cpo: "Duplicate CPO role on disk (`CPO/Product/cpo.md` and `CPO/chief_product_officer.md`); canonical executive is `cpo`.",
   chief_product_officer: "Duplicate CPO role file; canonical executive `agent_id` is `cpo`. This file documents the same role.",
 };
@@ -146,7 +150,7 @@ function render(p) {
   const lvl = level(diskId);
   const dept = DEPT_OVERRIDE[id] || DEPT_OVERRIDE[diskId] || deptOf(p);
   const esc = chain(p).join(" > ");
-  const d = DATA[id] || DATA[diskId] || {};
+  const d = DATA[id] || DATA[diskId] || DATA[CONTENT_KEY[diskId]] || {};
   const role = d.role || id.replace(/_/g, " ");
   const [budget, secs] = LEVEL_BUDGET[lvl];
   const tools = d.tools || LEVEL_TOOLS[lvl];

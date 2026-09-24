@@ -70,9 +70,10 @@ GENERATED = (
     ROOT / "app" / "Skylize-Console-Black" / "src" / "data" / "agentNetworkData.js",
 )
 
-#: Canonical id remaps, mirroring CANON_ID in both generators. A manifest row
-#: whose path carries the `vc_procurement` typo still covers `vp_procurement`.
-CANON_ID = {"vc_procurement": "vp_procurement"}
+#: Canonical id remaps, mirroring CANON_ID in both generators. Empty by owner
+#: decision: `vc_procurement` is a real agent_id with its own manifest row and
+#: is NOT renamed on any surface. Keep this in step with both generators.
+CANON_ID: dict[str, str] = {}
 
 #: Registered agent_ids that deliberately have no spec file and no manifest row
 #: (owner ruling 4). Documented in docs/03_agents/00_organization_chart.md §6.1.
