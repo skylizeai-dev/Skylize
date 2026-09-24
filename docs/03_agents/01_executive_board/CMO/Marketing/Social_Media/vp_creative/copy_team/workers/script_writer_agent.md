@@ -39,7 +39,7 @@ The Orchestrator, Governance Authority, Decision Engine, Memory service, and its
 - `creative.copy_drafted`
 
 ## 11. OPA Governance Requirements
-`allowed_tools`: `llm.generate`, `memory.search`. Token `scope` ⊆ `allowed_tools`, validated signature → expiry → revocation → scope → budget → delegation. `governance_token_required = true`. `max_token_budget = 10000`, `max_execution_time_seconds = 90`. `human_in_loop_triggers`: none (bounded task).
+`allowed_tools`: `llm.generate`, `memory.search`. Token `scope` ⊆ `allowed_tools`, validated signature → expiry → revocation → scope → budget → delegation. `governance_token_required = true`. `max_token_budget = 12000`, `max_execution_time_seconds = 120`, `budget_source = "contract"` (the agent's registered AgentContract). `human_in_loop_triggers`: none (bounded task).
 
 ## 12. Memory Requirements
 **Read:** `creative:copy:scripts`, `brand:voice`. **Write:** none — proposes via `memory.write_requested`; the Memory service persists (workers do not write stores directly).

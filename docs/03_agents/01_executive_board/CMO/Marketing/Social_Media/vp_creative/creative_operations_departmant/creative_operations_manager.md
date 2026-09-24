@@ -39,7 +39,7 @@ The Orchestrator, Governance Authority, Decision Engine, Memory service, and its
 - workflow/approval routing events
 
 ## 11. OPA Governance Requirements
-`allowed_tools`: `llm.generate`, `memory.search`, `orchestrator.delegate`. Token `scope` ⊆ `allowed_tools`, validated signature → expiry → revocation → scope → budget → delegation. `governance_token_required = true`. `max_token_budget = 20000`, `max_execution_time_seconds = 180`. `human_in_loop_triggers`: `BRAND_LEGAL_SENSITIVE`.
+`allowed_tools`: `llm.generate`, `memory.search`, `orchestrator.delegate`. Token `scope` ⊆ `allowed_tools`, validated signature → expiry → revocation → scope → budget → delegation. `governance_token_required = true`. `max_token_budget = 10000`, `max_execution_time_seconds = 120`, `budget_source = "contract"` (the agent's registered AgentContract). `human_in_loop_triggers`: `BRAND_LEGAL_SENSITIVE`.
 
 ## 12. Memory Requirements
 **Read:** `creative:ops:*`, `creative:summary`. **Write:** `creative:ops:workflow`

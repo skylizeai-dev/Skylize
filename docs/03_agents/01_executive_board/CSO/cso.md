@@ -41,7 +41,7 @@ Strategic bet hit-rate; intelligence timeliness; expansion outcomes; portfolio r
 - `decision.*` on strategy proposals
 
 ## 11. OPA Governance Requirements
-`allowed_tools`: `llm.generate`, `memory.search`, `bi.query`, `orchestrator.delegate`. Token `scope` ⊆ `allowed_tools`, validated signature → expiry → revocation → scope → budget → delegation. `governance_token_required = true`. `max_token_budget = 120000`, `max_execution_time_seconds = 600`. `human_in_loop_triggers`: `SPEND_OVER_CEILING`, `BRAND_LEGAL_SENSITIVE`, `LOW_CONFIDENCE_IRREVERSIBLE`.
+`allowed_tools`: `llm.generate`, `memory.search`, `bi.query`, `orchestrator.delegate`. Token `scope` ⊆ `allowed_tools`, validated signature → expiry → revocation → scope → budget → delegation. `governance_token_required = true`. `max_token_budget = 120000`, `max_execution_time_seconds = 600`, `budget_source = "level_default_unimplemented"` (no registered AgentContract — these are authority-level defaults, NOT a governed envelope). `human_in_loop_triggers`: `SPEND_OVER_CEILING`, `BRAND_LEGAL_SENSITIVE`, `LOW_CONFIDENCE_IRREVERSIBLE`.
 
 ## 12. Memory Requirements
 **Read:** `strategy:*`, `org:*`, `market:*`. **Write:** `strategy:directives`, `strategy:intelligence`
