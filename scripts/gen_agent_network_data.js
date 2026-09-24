@@ -372,14 +372,12 @@ function agentLine(a) {
   return (
     `  { id: ${JSON.stringify(a.id)}, name: ${JSON.stringify(a.name)}, role: ${JSON.stringify(a.role)}, ` +
     `authority: ${JSON.stringify(a.authority)}, department: ${JSON.stringify(a.department)}, ` +
-    // NOTE: `maxExecutionTimeSeconds` and `budgetSource` are computed by
-    // deriveRuntime() but NOT emitted here yet. Emitting them would add excess
-    // properties to the `AgentNode[]` literal in the generated .ts, which
-    // `tsc --noEmit` (website/package.json:10) rejects until the two fields are
-    // declared in website/src/components/console/agent-network.types.ts. That
-    // file is outside this change's ownership; add the fields there and then
-    // append them to this line. `tokenBudget` IS already contract-correct.
-    `status: ${JSON.stringify(a.status)}, tokenBudget: ${a.tokenBudget}, tokensUsed: ${a.tokensUsed}, ` +
+    // Field order mirrors the AgentNode interface. `budgetSource` travels with
+    // the two numbers it qualifies: a consumer that shows a budget without it
+    // cannot tell a real contract ceiling from a level-default placeholder.
+    `status: ${JSON.stringify(a.status)}, tokenBudget: ${a.tokenBudget}, ` +
+    `maxExecutionTimeSeconds: ${a.maxExecutionTimeSeconds}, ` +
+    `budgetSource: ${JSON.stringify(a.budgetSource)}, tokensUsed: ${a.tokensUsed}, ` +
     `tasksCompleted: ${a.tasksCompleted}, reportsTo: ${a.reportsTo === null ? "null" : JSON.stringify(a.reportsTo)}, ` +
     `escalationPath: [${a.escalationPath.map((s) => JSON.stringify(s)).join(", ")}], ` +
     `tools: [${tools}] },`
