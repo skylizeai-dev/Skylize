@@ -1,9 +1,9 @@
 """
 The MVP agent contract set: the governed creative + growth team.
 
-23 contracts spanning executive, creative, brand, growth, security, seo,
-finance, sdr, agency, and cowork. `ALL_MVP_CONTRACTS` is the authoritative list
-the registry seeds from.
+33 contracts spanning executive, creative, brand, growth, security, safety,
+seo, finance, sdr, agency, infrastructure, and cowork. `ALL_MVP_CONTRACTS` is
+the authoritative list the registry seeds from.
 
 The cowork entry is the one `lifecycle_status="sandbox"` contract: it is
 registered so the tool proxy can resolve it, but nothing schedules it -- it is
@@ -18,9 +18,10 @@ from .brand import ALL_BRAND_CONTRACTS
 from .cowork import ALL_COWORK_CONTRACTS
 from .creative import ALL_CREATIVE_CONTRACTS
 from .executive import ALL_EXECUTIVE_CONTRACTS
-from .finance import cfo_agent
+from .finance import ALL_FINANCE_CONTRACTS, cfo_agent
 from .growth import ALL_GROWTH_CONTRACTS
 from .infrastructure import ALL_INFRASTRUCTURE_CONTRACTS
+from .safety import ALL_SAFETY_CONTRACTS
 from .sdr import ALL_SDR_CONTRACTS
 from .security import ALL_SECURITY_CONTRACTS
 from .seo import ALL_SEO_CONTRACTS
@@ -33,6 +34,12 @@ ALL_MVP_CONTRACTS: list[AgentContract] = [
     *ALL_SECURITY_CONTRACTS,  # fraud_detection_agent
     *ALL_SEO_CONTRACTS,  # seo_keyword_agent (tool-enabled: search.web + memory.search)
     cfo_agent,  # finance's first tool-enabled capability: budget_summary
+    # The finance and safety governance tiers. Their contracts were written
+    # with the rest but never imported, so cfo, vp_finance, the four finance
+    # directors and the whole LLM-safety tier resolved to AgentNotRegistered --
+    # the CFO and the CSO were undefined to the running system.
+    *ALL_FINANCE_CONTRACTS,
+    *ALL_SAFETY_CONTRACTS,
     # The stateful executor for GCP containment. Holds exactly one
     # externally-mutating tool and always defers to a human.
     *ALL_INFRASTRUCTURE_CONTRACTS,
