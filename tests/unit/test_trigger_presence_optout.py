@@ -107,10 +107,10 @@ def test_every_other_contract_keeps_the_default() -> None:
 @pytest.mark.asyncio
 async def test_every_other_contract_decides_exactly_as_before() -> None:
     """The byte-identical claim, measured against an independent restatement of
-    the old rule -- across all 22 non-cowork contracts, both the ones that
+    the old rule -- across all 32 non-cowork contracts, both the ones that
     approve and the ones that defer."""
     others = _others()
-    assert len(others) == 22, f"registry size changed: {len(others) + 1} contracts"
+    assert len(others) == 32, f"registry size changed: {len(others) + 1} contracts"
 
     for contract in others:
         result = await _evaluator().evaluate(
@@ -135,7 +135,13 @@ async def test_the_defer_and_approve_populations_are_both_non_empty() -> None:
     # joins the deferring population. That it lands HERE rather than in the
     # approving population is the property that keeps a customer's VM from ever
     # being stopped without a human verdict.
-    assert len(deferring) == 13, [c.agent_id for c in deferring]
+    #
+    # 23, not 13: registering the finance and safety tiers added ten contracts,
+    # and ALL TEN landed in the deferring population -- none in the approving
+    # one. That is the property worth pinning: the CFO, the CSO and the
+    # LLM-safety agents cannot reach a terminal approve without a human, which
+    # is what makes registering them safe rather than merely resolvable.
+    assert len(deferring) == 23, [c.agent_id for c in deferring]
     assert len(approving) == 9, [c.agent_id for c in approving]
 
 

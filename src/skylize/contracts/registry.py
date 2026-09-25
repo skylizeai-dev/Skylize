@@ -55,8 +55,9 @@ class AgentRegistry:
     The contract list is REQUIRED. There is deliberately no default set: a
     registry that silently loads "everything" makes the governed surface of a
     process a side effect of an import rather than an explicit choice.
-    ``MVP_REGISTRY = AgentRegistry(ALL_MVP_CONTRACTS)`` is the governed
-    Creative + Growth team; anything else must name its own list.
+    ``MVP_REGISTRY = AgentRegistry(ALL_MVP_CONTRACTS)`` is the governed roster
+    -- Creative + Growth plus the finance and safety tiers; anything else must
+    name its own list.
     """
 
     def __init__(self, contracts: list[AgentContract]) -> None:
@@ -124,5 +125,6 @@ class AgentRegistry:
         return AgentContract.model_validate(data)
 
 
-# The default MVP registry — the 23 governed creative + growth contracts.
+# The default MVP registry — the 33 governed contracts: creative + growth, plus
+# the finance and safety tiers.
 MVP_REGISTRY = AgentRegistry(ALL_MVP_CONTRACTS)
