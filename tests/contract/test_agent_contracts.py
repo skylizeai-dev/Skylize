@@ -50,12 +50,20 @@ EXPECTED_MVP_AGENTS = {
     # infrastructure: the stateful executor for GCP containment. Holds the only
     # externally-mutating GCP verb and always defers to a human.
     "infrastructure_executor",
+    # finance governance tier (finance.py). Written with the rest but never
+    # imported until now, so these resolved to AgentNotRegistered.
+    "cfo", "vp_finance", "director_capital_allocation", "director_fpanda",
+    "director_risk", "director_treasury",
+    # safety tier (safety.py). Same story: the CSO and the LLM-safety agents
+    # were undefined to the running system.
+    "chief_security_officer", "director_ai_safety", "llm_safety_agent",
+    "prompt_injection_agent",
 }
 
 
 def test_registry_loads_expected_mvp_agents() -> None:
     assert set(MVP_REGISTRY.agent_ids()) == EXPECTED_MVP_AGENTS
-    assert len(MVP_REGISTRY.all()) == 23
+    assert len(MVP_REGISTRY.all()) == 33
 
 
 def test_agent_ids_are_unique_and_snake_case() -> None:

@@ -29,9 +29,17 @@
       "max_token_budget": 120000,
       "max_execution_time_seconds": 600
     },
+    "cfo": {
+      "max_token_budget": 120000,
+      "max_execution_time_seconds": 600
+    },
     "cfo_agent": {
       "max_token_budget": 40000,
       "max_execution_time_seconds": 300
+    },
+    "chief_security_officer": {
+      "max_token_budget": 60000,
+      "max_execution_time_seconds": 420
     },
     "cmo": {
       "max_token_budget": 100000,
@@ -53,8 +61,28 @@
       "max_token_budget": 4000,
       "max_execution_time_seconds": 45
     },
+    "director_ai_safety": {
+      "max_token_budget": 50000,
+      "max_execution_time_seconds": 360
+    },
+    "director_capital_allocation": {
+      "max_token_budget": 40000,
+      "max_execution_time_seconds": 300
+    },
+    "director_fpanda": {
+      "max_token_budget": 40000,
+      "max_execution_time_seconds": 300
+    },
     "director_growth": {
       "max_token_budget": 30000,
+      "max_execution_time_seconds": 240
+    },
+    "director_risk": {
+      "max_token_budget": 35000,
+      "max_execution_time_seconds": 240
+    },
+    "director_treasury": {
+      "max_token_budget": 35000,
       "max_execution_time_seconds": 240
     },
     "fraud_detection_agent": {
@@ -73,6 +101,14 @@
       "max_token_budget": 8000,
       "max_execution_time_seconds": 60
     },
+    "llm_safety_agent": {
+      "max_token_budget": 20000,
+      "max_execution_time_seconds": 120
+    },
+    "prompt_injection_agent": {
+      "max_token_budget": 15000,
+      "max_execution_time_seconds": 90
+    },
     "script_writer_agent": {
       "max_token_budget": 12000,
       "max_execution_time_seconds": 120
@@ -90,6 +126,10 @@
       "max_execution_time_seconds": 60
     },
     "vp_creative": {
+      "max_token_budget": 80000,
+      "max_execution_time_seconds": 420
+    },
+    "vp_finance": {
       "max_token_budget": 80000,
       "max_execution_time_seconds": 420
     }

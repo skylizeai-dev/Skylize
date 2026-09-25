@@ -143,6 +143,26 @@ _AGENT_DELIVERABLE_TYPE: dict[str, str] = {
     # a document would misrepresent a report of a real mutation to a customer's
     # infrastructure as a piece of content.
     "infrastructure_executor": "other",
+    # The finance governance tier. Every one of these emits a financial RULING
+    # -- an allocation approved, a reallocation vetoed, a ledger reconciled --
+    # and the vocabulary has no finance term at all (`cfo_agent` above is
+    # already "other" for the same reason). `strategy_doc` would over-claim in
+    # exactly the way it would for `ceo`/`cmo`: these contracts decide, they do
+    # not author a strategy.
+    "cfo": "other",
+    "vp_finance": "other",
+    "director_capital_allocation": "other",
+    "director_fpanda": "other",
+    "director_risk": "other",
+    "director_treasury": "other",
+    # The safety tier. These produce safety verdicts and containment decisions,
+    # the same shape of artefact as `fraud_detection_agent` above: a control
+    # record, not content. `research_report` would misrepresent a block as a
+    # piece of analysis someone commissioned.
+    "chief_security_officer": "other",
+    "director_ai_safety": "other",
+    "llm_safety_agent": "other",
+    "prompt_injection_agent": "other",
     # Outreach drafts. NOT `email_copy`: the contract does not fix the channel,
     # so the type would be right only when the channel happens to be email.
     "sdr_outreach_agent": "other",
