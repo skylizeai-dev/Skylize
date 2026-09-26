@@ -42,7 +42,7 @@ Profitable growth (ROAS, CAC, LTV); brand consistency; creative win-rate; launch
 - `decision.*` on marketing proposals
 
 ## 11. OPA Governance Requirements
-`allowed_tools`: `llm.generate`, `memory.search`, `bi.query`, `orchestrator.delegate`. Token `scope` ⊆ `allowed_tools`, validated signature → expiry → revocation → scope → budget → delegation. `governance_token_required = true`. `max_token_budget = 120000`, `max_execution_time_seconds = 600`. `human_in_loop_triggers`: `SPEND_OVER_CEILING`, `BRAND_LEGAL_SENSITIVE`, `LOW_CONFIDENCE_IRREVERSIBLE`.
+`allowed_tools`: `llm.generate`, `memory.search`, `bi.query`, `orchestrator.delegate`. Token `scope` ⊆ `allowed_tools`, validated signature → expiry → revocation → scope → budget → delegation. `governance_token_required = true`. `max_token_budget = 100000`, `max_execution_time_seconds = 540`, `budget_source = "contract"` (the agent's registered AgentContract). `human_in_loop_triggers`: `SPEND_OVER_CEILING`, `BRAND_LEGAL_SENSITIVE`, `LOW_CONFIDENCE_IRREVERSIBLE`.
 
 ## 12. Memory Requirements
 **Read:** `marketing:*`, `creative:summary`, `brand:*`, `campaign:summary`. **Write:** `marketing:strategy`, `brand:guardrails`

@@ -1,9 +1,7 @@
-# Agent: `vp_procurement`
+# Agent: `vc_procurement`
 
 **Authority level:** `vp` · **Department:** `procurement` · **Escalation path:** `coo > human_owner`
 **Related:** [00_organization_chart.md](../../../00_organization_chart.md) · [agent_governance.md](../../../agent_governance.md) · [agent_contract_registry.md](../../../agent_contract_registry.md)
-
-> **Known issue (from manifest):** Path uses `vc_procurement` (typo); canonical `agent_id` is `vp_procurement`. Path preserved on disk; this spec uses the canonical `agent_id`.
 
 ---
 
@@ -25,10 +23,10 @@ Escalation path: `coo > human_owner`. On a beyond-authority decision or a `retry
 Procurement savings; vendor risk; sourcing cycle time.
 
 ## 6. Inputs
-`skylize.schemas.procurement.VpProcurementIn` — the scoped work item it consumes (validated against its contract `input_schema`).
+`skylize.schemas.procurement.VcProcurementIn` — the scoped work item it consumes (validated against its contract `input_schema`).
 
 ## 7. Outputs
-`skylize.schemas.procurement.VpProcurementOut` — its produced artifact, wrapped by the Orchestrator into the correct event.
+`skylize.schemas.procurement.VcProcurementOut` — its produced artifact, wrapped by the Orchestrator into the correct event.
 
 ## 8. Dependencies
 The Orchestrator, Governance Authority, Decision Engine, Memory service, and its parent/children in the org tree.
@@ -42,7 +40,7 @@ The Orchestrator, Governance Authority, Decision Engine, Memory service, and its
 - `audit.action_recorded` for every action
 
 ## 11. OPA Governance Requirements
-`allowed_tools`: `llm.generate`, `memory.search`, `bi.query`, `orchestrator.delegate`. Token `scope` ⊆ `allowed_tools`, validated signature → expiry → revocation → scope → budget → delegation. `governance_token_required = true`. `max_token_budget = 80000`, `max_execution_time_seconds = 420`. `human_in_loop_triggers`: `FIRST_EXTERNAL_LAUNCH`, `BRAND_LEGAL_SENSITIVE`, `SPEND_OVER_CEILING`.
+`allowed_tools`: `llm.generate`, `memory.search`, `bi.query`, `orchestrator.delegate`. Token `scope` ⊆ `allowed_tools`, validated signature → expiry → revocation → scope → budget → delegation. `governance_token_required = true`. `max_token_budget = 80000`, `max_execution_time_seconds = 420`, `budget_source = "level_default_unimplemented"` (no registered AgentContract — these are authority-level defaults, NOT a governed envelope). `human_in_loop_triggers`: `FIRST_EXTERNAL_LAUNCH`, `BRAND_LEGAL_SENSITIVE`, `SPEND_OVER_CEILING`.
 
 ## 12. Memory Requirements
 **Read:** `procurement:*`, `org:summary`. **Write:** `procurement:strategy`, `procurement:approvals`
