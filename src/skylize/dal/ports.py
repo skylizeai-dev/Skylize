@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 from uuid import UUID
 
 if TYPE_CHECKING:
@@ -676,3 +676,35 @@ class UncheckedContentRow:
     content_markdown: str
     created_at: datetime
     backlog: int
+
+
+class NotificationRecorder(Protocol):
+    """The write half of the notifications feed, as `app/` sees it.
+
+    `AgentExecutionService` only ever RECORDS notifications; the list/mark-read
+    reads are the console's, not the agent runtime's. So the port it depends on
+    is exactly one method. The concrete `dal.notifications.NotificationsDAL`
+    satisfies it and also carries the read side, but `app/` must not import that
+    class directly -- it reaches `dal.connection` -> asyncpg, which the
+    "Application logic contains no SQL" contract forbids. Same reason the rows
+    above are ports rather than DAL imports.
+
+    `kind` and `severity` are the same string unions the DAL validates against
+    its CHECK constraints (migration 0034); they are restated here rather than
+    imported so this module keeps its no-driver promise.
+
+    BEST EFFORT, like the implementation: `record` never raises and returns the
+    new id, or None when it gave up. A caller that cares can tell; none has to.
+    """
+
+    async def record(
+        self,
+        *,
+        org_id: str,
+        kind: Literal["hitl.approval_requested", "governance.action_denied"],
+        severity: Literal["info", "warning", "critical"],
+        title: str,
+        body: str,
+        correlation_id: UUID | None = None,
+        notification_id: UUID | None = None,
+    ) -> UUID | None: ...

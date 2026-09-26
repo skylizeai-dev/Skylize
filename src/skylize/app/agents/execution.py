@@ -50,8 +50,12 @@ from ...app.notifications.slack import SlackApprovalNotifier
 from ...contracts.base import AgentContract, SessionKind
 from ...contracts.registry import AgentRegistry, resolve_model
 from ...contracts.token import ValidationStage, validate_tool_call
-from ...dal.notifications import NotificationsDAL
-from ...dal.ports import DeliverableRow, HitlEscalation, HitlQueueRepository
+from ...dal.ports import (
+    DeliverableRow,
+    HitlEscalation,
+    HitlQueueRepository,
+    NotificationRecorder,
+)
 from ...events.bus import EventBus
 from ...schemas.hitl import HitlReplayEnvelope, HitlResumptionPoint
 from ...schemas.events.decision import (
@@ -235,7 +239,7 @@ class AgentExecutionService:
         governed_org_ids: frozenset[str] = frozenset(),
         principal_authority: AuthorityProvider | None = None,
         slack_notifier: SlackApprovalNotifier | None = None,
-        notifications: NotificationsDAL | None = None,
+        notifications: NotificationRecorder | None = None,
     ) -> None:
         self._registry = registry
         self._llm = llm
