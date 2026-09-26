@@ -507,12 +507,15 @@ def test_exactly_two_agents_are_allowlisted() -> None:
     """
     assert PILOT_AGENT_IDS == frozenset({PILOT_AGENT_ID, CONTENT_REVIEW_AGENT_ID})
     assert len(PILOT_AGENT_IDS) == 2
-    assert len(ALL_MVP_CONTRACTS) == 23
+    assert len(ALL_MVP_CONTRACTS) == 33
 
 
 def test_every_other_agent_is_refused() -> None:
     others = [c.agent_id for c in ALL_MVP_CONTRACTS if c.agent_id not in PILOT_AGENT_IDS]
-    assert len(others) == 21
+    # 31, not 21: registering the finance and safety tiers widened the roster,
+    # not the autonomous surface. Every one of the ten -- the CFO, the CSO, the
+    # LLM-safety agents -- is refused below, which is the whole claim.
+    assert len(others) == 31
     for agent_id in others:
         with pytest.raises(ContractNotAutonomous):
             assert_pilot_agent(agent_id)
