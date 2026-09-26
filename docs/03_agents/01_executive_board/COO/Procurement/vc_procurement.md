@@ -6,7 +6,7 @@
 ---
 
 ## 1. Mission
-Run procurement under the COO — sourcing, vendor management, and contract procurement to cost and risk targets. (Path `vc_procurement`; canonical `vp_procurement`.)
+Run procurement under the COO — sourcing, vendor management, and contract procurement to cost and risk targets. (This content is keyed under `vp_procurement` for the generator's CONTENT_KEY lookup; the real agent_id is `vc_procurement`, which is NOT renamed.)
 
 ## 2. Responsibilities
 - Operate procurement directors and managers.
