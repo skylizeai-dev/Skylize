@@ -29,7 +29,7 @@ dependencies = [
     # System of record
     "asyncpg>=0.29",
     "alembic>=1.13",
-    "sqlalchemy>=2.0",          # Alembic plumbing only; runtime queries use raw asyncpg
+    "sqlalchemy[asyncio]>=2.0", # Alembic plumbing only; runtime queries use raw asyncpg. The [asyncio] extra pulls greenlet, which migrations/env.py's async_engine_from_config requires.
 
     # Event bus + cache + queue
     "redis[hiredis]>=5.0",
