@@ -164,6 +164,22 @@ existing matcher or the `proxy()` body (e.g. branching `consoleProxyGate` vs a M
 that exceeds approved scope - STOP and report. The approved shape is one added array element
 plus, at most, a dispatch that leaves the Console branch byte-for-byte unchanged.
 
+> **IMPLEMENTATION DEVIATION (recorded 2026-09-27, owner-confirmed).** The design above
+> specified, at minimum, "one additive matcher line". In implementation, adding the matcher
+> element ALONE proved broken: `proxy()` delegates every matched request to
+> `consoleProxyGate`, which exempts only `/console/login` and `/api/console/session`, so an
+> unauthenticated `/api/my-day/*` request - INCLUDING the My Day login itself - would be
+> `401`'d by the Console cookie check (`website/src/lib/skylize/proxy-gate.ts:13,36-48`).
+> The implemented change is therefore the larger of the two shapes this section already
+> permits: the matcher element PLUS a Console-preserving early-return dispatch
+> (`if (pathname.startsWith("/api/my-day")) return mydayProxyGate(request);`) placed BEFORE
+> the unchanged `return consoleProxyGate(request);`, and a one-line `import` of
+> `mydayProxyGate` (defined in the My-Day-owned `myday-handler.ts`, which strips the two
+> spoofable identity headers and passes through - defense-in-depth only, no cookie check).
+> This is ~3 added lines rather than one, but it is a PURE ADDITION: nothing is removed or
+> restructured, and Console's branch and behaviour are byte-for-byte unchanged (verified in
+> the diff). Recorded here per owner instruction rather than silently absorbed.
+
 ### 4.0.3 Login / logout / refresh endpoints `[DERIVED]`
 
 Minimal Stage 1 surface, each a `/api/my-day/*` route:
