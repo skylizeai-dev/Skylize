@@ -28,14 +28,16 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
-from fastapi.testclient import TestClient
+from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient
 
 from skylize.dal.activity_signals import AuditActivitySignalDAL
 from skylize.dal.connection import Database
-from skylize.edge.gateway import create_app
+from skylize.edge.routes import security as security_routes
 
 from .conftest import (
     APP_DB_URL,
@@ -226,11 +228,25 @@ async def test_route_reports_real_counts_and_no_score_controls_or_badges(
         ("agent.executed", "denied", inside),
     ])
     try:
-        app = create_app()
+        # httpx AsyncClient + ASGITransport runs the app IN-PROCESS on THIS event
+        # loop, so the `app_db` pool (created on this loop by the fixture) is driven
+        # on the same loop the route handler runs on. starlette's sync TestClient
+        # runs the ASGI app on a SEPARATE portal loop, so the injected pool would be
+        # touched cross-loop and asyncpg raises "another operation is in progress" /
+        # "attached to a different loop" at connection release. Same fix, same
+        # reasoning as test_agent_execute_governed_e2e.py. The security route reads
+        # only `container.security_activity_dal`, so a SimpleNamespace container
+        # satisfies `get_container` without building (or its lifespan) the full one.
+        app = FastAPI()
+        app.state.container = SimpleNamespace(
+            security_activity_dal=AuditActivitySignalDAL(app_db)
+        )
         install_dev_header_auth(app)
-        with TestClient(app) as client:
-            client.app.state.container.security_activity_dal = AuditActivitySignalDAL(app_db)
-            resp = client.get(
+        app.include_router(security_routes.router)
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            resp = await client.get(
                 "/api/v1/security/activity",
                 headers={"X-Dev-Org": org, "X-Dev-User": "u1", "X-Dev-Roles": "owner"},
             )
