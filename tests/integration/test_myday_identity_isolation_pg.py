@@ -104,6 +104,24 @@ def _orgs() -> tuple[str, str]:
     return f"myday_a_{suffix}", f"myday_b_{suffix}"
 
 
+async def _seed_tenant(admin_conn, org: str) -> None:
+    """Create the `tenants` row `register` requires before it can mint an owner.
+
+    `users.org_id` is a FK onto `tenants` (migration 0001), and the register
+    route does NOT create the tenant — it requires an operator-provisioned one to
+    exist already (user_service.py:113-120). Without this seed the register POST
+    raises ForeignKeyViolationError on `users_org_id_fkey` and 500s, which is
+    exactly what the first CI run of this file hit. Seeded via the admin
+    connection (no RLS on `tenants`), ON CONFLICT DO NOTHING so a re-run is safe.
+    Mirrors test_postgres_isolation.py:36-41.
+    """
+    await admin_conn.execute(
+        "INSERT INTO tenants (org_id, display_name, oidc_issuer) VALUES ($1,$2,$3) "
+        "ON CONFLICT (org_id) DO NOTHING",
+        org, org, "https://issuer.example",
+    )
+
+
 @pytest_asyncio.fixture()
 async def myday_client(
     migrated_public: None,
@@ -194,6 +212,10 @@ async def test_two_org_identity_isolation_live(myday_client, admin_conn) -> None
     email_b = f"owner+{org_b}@example.com"
     try:
         # Two different orgs, each its own owner (the only multi-tenant shape).
+        # The `tenants` rows must exist first: register mints an owner but does
+        # NOT create the tenant (user_service.py:113-120).
+        await _seed_tenant(admin_conn, org_a)
+        await _seed_tenant(admin_conn, org_b)
         await _register(client, org_a, email_a)
         await _register(client, org_b, email_b)
 
@@ -248,6 +270,7 @@ async def test_missing_and_invalid_bearer_are_fail_closed(myday_client, admin_co
     org_a, _ = _orgs()
     email_a = f"owner+{org_a}@example.com"
     try:
+        await _seed_tenant(admin_conn, org_a)
         await _register(client, org_a, email_a)
         access_a, _ = await _login(client, email_a)
 
