@@ -21,6 +21,15 @@ export interface AgentNode {
   department: string;
   status: NodeStatus;
   tokenBudget: number;
+  maxExecutionTimeSeconds: number;
+  /**
+   * Where `tokenBudget` / `maxExecutionTimeSeconds` came from.
+   * `"contract"` means the agent has a registered AgentContract and these are
+   * its real ceilings. `"level_default_unimplemented"` means no contract
+   * exists and these are authority-level placeholders — do not present them
+   * as governance facts.
+   */
+  budgetSource: "contract" | "level_default_unimplemented";
   tokensUsed: number;
   tasksCompleted: number;
   /** Org reporting line. `null` only for the single root (CEO). */
