@@ -39,7 +39,7 @@ BI aggregates; security patterns; the Decision Engine safety-veto.
 - fraud verdicts to `sales`/`governance`
 
 ## 11. OPA Governance Requirements
-`allowed_tools`: `llm.generate`, `memory.search`. Token `scope` ⊆ `allowed_tools`, validated signature → expiry → revocation → scope → budget → delegation. `governance_token_required = true`. `max_token_budget = 10000`, `max_execution_time_seconds = 90`. `human_in_loop_triggers`: `SECURITY_SEVERITY_HIGH`, `LOW_CONFIDENCE_IRREVERSIBLE`.
+`allowed_tools`: `llm.generate`, `memory.search`. Token `scope` ⊆ `allowed_tools`, validated signature → expiry → revocation → scope → budget → delegation. `governance_token_required = true`. `max_token_budget = 12000`, `max_execution_time_seconds = 90`, `budget_source = "contract"` (the agent's registered AgentContract). `human_in_loop_triggers`: `SECURITY_SEVERITY_HIGH`, `LOW_CONFIDENCE_IRREVERSIBLE`.
 
 ## 12. Memory Requirements
 **Read:** `security:fraud:*`, `security:patterns`. **Write:** `security:fraud:signals`
