@@ -1,6 +1,7 @@
 # Skylize - My Day Server-Side Session Revocation (Design)
 
-> **Status: DRAFT - AWAITING OWNER APPROVAL. Design only; no code in this pass.**
+> **Status: APPROVED by the owner 2026-10-14, with the two decisions recorded in
+> 2.0.3 and 7.0.** Build scope: sections 2.0.1-2.0.3 only, no migration.
 > **Date compiled:** 2026-10-14, against `origin/main` @ `7604fa8`.
 > **Resolves:** finding N2 (BLOCKING for My Day Stage 2) of the PR #27 security
 > review: logout revokes nothing server-side, and refresh rotation has a race.
@@ -125,15 +126,28 @@ session) and becomes:
 4. The CSRF guard from PR #31 already refuses a cross-site `DELETE` before any of
    this runs.
 
-`[OWNER-DECISION-REQUIRED]` **If the backend call fails** (network error, 5xx), the
-cookie is still cleared, but the refresh token stays valid until expiry. Options:
-- (a) `204` anyway and log a warning. Recommended: logout must never appear to fail
-  to the user, and the residual risk only applies to someone who already holds the
-  cookie.
-- (b) Return `502` with the cookie still cleared, so the UI can warn
-  "signed out on this device; server-side sign-out did not complete".
+`[OWNER-DECIDED 2026-10-14]` **If the backend call fails** (network error, timeout,
+5xx, or any non-204 answer): the BFF still clears the cookie and returns `204`, and it
+**logs the failure** at error level (never silently swallowed). The log line names the
+failure class and status, never the token.
 
-### 2.0.4 Absolute session lifetime in the BFF `[PROPOSED]`
+**The trade-off, stated plainly.** When the backend revocation fails, the refresh
+token stays valid server-side until it expires (up to 14 days, `config.py:111`). The
+risk is bounded by the cookie having been deleted from this browser: it only matters
+to someone who already captured the cookie, or the cookie key, before logout. The
+user is never shown a logout that "failed", and the error log is the operator's
+signal that a token outlived its session. The rejected alternative was returning
+`502` with the cookie cleared, which would surface an error for an outcome the user
+cannot act on.
+
+If the cookie does not decrypt (absent, tampered, or wrong key), there is no refresh
+token to send. The BFF clears the cookie and returns `204` without calling the
+backend; that is the normal path, not a failure.
+
+### 2.0.4 Absolute session lifetime in the BFF `[PROPOSED - NOT IN THIS BUILD]`
+
+Not in the approved build list (logout endpoint, BFF logout, race fix, tests).
+Kept here as a proposal for a separate small change.
 
 `[CODE-VERIFIED]` The cookie payload carries `iat`, but nothing checks it
 (`myday-session.ts:201`). Add a check in `readMyDaySession`
@@ -152,17 +166,10 @@ is useful even once refresh-on-401 is wired.
 
 **Sections 2.0.1-2.0.4 need NO migration.** The atomic consume and logout only use
 `token_id`, `expires_at` and `revoked_at`, and `UPDATE` is already granted.
+This build stays migration-free.
 
-**Reuse detection DOES need a migration** `[OWNER-DECISION-REQUIRED]`, and is
-proposed as a separate, later step. Industry practice is that when an already-rotated
-refresh token is presented again, the whole token family is revoked, because one of
-the two holders is a thief. That needs lineage, for example:
-- `family_id UUID NOT NULL` (the first token's id, copied on every rotation), and
-- an index on `family_id`.
-With it, a refused consume of a token whose `revoked_at` is set can run
-`UPDATE ... SET revoked_at=now() WHERE family_id=$1 AND revoked_at IS NULL`.
-Without it, the atomic consume still stops the race in 1.0.2, but a thief who
-rotates FIRST keeps a live family while the victim is forced to log in again.
+Reuse detection would need a migration; per the owner's decision it is not part of
+this build. See section 7.0.
 
 "Log out everywhere" (`revoke all tokens for user_id`) is possible with the existing
 `idx_refresh_tokens_user`, but needs an authenticated route; it is out of scope here.
@@ -205,8 +212,9 @@ rotates FIRST keeps a live family while the victim is forced to log in again.
 | 1. Atomic `consume_refresh_token`; `refresh()` uses it | `dal/ports.py`, `dal/users.py`, `dal/memory.py`, `app/auth/user_service.py` | No |
 | 2. `POST /api/v1/auth/logout` | `edge/routes/auth.py`, `app/auth/user_service.py` | No |
 | 3. BFF `DELETE` calls logout | `myday-client.ts`, `app/api/my-day/session/route.ts` | No |
-| 4. `iat` absolute lifetime | `myday-handler.ts` | No |
-| 5. (Optional, separate) reuse detection | new migration, `dal/users.py`, `user_service.py` | **Yes** |
+
+Not in this build: 2.0.4 (`iat` lifetime, separate small change) and reuse
+detection (section 7.0, needs a migration).
 
 **Tests the implementation must carry:**
 - a real-Postgres integration test that fires two concurrent refreshes with the same
@@ -219,8 +227,43 @@ rotates FIRST keeps a live family while the victim is forced to log in again.
 
 ---
 
+## 7.0 - Next phase: refresh-token reuse detection (NOT in this build)
+
+`[OWNER-DECIDED 2026-10-14]` Out of scope for this build, which stays migration-free.
+Recorded here so it is not lost.
+
+**What it is worth.** The atomic consume (2.0.1) stops two concurrent refreshes from
+both succeeding, but it cannot tell WHO won. If a thief replays a stolen refresh token
+before the victim does, the thief's rotation wins and keeps a live token family; the
+victim's next refresh is refused and they simply log in again, while the thief stays
+in for up to 14 days. Reuse detection closes that: when an already-consumed token is
+presented again, one of its two holders must be a thief, so the WHOLE family is
+revoked and both are forced back to login.
+
+**Why it needs a migration.** `user_refresh_tokens` has no lineage
+(`0008_users.py:52-62`): nothing links a token to the one it replaced. It needs, for
+example:
+- `family_id UUID NOT NULL` (the first token's id, copied on every rotation), and
+- an index on `family_id`.
+A refused consume of an already-revoked token could then run
+`UPDATE user_refresh_tokens SET revoked_at = now()
+ WHERE family_id = $1 AND revoked_at IS NULL`.
+Existing rows need a backfill (for example `family_id = token_id`), which is safe
+because each existing row becomes its own family.
+
+**Why it is a separate piece of work.**
+- It changes a table on the login path, so it needs its own migration review,
+  a downgrade path, and a backfill plan; none of that is needed for this build.
+- It changes what a refused refresh does (from "refuse this token" to "revoke the
+  family"), which can log out a legitimate user on a benign double-submit. That
+  behaviour needs its own decision and tests.
+- The race fix and logout are useful on their own and should not wait for it.
+
+---
+
 ## Sign-off
 
-- Owner approval required before any of section 6.0 is implemented.
-- Open decisions: 2.0.3 (behaviour when the backend logout call fails) and 3.0
-  (whether to add reuse detection, which needs a migration).
+- **Approved:** owner, 2026-10-14.
+- **Decisions:** 2.0.3, backend logout failure means cookie cleared, `204`, failure
+  logged at error level; 7.0, reuse detection deferred to a later, separate change.
+- **Build scope:** section 6.0 steps 1-3 plus tests, no migration, Console untouched.
