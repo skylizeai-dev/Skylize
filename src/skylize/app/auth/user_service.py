@@ -9,7 +9,7 @@ from uuid import UUID, uuid4
 import logging
 
 from ...config import Settings
-from ...dal.ports import RefreshTokenRow, UserRepository, UserRow
+from ...dal.ports import UserRepository, UserRow
 from ..principal.provider import PrincipalProvisioner
 from .passwords import hash_password, verify_password
 from .tokens import InvalidTokenError, create_access_token, create_refresh_token, decode_token
@@ -186,7 +186,12 @@ class UserAuthService:
         await self._repo.update_last_login(user.user_id, datetime.now(timezone.utc))
         return await self._mint_pair(user)
 
-    async def refresh(self, *, refresh_token: str) -> LoginResult:
+    def _refresh_claims(self, refresh_token: str) -> tuple[UUID, UUID]:
+        """Verify a refresh token's signature and type; return (jti, sub).
+
+        Raises InvalidCredentialsError for anything that is not a well-formed,
+        validly signed refresh token minted by this server.
+        """
         try:
             claims = decode_token(refresh_token, self._settings.jwt_secret)
         except InvalidTokenError as exc:
@@ -194,22 +199,43 @@ class UserAuthService:
 
         if claims.get("type") != "refresh":
             raise InvalidCredentialsError("not a refresh token")
+        try:
+            return UUID(str(claims["jti"])), UUID(str(claims["sub"]))
+        except (KeyError, ValueError) as exc:
+            raise InvalidCredentialsError("invalid refresh token") from exc
 
-        jti = UUID(claims["jti"])
-        rt_row: RefreshTokenRow | None = await self._repo.get_refresh_token(jti)
-        if rt_row is None or rt_row.revoked_at is not None:
-            raise InvalidCredentialsError("refresh token revoked or not found")
-        if rt_row.expires_at <= datetime.now(timezone.utc):
-            raise InvalidCredentialsError("refresh token expired")
+    async def refresh(self, *, refresh_token: str) -> LoginResult:
+        jti, sub = self._refresh_claims(refresh_token)
 
-        # Rotate: revoke the consumed token before issuing the new pair.
-        await self._repo.revoke_refresh_token(jti)
+        # Rotate. `consume_refresh_token` is ONE conditional write: of two
+        # concurrent refreshes with the same token, exactly one wins and the other
+        # is refused. The former read-then-revoke let both through and minted two
+        # live token families (design doc 1.0.2). Ownership (`sub` must own the
+        # `jti` row) is inside the same condition, so a mismatched token is
+        # refused WITHOUT consuming the other user's row.
+        if not await self._repo.consume_refresh_token(jti, sub):
+            raise InvalidCredentialsError("refresh token revoked, expired, or not found")
 
-        user = await self._repo.get_by_id(UUID(claims["sub"]))
+        user = await self._repo.get_by_id(sub)
         if user is None or not user.is_active:
             raise InvalidCredentialsError("user not found or inactive")
 
         return await self._mint_pair(user)
+
+    async def logout(self, *, refresh_token: str) -> bool:
+        """Revoke the refresh token's own row. Never raises for a bad token.
+
+        Proof of possession of the refresh token IS the authorization: only its
+        own `jti` can be revoked, and no user or token id is taken from the
+        caller. Returns True when a live token was revoked, False otherwise
+        (invalid signature, wrong type, unknown, expired, or already revoked).
+        The route answers 204 either way, so the result is for logging only.
+        """
+        try:
+            jti, sub = self._refresh_claims(refresh_token)
+        except InvalidCredentialsError:
+            return False
+        return await self._repo.consume_refresh_token(jti, sub)
 
     async def get_user(self, user_id: UUID) -> UserRow | None:
         return await self._repo.get_by_id(user_id)

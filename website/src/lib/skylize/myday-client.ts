@@ -203,6 +203,21 @@ export async function mydayRefresh(
 }
 
 /**
+ * Server-side logout: POST /api/v1/auth/logout with { refresh_token }. The
+ * backend revokes that refresh token's own row and answers 204 for any
+ * schema-valid body. Like refresh it carries no Authorization header: possession
+ * of the refresh token is the whole authorization. Throws MyDayApiError on a
+ * network failure, timeout, or any non-2xx answer; the caller decides what that
+ * means (the BFF logout still clears the cookie and logs it).
+ */
+export async function mydayLogout(refreshToken: string): Promise<void> {
+  await myDayFetch<null>("/api/v1/auth/logout", {
+    method: "POST",
+    body: { refresh_token: refreshToken },
+  });
+}
+
+/**
  * Authenticated GET, forwarding the user's access JWT as the Bearer credential
  * (the backend's human-user path reads it at src/skylize/edge/deps.py:63-66).
  * Use for reads such as GET /api/v1/auth/me. A backend 401 here means the access
