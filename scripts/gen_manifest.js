@@ -119,7 +119,6 @@ for (const [p, size] of files) {
   const name = aid(p), lvl = level(name), parent = findParent(p), ch = chain(p).join(" > ");
   const segs = p.split("/"), notes = [];
   if (nameCount[name].length > 1) notes.push("DUPLICATE name x" + nameCount[name].length);
-  if (name === "vc_procurement") notes.push("RENAME->vp_procurement (vc typo)");
   if (name === "cpo" || name === "chief_product_officer") notes.push("DUP CPO role");
   if (name === "director_mna" || name === "director_m_and_a") notes.push("M&A naming variant");
   if (lvl === "UNKNOWN") notes.push("AUTHORITY UNINFERRABLE");
