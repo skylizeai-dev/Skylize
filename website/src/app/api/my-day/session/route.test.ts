@@ -36,16 +36,22 @@ const { MYDAY_SESSION_COOKIE_NAME, decryptSession, deriveMyDayKeyMaterial } =
 
 const BASE = "https://app.test/api/my-day/session";
 
+// A browser sends Sec-Fetch-Site on every request from our own pages; the
+// cross-site guard (myday-csrf.ts) refuses state-changing requests without it
+// or a matching Origin, so these well-formed requests carry it.
 function postReq(body: unknown): NextRequest {
   return new NextRequest(BASE, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", "Sec-Fetch-Site": "same-origin" },
     body: JSON.stringify(body),
   });
 }
 
 function deleteReq(): NextRequest {
-  return new NextRequest(BASE, { method: "DELETE" });
+  return new NextRequest(BASE, {
+    method: "DELETE",
+    headers: { "Sec-Fetch-Site": "same-origin" },
+  });
 }
 
 beforeEach(() => {
