@@ -208,16 +208,13 @@ class UserAuthService:
         jti, sub = self._refresh_claims(refresh_token)
 
         # Rotate. `consume_refresh_token` is ONE conditional write: of two
-        # concurrent refreshes with the same token, exactly one gets the owner
-        # back and the other is refused. The former read-then-revoke let both
-        # through and minted two live token families (design doc 1.0.2).
-        owner = await self._repo.consume_refresh_token(jti)
-        if owner is None:
+        # concurrent refreshes with the same token, exactly one wins and the other
+        # is refused. The former read-then-revoke let both through and minted two
+        # live token families (design doc 1.0.2). Ownership (`sub` must own the
+        # `jti` row) is inside the same condition, so a mismatched token is
+        # refused WITHOUT consuming the other user's row.
+        if not await self._repo.consume_refresh_token(jti, sub):
             raise InvalidCredentialsError("refresh token revoked, expired, or not found")
-        if owner != sub:
-            # Signature binds sub and jti together, so this cannot happen for a
-            # token we minted; refuse rather than rotate someone else's row.
-            raise InvalidCredentialsError("invalid refresh token")
 
         user = await self._repo.get_by_id(sub)
         if user is None or not user.is_active:
@@ -238,8 +235,7 @@ class UserAuthService:
             jti, sub = self._refresh_claims(refresh_token)
         except InvalidCredentialsError:
             return False
-        owner = await self._repo.consume_refresh_token(jti)
-        return owner is not None and owner == sub
+        return await self._repo.consume_refresh_token(jti, sub)
 
     async def get_user(self, user_id: UUID) -> UserRow | None:
         return await self._repo.get_by_id(user_id)

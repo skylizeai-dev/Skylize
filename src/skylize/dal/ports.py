@@ -276,14 +276,18 @@ class UserRepository(Protocol):
 
     async def revoke_refresh_token(self, token_id: UUID) -> None: ...
 
-    async def consume_refresh_token(self, token_id: UUID) -> UUID | None:
-        """Atomically mark a LIVE refresh token as used; return its owner's user_id.
+    async def consume_refresh_token(self, token_id: UUID, user_id: UUID) -> bool:
+        """Atomically mark a LIVE refresh token OWNED BY `user_id` as used.
 
-        A token is live when it exists, is not revoked, and has not expired. The
-        first caller to consume it gets the user_id; every later or concurrent
-        caller gets None. Implementations MUST settle that in the store with one
-        conditional write, never a read followed by a write: two refreshes of the
-        same token used to both succeed and mint two live token families
+        A token is consumable when it exists, belongs to `user_id`, is not
+        revoked, and has not expired. The first caller to consume it gets True;
+        every later or concurrent caller gets False. Ownership is part of the same
+        condition, so a token whose `sub` claim names a different user than the
+        row's owner is refused WITHOUT revoking that other user's row.
+
+        Implementations MUST settle all of this in the store with one conditional
+        write, never a read followed by a write: two refreshes of the same token
+        used to both succeed and mint two live token families
         (docs/06_integrations/myday_session_revocation_design.md, 1.0.2).
         """
         ...

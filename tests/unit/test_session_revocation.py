@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -49,18 +49,31 @@ async def test_consume_is_single_use() -> None:
     await repo.store_refresh_token(
         token_id, user_id, datetime.now(timezone.utc) + timedelta(days=1)
     )
-    assert await repo.consume_refresh_token(token_id) == user_id
-    assert await repo.consume_refresh_token(token_id) is None
+    assert await repo.consume_refresh_token(token_id, user_id) is True
+    assert await repo.consume_refresh_token(token_id, user_id) is False
 
 
 async def test_consume_refuses_expired_and_unknown() -> None:
     repo = InMemoryUserRepository()
-    expired = uuid4()
+    expired, owner = uuid4(), uuid4()
     await repo.store_refresh_token(
-        expired, uuid4(), datetime.now(timezone.utc) - timedelta(seconds=1)
+        expired, owner, datetime.now(timezone.utc) - timedelta(seconds=1)
     )
-    assert await repo.consume_refresh_token(expired) is None
-    assert await repo.consume_refresh_token(uuid4()) is None
+    assert await repo.consume_refresh_token(expired, owner) is False
+    assert await repo.consume_refresh_token(uuid4(), owner) is False
+
+
+async def test_consume_by_a_non_owner_refuses_and_leaves_the_row_live() -> None:
+    repo = InMemoryUserRepository()
+    token_id, owner, stranger = uuid4(), uuid4(), uuid4()
+    await repo.store_refresh_token(
+        token_id, owner, datetime.now(timezone.utc) + timedelta(days=1)
+    )
+    assert await repo.consume_refresh_token(token_id, stranger) is False
+    row = await repo.get_refresh_token(token_id)
+    assert row is not None and row.revoked_at is None
+    # The real owner can still use it.
+    assert await repo.consume_refresh_token(token_id, owner) is True
 
 
 # ── refresh rotation ─────────────────────────────────────────────────────────
@@ -90,6 +103,51 @@ async def test_a_rotated_token_cannot_be_refreshed_again() -> None:
         await svc.refresh(refresh_token=first.refresh_token)
     # The new token from the rotation is live.
     assert (await svc.refresh(refresh_token=second.refresh_token)).access_token
+
+
+async def _mismatched_token(svc: UserAuthService, repo: InMemoryUserRepository):
+    """User A's `sub` bound to user B's live `jti`, signed with the REAL key.
+
+    A refresh token is a bearer credential: B's genuine token presented by
+    anyone simply refreshes as B, and no check can tell the holder apart. What
+    the server CAN enforce is that a token's `sub` owns the row its `jti`
+    names. This forges exactly that mismatch (it needs the server secret, which
+    only a test or a key compromise has) and returns (token, b_refresh, b_jti).
+    """
+    from skylize.app.auth.tokens import decode_token
+
+    await _logged_in(svc, org="org_a", email="a@example.com")
+    b = await _logged_in(svc, org="org_b", email="b@example.com")
+    user_a = await repo.get_by_email("a@example.com")
+    assert user_a is not None
+    b_jti = decode_token(b.refresh_token, SECRET)["jti"]
+    forged = create_refresh_token(
+        user_id=str(user_a.user_id), token_id=UUID(b_jti), secret=SECRET, ttl_days=1
+    )
+    return forged, b.refresh_token, b_jti
+
+
+async def test_refresh_refuses_a_sub_that_does_not_own_the_jti_without_consuming_it() -> None:
+    svc, repo = _service()
+    forged, b_refresh, b_jti = await _mismatched_token(svc, repo)
+
+    with pytest.raises(InvalidCredentialsError):
+        await svc.refresh(refresh_token=forged)
+
+    # B's row was NOT consumed: still live, and B can still refresh with it.
+    row = await repo.get_refresh_token(UUID(b_jti))
+    assert row is not None and row.revoked_at is None
+    assert (await svc.refresh(refresh_token=b_refresh)).access_token
+
+
+async def test_logout_with_a_mismatched_sub_does_not_revoke_the_other_users_token() -> None:
+    svc, repo = _service()
+    forged, b_refresh, b_jti = await _mismatched_token(svc, repo)
+
+    assert await svc.logout(refresh_token=forged) is False
+    row = await repo.get_refresh_token(UUID(b_jti))
+    assert row is not None and row.revoked_at is None
+    assert (await svc.refresh(refresh_token=b_refresh)).access_token
 
 
 async def test_refresh_refuses_an_access_token() -> None:

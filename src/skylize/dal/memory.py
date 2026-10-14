@@ -394,8 +394,8 @@ class InMemoryUserRepository:
         if rt is not None:
             self._refresh[token_id] = replace(rt, revoked_at=datetime.now(timezone.utc))
 
-    async def consume_refresh_token(self, token_id: UUID) -> UUID | None:
-        """Mirror of the Pg conditional UPDATE (dal/users.py).
+    async def consume_refresh_token(self, token_id: UUID, user_id: UUID) -> bool:
+        """Mirror of the Pg conditional UPDATE (dal/users.py), ownership included.
 
         Single-winner without a lock: there is no `await` between the check and
         the write, so on this store's single event loop no other coroutine can
@@ -403,10 +403,15 @@ class InMemoryUserRepository:
         """
         rt = self._refresh.get(token_id)
         now = datetime.now(timezone.utc)
-        if rt is None or rt.revoked_at is not None or rt.expires_at <= now:
-            return None
+        if (
+            rt is None
+            or rt.user_id != user_id
+            or rt.revoked_at is not None
+            or rt.expires_at <= now
+        ):
+            return False
         self._refresh[token_id] = replace(rt, revoked_at=now)
-        return rt.user_id
+        return True
 
 
 class InMemoryDeliverableRepository:

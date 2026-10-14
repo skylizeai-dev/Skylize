@@ -73,25 +73,30 @@ row count decides the winner:
 UPDATE user_refresh_tokens
    SET revoked_at = now()
  WHERE token_id   = $1
+   AND user_id    = $2
    AND revoked_at IS NULL
    AND expires_at  > now()
-RETURNING user_id
+RETURNING token_id
 ```
 
 - Exactly one concurrent caller gets a row back; every other caller gets none and
   is refused. Postgres row locking under `UPDATE` makes this hold at READ COMMITTED,
   the default; no explicit transaction or `SELECT ... FOR UPDATE` is needed.
-- New port method on `UserRepository` (`src/skylize/dal/ports.py:277` area):
-  `consume_refresh_token(token_id: UUID) -> UUID | None`, returning the owning
-  `user_id` on success and `None` otherwise. It must be implemented in both
-  `dal/users.py` (Postgres) and `dal/memory.py:392` (in-memory backend and tests).
-  The in-memory version needs an `asyncio.Lock` to give the same single-winner
-  guarantee.
+- New port method on `UserRepository` (`src/skylize/dal/ports.py`):
+  `consume_refresh_token(token_id: UUID, user_id: UUID) -> bool`, True only for the
+  single winner. It is implemented in both `dal/users.py` (Postgres) and
+  `dal/memory.py` (in-memory backend and tests). The in-memory version needs no
+  lock: it has no `await` between check and write, so nothing can interleave on its
+  single event loop.
 - `refresh()` keeps its signature decode and `type == "refresh"` check, then calls
-  `consume_refresh_token(jti)` instead of `get_refresh_token` + `revoke_refresh_token`.
-  It also checks that the returned `user_id` equals the token's `sub` claim;
-  a mismatch is refused (defence in depth: a forged `jti` pointing at another user's
-  row cannot rotate it, because the signature already binds `sub` and `jti`).
+  `consume_refresh_token(jti, sub)` instead of `get_refresh_token` + `revoke_refresh_token`.
+- **Ownership is inside the same condition (`user_id = $2`).** A token whose `sub`
+  does not own the row its `jti` names is refused and revokes nothing. An earlier
+  draft checked ownership AFTER consuming, which would have revoked the other user's
+  row as a side effect of the refusal; the owner's review asked for that to be pinned
+  by a test, and it is (`test_refresh_refuses_a_sub_that_does_not_own_the_jti_without_consuming_it`,
+  `test_mismatched_sub_is_refused_and_does_not_consume`). Forging such a token needs
+  the server key, so this is defence in depth, not a reachable attack without it.
 - The existing `revoke_refresh_token` stays in the port for now (one caller fewer);
   removing it is a cleanup, not part of this fix.
 

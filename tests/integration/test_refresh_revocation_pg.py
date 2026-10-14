@@ -29,7 +29,7 @@ import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
-from skylize.app.auth.tokens import decode_token
+from skylize.app.auth.tokens import create_refresh_token, decode_token
 from skylize.bootstrap import build_container
 from skylize.config import Settings
 from skylize.edge.deps import get_container
@@ -140,14 +140,16 @@ async def test_concurrent_consumes_have_exactly_one_winner(auth_client, admin_co
     org_a, _ = _orgs()
     try:
         _, _, refresh = await _register_and_login(client, admin_conn, org_a)
-        jti = uuid.UUID(decode_token(refresh, TEST_JWT_SECRET)["jti"])
+        claims = decode_token(refresh, TEST_JWT_SECRET)
+        jti, sub = uuid.UUID(claims["jti"]), uuid.UUID(claims["sub"])
         # The repository is only reachable through the service on the container.
         repo = container.user_auth._repo
 
-        results = await asyncio.gather(*(repo.consume_refresh_token(jti) for _ in range(10)))
+        results = await asyncio.gather(
+            *(repo.consume_refresh_token(jti, sub) for _ in range(10))
+        )
 
-        winners = [r for r in results if r is not None]
-        assert len(winners) == 1, results
+        assert results.count(True) == 1, results
         row = await admin_conn.fetchrow(
             "SELECT revoked_at FROM user_refresh_tokens WHERE token_id = $1", jti
         )
@@ -173,6 +175,41 @@ async def test_concurrent_refreshes_mint_exactly_one_pair(auth_client, admin_con
         assert statuses == [200, 401], [r.text for r in responses]
     finally:
         await purge_tenants(admin_conn, [org_a])
+
+
+@requires_redis
+@requires_app_role
+async def test_mismatched_sub_is_refused_and_does_not_consume(auth_client, admin_conn) -> None:
+    """A token whose `sub` (user A) does not own the row its `jti` names (user
+    B's live token) is refused by both refresh and logout, and B's row stays
+    unrevoked in Postgres. Forging that binding needs the server key; the point
+    is that ownership is enforced inside the same conditional write, so the
+    refusal can never revoke someone else's session as a side effect."""
+    client, _ = auth_client
+    org_a, org_b = _orgs()
+    try:
+        _, access_a, _ = await _register_and_login(client, admin_conn, org_a)
+        _, _, refresh_b = await _register_and_login(client, admin_conn, org_b)
+        user_a = decode_token(access_a, TEST_JWT_SECRET)["sub"]
+        b_jti = uuid.UUID(decode_token(refresh_b, TEST_JWT_SECRET)["jti"])
+        forged = create_refresh_token(
+            user_id=user_a, token_id=b_jti, secret=TEST_JWT_SECRET, ttl_days=1
+        )
+
+        refused = await client.post("/api/v1/auth/refresh", json={"refresh_token": forged})
+        assert refused.status_code == 401
+        out = await client.post("/api/v1/auth/logout", json={"refresh_token": forged})
+        assert out.status_code == 204
+
+        row = await admin_conn.fetchrow(
+            "SELECT revoked_at FROM user_refresh_tokens WHERE token_id = $1", b_jti
+        )
+        assert row is not None and row["revoked_at"] is None
+        # B's genuine token still works.
+        b = await client.post("/api/v1/auth/refresh", json={"refresh_token": refresh_b})
+        assert b.status_code == 200, b.text
+    finally:
+        await purge_tenants(admin_conn, [org_a, org_b])
 
 
 @requires_redis
