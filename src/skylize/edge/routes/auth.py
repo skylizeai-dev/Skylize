@@ -4,9 +4,10 @@ Human-user authentication routes.
   POST /api/v1/auth/register  — create account
   POST /api/v1/auth/login     — email + password → access + refresh tokens
   POST /api/v1/auth/refresh   — rotate refresh token → new pair
+  POST /api/v1/auth/logout    — revoke a refresh token (always 204)
   GET  /api/v1/auth/me        — current user info (requires valid access token)
 
-register / login / refresh run BEFORE authentication, so they are throttled by
+register / login / refresh / logout run BEFORE authentication, so they are throttled by
 `enforce_anonymous_rate_limit` (peer address, not org_id -- there is no
 authenticated org yet). That limit is what bounds credential stuffing on /login
 and org-id probing on /register; read its docstring for the two caveats (proxy
@@ -15,9 +16,10 @@ collapsing and in-process state).
 
 from __future__ import annotations
 
+import logging
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 from ...app.auth.user_service import (
@@ -32,6 +34,7 @@ from ..deps import enforce_anonymous_rate_limit, get_container, get_current_user
 from ..errors import CodedHTTPException, ErrorCode
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
+_log = logging.getLogger(__name__)
 
 
 # ── request/response models ────────────────────────────────────────────────────
@@ -178,6 +181,31 @@ async def refresh(
         access_token=result.access_token,
         refresh_token=result.refresh_token,
     )
+
+
+@router.post(
+    "/logout", status_code=204,
+    dependencies=[Depends(enforce_anonymous_rate_limit)],
+)
+async def logout(
+    body: RefreshRequest,
+    container: Container = Depends(get_container),
+) -> Response:
+    """Revoke the presented refresh token server-side.
+
+    Authorized by possession of the refresh token alone: no access token is
+    required, because by logout time the 30-minute access token is often already
+    expired. Only the token's own `jti` is revoked; no user or token id is taken
+    from the body, so a caller can never revoke anyone else's session.
+
+    Always 204 for a schema-valid body -- revoked, already revoked, expired,
+    unknown, or badly signed alike -- so the route is not an oracle for whether a
+    token was live. The access token already issued stays valid until it expires
+    (stateless JWT); see docs/06_integrations/myday_session_revocation_design.md 4.0.
+    """
+    revoked = await container.user_auth.logout(refresh_token=body.refresh_token)
+    _log.info("auth_logout revoked=%s", revoked)
+    return Response(status_code=204)
 
 
 @router.get("/me", response_model=UserResponse)

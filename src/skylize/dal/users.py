@@ -127,6 +127,27 @@ class PgUserRepository:
                 token_id,
             )
 
+    async def consume_refresh_token(self, token_id: UUID) -> UUID | None:
+        """One conditional UPDATE decides the single winner.
+
+        Under READ COMMITTED, a second concurrent UPDATE of the same row waits for
+        the first to commit, then re-checks `revoked_at IS NULL` against the
+        committed row and matches nothing. So exactly one caller gets a row back.
+        """
+        async with self._db.admin_session() as conn:
+            user_id: UUID | None = await conn.fetchval(
+                """
+                UPDATE user_refresh_tokens
+                   SET revoked_at = now()
+                 WHERE token_id = $1
+                   AND revoked_at IS NULL
+                   AND expires_at > now()
+                RETURNING user_id
+                """,
+                token_id,
+            )
+        return user_id
+
 
 def _row(rec: object) -> UserRow:
     r = dict(rec)  # type: ignore[call-overload]

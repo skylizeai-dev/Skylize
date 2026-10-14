@@ -276,6 +276,18 @@ class UserRepository(Protocol):
 
     async def revoke_refresh_token(self, token_id: UUID) -> None: ...
 
+    async def consume_refresh_token(self, token_id: UUID) -> UUID | None:
+        """Atomically mark a LIVE refresh token as used; return its owner's user_id.
+
+        A token is live when it exists, is not revoked, and has not expired. The
+        first caller to consume it gets the user_id; every later or concurrent
+        caller gets None. Implementations MUST settle that in the store with one
+        conditional write, never a read followed by a write: two refreshes of the
+        same token used to both succeed and mint two live token families
+        (docs/06_integrations/myday_session_revocation_design.md, 1.0.2).
+        """
+        ...
+
 
 # ---------------------------------------------------------------------------
 # Deliverables (agent-produced artifacts, versioned, human-approvable)
