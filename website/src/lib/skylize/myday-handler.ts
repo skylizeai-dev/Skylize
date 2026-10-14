@@ -22,6 +22,7 @@ import type { ZodType } from "zod";
 
 import { MyDayApiError } from "./myday-client";
 import { getMyDayConfig } from "./myday-config";
+import { isStateChangingMethod, verifySameOrigin } from "./myday-csrf";
 import {
   MYDAY_SESSION_COOKIE_NAME,
   clearedMydaySessionCookie,
@@ -156,6 +157,18 @@ export function mydayRoute<TBody = undefined, TParams = Record<string, never>>(
     try {
       if (request.method !== method) {
         return errorResponse(405, "Method not allowed.");
+      }
+
+      // Cross-site guard (myday-csrf.ts): every state-changing request must come
+      // from this site's own origin, checked BEFORE the session or the body is
+      // read. The 403 deliberately does NOT clear the cookie: if it did, any
+      // cross-site page could log a victim out by POSTing here.
+      if (isStateChangingMethod(request.method)) {
+        const verdict = verifySameOrigin(request);
+        if (!verdict.ok) {
+          console.warn("[api/my-day] cross-site request refused:", verdict.reason);
+          return errorResponse(403, "Cross-site request refused.");
+        }
       }
 
       // Fail-closed session lifecycle (design section 5.0): an absent, invalid,
