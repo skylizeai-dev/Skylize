@@ -1,0 +1,45 @@
+name: merge-guard
+
+# Owner ruling OD2: fail when the PR title matches /do not merge/i or the PR
+# carries the label `hold`. The main ruleset requires the check name
+# `merge-guard`, so the job id and job name below must stay exactly that.
+#
+# The trigger list includes edited/labeled/unlabeled (besides the usual
+# opened/synchronize/reopened) so the check is re-evaluated whenever the title
+# is changed or `hold` is added/removed; otherwise a stale result would stick.
+#
+# Least privilege: everything needed is in the event payload. No checkout, no
+# secrets, no third-party actions. Title and labels reach the script via env:
+# only (never interpolated into run:), because the title is attacker-controlled.
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened, labeled, unlabeled]
+
+permissions: {}
+
+jobs:
+  merge-guard:
+    name: merge-guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    env:
+      PR_TITLE: ${{ github.event.pull_request.title }}
+      HAS_HOLD: ${{ contains(github.event.pull_request.labels.*.name, 'hold') }}
+    steps:
+      - name: Block do-not-merge titles and hold label
+        run: |
+          shopt -s nocasematch
+          failed=0
+          if [[ "$PR_TITLE" == *"do not merge"* ]]; then
+            echo "::error::merge-guard: PR title contains 'do not merge'"
+            failed=1
+          fi
+          if [[ "$HAS_HOLD" == "true" ]]; then
+            echo "::error::merge-guard: PR has the 'hold' label"
+            failed=1
+          fi
+          if [[ "$failed" -ne 0 ]]; then
+            exit 1
+          fi
+          echo "OK: no do-not-merge title and no hold label"
