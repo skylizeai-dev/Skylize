@@ -11,7 +11,9 @@ write. These tests fire the requests concurrently and assert exactly one wins:
   * the store primitive: 10 concurrent `consume_refresh_token` calls on one token
     -> exactly one returns the owner;
   * the HTTP route: 2 concurrent POST /refresh with one token -> one 200, one 401;
-  * POST /logout revokes the presented token -> a later refresh is 401;
+  * POST /logout revokes the presented token -> a later refresh is 401 and the
+    row's revoked_at is set;
+  * reuse of a rotated token is 401 while the rotated-to token still refreshes;
   * logout of org A's token leaves org B's session working.
 
 Skipped unless SKYLIZE_TEST_DB_URL (+ SKYLIZE_TEST_APP_DB_URL / REDIS_URL) are set.
@@ -166,13 +168,73 @@ async def test_concurrent_refreshes_mint_exactly_one_pair(auth_client, admin_con
     try:
         _, _, refresh = await _register_and_login(client, admin_conn, org_a)
 
+        # The SAME refresh token, fired concurrently on one event loop.
         responses = await asyncio.gather(
             client.post("/api/v1/auth/refresh", json={"refresh_token": refresh}),
             client.post("/api/v1/auth/refresh", json={"refresh_token": refresh}),
         )
 
-        statuses = sorted(r.status_code for r in responses)
-        assert statuses == [200, 401], [r.text for r in responses]
+        statuses = [r.status_code for r in responses]
+        assert statuses.count(200) == 1, [r.text for r in responses]
+        assert statuses.count(401) == 1, [r.text for r in responses]
+        winner = next(r for r in responses if r.status_code == 200).json()
+        assert set(winner) == {"access_token", "refresh_token", "token_type"}, winner
+
+        jti = uuid.UUID(decode_token(refresh, TEST_JWT_SECRET)["jti"])
+        row = await admin_conn.fetchrow(
+            "SELECT revoked_at FROM user_refresh_tokens WHERE token_id = $1", jti
+        )
+        assert row is not None and row["revoked_at"] is not None
+    finally:
+        await purge_tenants(admin_conn, [org_a])
+
+
+@requires_redis
+@requires_app_role
+async def test_refresh_after_logout_is_rejected(auth_client, admin_conn) -> None:
+    client, _ = auth_client
+    org_a, _ = _orgs()
+    try:
+        _, _, refresh = await _register_and_login(client, admin_conn, org_a)
+        jti = uuid.UUID(decode_token(refresh, TEST_JWT_SECRET)["jti"])
+
+        out = await client.post("/api/v1/auth/logout", json={"refresh_token": refresh})
+        assert out.status_code == 204, out.text
+
+        again = await client.post("/api/v1/auth/refresh", json={"refresh_token": refresh})
+        assert again.status_code == 401, again.text
+
+        row = await admin_conn.fetchrow(
+            "SELECT revoked_at FROM user_refresh_tokens WHERE token_id = $1", jti
+        )
+        assert row is not None and row["revoked_at"] is not None
+    finally:
+        await purge_tenants(admin_conn, [org_a])
+
+
+@requires_redis
+@requires_app_role
+async def test_reuse_of_rotated_token_is_rejected(auth_client, admin_conn) -> None:
+    """A rotated (already-consumed) token is refused on reuse, and the reuse does
+    NOT revoke the token family: the pair the rotation minted keeps working.
+    Family revocation on reuse is out of scope here (it needs a migration)."""
+    client, _ = auth_client
+    org_a, _ = _orgs()
+    try:
+        _, _, original = await _register_and_login(client, admin_conn, org_a)
+
+        first = await client.post("/api/v1/auth/refresh", json={"refresh_token": original})
+        assert first.status_code == 200, first.text
+        rotated = first.json()["refresh_token"]
+        assert rotated != original
+
+        reuse = await client.post("/api/v1/auth/refresh", json={"refresh_token": original})
+        assert reuse.status_code == 401, reuse.text
+
+        still_live = await client.post(
+            "/api/v1/auth/refresh", json={"refresh_token": rotated}
+        )
+        assert still_live.status_code == 200, still_live.text
     finally:
         await purge_tenants(admin_conn, [org_a])
 
