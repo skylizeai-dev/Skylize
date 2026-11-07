@@ -1,8 +1,25 @@
 name: Deploy → Staging
 
+# MANUAL ONLY (owner ruling OD14, 2026-11-07; docs/decisions/2026-11-07_owner_rulings.md).
+# The `push: branches: [main]` trigger was removed: AWS staging is not provisioned,
+# so every push to main produced a red run that failed at "Configure AWS credentials
+# (OIDC)" (e.g. runs 42406222420, 42406965841, 42407492832). Railway stays the
+# active staging environment until then.
+#
+# Restore the push trigger ONLY after all five provisioning prerequisites hold:
+#   1. OIDC trust fixed: infra/terraform/staging/modules/iam/main.tf (the
+#      `token.actions.githubusercontent.com:sub` condition) names
+#      repo:skylizeai-dev/Skylize:environment:staging and
+#      repo:skylizeai-dev/Skylize:ref:refs/heads/main instead of the
+#      YOUR_GITHUB_ORG placeholder.
+#   2. `terraform apply` of infra/terraform/staging (its S3 state bucket and
+#      DynamoDB lock table must already exist).
+#   3. Repository secret AWS_GITHUB_ACTIONS_ROLE_ARN created (used below by
+#      build-and-push and deploy); value = terraform output github_actions_role_arn.
+#   4. GitHub environment `staging` created (the deploy job declares it).
+#   5. The GitHub Actions IAM role allowed elasticloadbalancing:DescribeLoadBalancers
+#      (the smoke test looks up skylize-staging-alb).
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:

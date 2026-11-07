@@ -1,4 +1,4 @@
-# Owner rulings OD1-OD12
+# Owner rulings OD1-OD15 (+ OD3-AMEND)
 
 approved in chat 2026-11-07, recorded by T1
 
@@ -85,3 +85,45 @@ Status: LATER
      #5 with a comment (branches kept).
 
 Status: EXECUTED IN T1 (archive refs pushed; REPO_STATE regenerated; _137 doc moved; #1 and #5 closed by the orchestrator)
+
+---
+
+## T1 follow-up rulings
+
+approved in chat 2026-11-07, recorded by the T1 follow-up
+
+**OD13** Close PR #30 with comment: "Superseded by the 2026-11-07 governed audit; content
+     stale (23 vs 33 contracts). Closed per OD13. Branch kept."
+
+Status: EXECUTED (PR #30 closed with that comment; branch feat/audit-product-readiness kept at 5b57433. Before closing, merge-guard failed on #30 as intended: run 42410383315.)
+
+---
+
+**OD14** Deploy → Staging: trigger = workflow_dispatch ONLY until AWS staging is provisioned
+     (remove the push trigger). Railway stays the active staging. Add a header comment
+     citing OD14 and listing the 5 provisioning prerequisites from the T1 report.
+
+Status: EXECUTED (.github/workflows/deploy-staging.yml: `push` trigger removed, `workflow_dispatch` kept, header comment lists the five prerequisites)
+
+---
+
+**OD15** Ruleset 26770388 keeps zero bypass actors. Emergency path = the owner edits the
+     ruleset in GitHub settings; an owner bypass would also bypass every agent that uses
+     the owner's identity.
+
+Status: IN FORCE (ruleset 26770388 "protect-main (OD2)": `bypass_actors: []`; no change needed)
+
+---
+
+**OD3-AMEND** If My Day access-JWT TTL > 15 min: lower it to ≤ 15 min and add BFF
+     refresh-on-401 (already a Stage 2 prerequisite) instead of an access-token denylist.
+
+Status: SCHEDULED T2 (amends OD3's "add access-token revocation first")
+
+---
+
+## Process note
+
+T1 merged #37 before CI completed (pre-ruleset); now prevented mechanically by the ruleset.
+
+(Evidence: #37 was merged at 2026-11-07T19:42:08Z in the GitHub UI by skylizeai-dev while `unit` and `integration` were still pending; ruleset 26770388 was created at 19:44:41Z; the post-merge push CI run 42407492854 on a198ae7 succeeded.)
