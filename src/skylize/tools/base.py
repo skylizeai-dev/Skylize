@@ -7,8 +7,14 @@ description, so it must precisely state when the tool applies.
 `tool_id` doubles as the governance scope key: `GovernanceAuthority.mint`
 defaults a token's `scope` to the agent contract's `ToolGrant.tool_id` list,
 and `contracts.token.validate_tool_call` checks membership by that same
-string. There is no separate scope namespace in this codebase — keep tool_ids
-and ToolGrant.tool_ids identical.
+string.
+
+The scope vocabulary is therefore wider than this registry: `ToolGrant.tool_id`
+also admits the capability names in `contracts.base.CAPABILITY_NAMES`
+(`llm.generate`, `orchestrator.delegate`), which carry governance scope but have
+no ToolDefinition and are never resolved here. Every id that IS meant to be
+invocable must match a registered `tool_id` exactly — an `invocable_tools` entry
+with no registered tool is dropped at runtime, not failed.
 """
 
 from __future__ import annotations

@@ -104,16 +104,39 @@ async def _context_from_dev_headers(request: Request) -> "RequestContext":
     )
 
 
-def _upgrade_head(cfg) -> None:
+def _upgrade_head(cfg, dsn: str) -> None:
     """Run Alembic's upgrade in a worker thread.
 
     migrations/env.py calls asyncio.run() internally, which raises if invoked
     from a thread that already has a running event loop — as pytest-asyncio's
     async fixtures do. asyncio.to_thread() gives it a plain thread with none.
+
+    `cfg.set_main_option("sqlalchemy.url", dsn)` (set by both callers) is NOT
+    enough: migrations/env.py:_dsn() ignores the Config object entirely and
+    re-derives the DSN from SKYLIZE_DB_URL / POSTGRES_DSN, falling back to a
+    hardcoded "localdev" password if neither is set. CI and deploy-staging
+    both set SKYLIZE_DB_URL only inside their own standalone "Run migrations"
+    step, which does not persist into the later test step -- so a programmatic
+    upgrade from a fixture always fell back to the hardcoded default. CI's own
+    Postgres password happens to BE "localdev", so this stayed invisible
+    there; deploy-staging.yml's is "testpass", where it fails closed as
+    `password authentication failed for user "skylize"` on every Postgres
+    fixture (reproduced locally: 332/332 integration tests errored). Setting
+    SKYLIZE_DB_URL here, scoped to the call and restored after, makes the
+    programmatic upgrade honor the same DSN the fixture already resolved,
+    instead of a second, independently-resolved one.
     """
     from alembic import command
 
-    command.upgrade(cfg, "head")
+    previous = os.environ.get("SKYLIZE_DB_URL")
+    os.environ["SKYLIZE_DB_URL"] = dsn
+    try:
+        command.upgrade(cfg, "head")
+    finally:
+        if previous is None:
+            os.environ.pop("SKYLIZE_DB_URL", None)
+        else:
+            os.environ["SKYLIZE_DB_URL"] = previous
 
 
 @pytest_asyncio.fixture()
@@ -140,7 +163,7 @@ async def pg_schema() -> AsyncIterator[str]:
     cfg.set_main_option("version_table_schema", schema)
     os.environ["SKYLIZE_TEST_SCHEMA"] = schema
     try:
-        await asyncio.to_thread(_upgrade_head, cfg)
+        await asyncio.to_thread(_upgrade_head, cfg, DB_URL)
         yield schema
     finally:
         conn = await asyncpg.connect(DB_URL)
@@ -164,7 +187,7 @@ async def migrated_public() -> AsyncIterator[None]:
 
     cfg = Config("alembic.ini")
     cfg.set_main_option("sqlalchemy.url", DB_URL)
-    await asyncio.to_thread(_upgrade_head, cfg)
+    await asyncio.to_thread(_upgrade_head, cfg, DB_URL)
     yield
 
 
