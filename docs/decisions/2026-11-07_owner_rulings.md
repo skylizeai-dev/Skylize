@@ -8,7 +8,7 @@ Rulings are reproduced verbatim. Each is followed by its status as of the T1 hyg
 
 **OD1**  Merge #35 (squash) and watch Deploy → Staging, subject to REVIEW step 4.
 
-Status: EXECUTED (T1: PR #35 squash-merged as 19b149e1ae8c630206df5f8bdb7acca6133fbd64; Deploy -> Staging result: see T1 report)
+Status: EXECUTED (merge) / deploy BLOCKED on owner infra actions: see REPO_STATE (PR #35 squash-merged as 19b149e1ae8c630206df5f8bdb7acca6133fbd64; Deploy -> Staging run 42406222420 = failure)
 
 ---
 
@@ -17,7 +17,7 @@ Status: EXECUTED (T1: PR #35 squash-merged as 19b149e1ae8c630206df5f8bdb7acca613
      block force-push and deletion. Add a `merge-guard` check that FAILS when the PR
      title matches /do not merge/i or the PR has label `hold`.
 
-Status: EXECUTED IN T1 (merge-guard workflow PR + main ruleset applied by the T1 orchestrator)
+Status: EXECUTED IN T1 (merge-guard workflow PR #36 merged as 93ff73fbce67ece77a64db705edf6667c978ee00; main ruleset applied by the T1 orchestrator after this PR)
 
 ---
 
