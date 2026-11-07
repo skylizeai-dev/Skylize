@@ -31,7 +31,13 @@ class OrgNotAvailableError(Exception):
 
 
 class InvalidCredentialsError(Exception):
-    pass
+    """Credentials or a token were refused.
+
+    The message is a FIXED, distinct reason for server-side logging only and
+    must never interpolate a token (or any part of one). POST /refresh does not
+    echo it: every refusal there answers one fixed 401 detail
+    (edge/routes/auth.py `REFRESH_REFUSED_DETAIL`).
+    """
 
 
 @dataclass

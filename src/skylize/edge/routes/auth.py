@@ -3,8 +3,8 @@ Human-user authentication routes.
 
   POST /api/v1/auth/register  — create account
   POST /api/v1/auth/login     — email + password → access + refresh tokens
-  POST /api/v1/auth/refresh   — rotate refresh token → new pair
-  POST /api/v1/auth/logout    — revoke a refresh token (always 204)
+  POST /api/v1/auth/refresh   — rotate refresh token → new pair (any refusal: 401)
+  POST /api/v1/auth/logout    — revoke a refresh token (204; 5xx if the write fails)
   GET  /api/v1/auth/me        — current user info (requires valid access token)
 
 register / login / refresh / logout run BEFORE authentication, so they are throttled by
@@ -35,6 +35,9 @@ from ..errors import CodedHTTPException, ErrorCode
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 _log = logging.getLogger(__name__)
+
+#: The one 401 detail POST /refresh returns, whatever the refusal reason.
+REFRESH_REFUSED_DETAIL = "invalid refresh token"
 
 
 # ── request/response models ────────────────────────────────────────────────────
@@ -173,10 +176,20 @@ async def refresh(
     body: RefreshRequest,
     container: Container = Depends(get_container),
 ) -> TokenResponse:
+    """Rotate a refresh token into a new pair.
+
+    Every refusal answers 401 with the SAME detail (`REFRESH_REFUSED_DETAIL`):
+    bad signature, wrong token type, unknown/revoked/expired/already-rotated
+    jti, or an inactive user all look identical, so the route is not an oracle
+    for which of those a presented token is. The service's distinct reason is
+    logged server-side only; those messages are fixed strings and never carry
+    the token.
+    """
     try:
         result = await container.user_auth.refresh(refresh_token=body.refresh_token)
     except InvalidCredentialsError as exc:
-        raise HTTPException(status_code=401, detail=str(exc))
+        _log.info("auth_refresh_refused reason=%s", exc)
+        raise HTTPException(status_code=401, detail=REFRESH_REFUSED_DETAIL) from None
     return TokenResponse(
         access_token=result.access_token,
         refresh_token=result.refresh_token,
@@ -194,14 +207,22 @@ async def logout(
     """Revoke the presented refresh token server-side.
 
     Authorized by possession of the refresh token alone: no access token is
-    required, because by logout time the 30-minute access token is often already
-    expired. Only the token's own `jti` is revoked; no user or token id is taken
-    from the body, so a caller can never revoke anyone else's session.
+    required, because by logout time the access token (at most 15 minutes,
+    `Settings.jwt_access_token_ttl_minutes`, capped at boot in config.py) is
+    often already expired. Only the token's own `jti` is revoked; no user or
+    token id is taken from the body, so a caller can never revoke anyone else's
+    session.
 
     Always 204 for a schema-valid body -- revoked, already revoked, expired,
     unknown, or badly signed alike -- so the route is not an oracle for whether a
     token was live. The access token already issued stays valid until it expires
-    (stateless JWT); see docs/06_integrations/myday_session_revocation_design.md 4.0.
+    (stateless JWT, so at most the 15-minute cap); see
+    docs/06_integrations/myday_session_revocation_design.md 4.0.
+
+    A failure of the revoke WRITE itself is deliberately NOT caught: it
+    propagates as a 5xx, so a caller (the My Day BFF) can tell "revoked or
+    nothing to revoke" (204) from "the database did not record the revocation"
+    and fail closed. Never turn that into a 204.
     """
     revoked = await container.user_auth.logout(refresh_token=body.refresh_token)
     _log.info("auth_logout revoked=%s", revoked)

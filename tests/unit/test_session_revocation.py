@@ -7,7 +7,10 @@ Design: docs/06_integrations/myday_session_revocation_design.md. What these pin:
   * logout revokes the presented refresh token, so a later refresh is 401;
   * logout is always 204 and never an oracle (garbage, wrong type, unknown,
     already revoked all answer the same);
-  * logout only ever revokes the presented token's own row.
+  * logout only ever revokes the presented token's own row;
+  * logout is a non-2xx when the revoke write itself fails (the BFF fails closed);
+  * POST /refresh answers one fixed 401 detail for every refusal reason;
+  * Settings refuses an access-token TTL above 15 minutes (OD3-AMEND).
 The real-Postgres version of the race lives in
 tests/integration/test_refresh_revocation_pg.py.
 """
@@ -20,13 +23,15 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 import skylize.config as config_module
-from skylize.app.auth.tokens import create_refresh_token
+from skylize.app.auth.tokens import create_refresh_token, decode_token
 from skylize.app.auth.user_service import InvalidCredentialsError, UserAuthService
 from skylize.config import Settings
 from skylize.dal.memory import InMemoryUserRepository
 from skylize.edge.gateway import create_app
+from skylize.edge.routes.auth import REFRESH_REFUSED_DETAIL
 
 SECRET = "test-secret"
 
@@ -291,3 +296,96 @@ def test_route_logout_needs_no_access_token(client: TestClient) -> None:
     pair = _login(client)
     resp = client.post("/api/v1/auth/logout", json={"refresh_token": pair["refresh_token"]})
     assert resp.status_code == 204
+
+
+def test_route_refresh_401_detail_is_identical_for_every_refusal(client: TestClient) -> None:
+    """POST /refresh is not an oracle: whatever the reason, the 401 body is the
+    same fixed detail, and it never echoes the presented token."""
+    pair = _login(client)
+    sub = decode_token(pair["access_token"], SECRET)["sub"]
+
+    bad_signature = create_refresh_token(
+        user_id=sub, token_id=uuid4(), secret="not-the-server-key", ttl_days=1
+    )
+    unknown_jti = create_refresh_token(
+        user_id=sub, token_id=uuid4(), secret=SECRET, ttl_days=1
+    )
+    revoked = pair["refresh_token"]
+    assert client.post("/api/v1/auth/logout", json={"refresh_token": revoked}).status_code == 204
+
+    cases = {
+        "bad_signature": bad_signature,
+        "access_token_as_refresh": pair["access_token"],
+        "revoked": revoked,
+        "unknown_jti": unknown_jti,
+        "garbage": "garbage",
+    }
+    details: dict[str, object] = {}
+    for name, token in cases.items():
+        resp = client.post("/api/v1/auth/refresh", json={"refresh_token": token})
+        assert resp.status_code == 401, (name, resp.text)
+        body = resp.json()
+        assert set(body) == {"detail"}, (name, body)
+        assert token not in resp.text, name
+        details[name] = body["detail"]
+
+    assert set(details.values()) == {REFRESH_REFUSED_DETAIL}, details
+
+
+@pytest.fixture()
+def client_no_raise(monkeypatch: pytest.MonkeyPatch):
+    """Like `client`, but a server error comes back as the HTTP response the
+    caller would see instead of being re-raised into the test."""
+    monkeypatch.setenv("SKYLIZE_JWT_SECRET", SECRET)
+    config_module._settings = None
+    with TestClient(create_app(), raise_server_exceptions=False) as c:
+        yield c
+    config_module._settings = None
+
+
+def test_route_logout_is_non_2xx_when_the_revoke_write_fails(
+    client_no_raise: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The BFF fails closed on a non-2xx logout. A failed DB write must surface
+    as one, never be swallowed into the "nothing to revoke" 204."""
+    pair = _login(client_no_raise)
+    repo = client_no_raise.app.state.container.user_auth._repo  # type: ignore[attr-defined]
+
+    async def _boom(*_args: object, **_kwargs: object) -> bool:
+        raise RuntimeError("simulated database failure")
+
+    monkeypatch.setattr(repo, "consume_refresh_token", _boom)
+
+    resp = client_no_raise.post(
+        "/api/v1/auth/logout", json={"refresh_token": pair["refresh_token"]}
+    )
+    assert not 200 <= resp.status_code < 300, resp.status_code
+    assert resp.status_code >= 500
+
+
+# ── access-token TTL cap (owner ruling OD3-AMEND) ────────────────────────────
+
+@pytest.fixture()
+def no_ttl_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SKYLIZE_JWT_ACCESS_TOKEN_TTL_MINUTES", raising=False)
+
+
+@pytest.mark.parametrize("ttl", [16, 30])
+def test_settings_refuses_an_access_token_ttl_above_15(no_ttl_env: None, ttl: int) -> None:
+    with pytest.raises(ValidationError, match="JWT_ACCESS_TOKEN_TTL_MINUTES"):
+        Settings(jwt_secret=SECRET, jwt_access_token_ttl_minutes=ttl)
+
+
+def test_settings_refuses_an_access_token_ttl_above_15_from_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SKYLIZE_JWT_ACCESS_TOKEN_TTL_MINUTES", "30")
+    with pytest.raises(ValidationError):
+        Settings(jwt_secret=SECRET)
+
+
+def test_settings_accepts_15_and_the_default_is_within_the_cap(no_ttl_env: None) -> None:
+    assert Settings(jwt_secret=SECRET, jwt_access_token_ttl_minutes=15).jwt_access_token_ttl_minutes == 15
+    default = Settings(jwt_secret=SECRET).jwt_access_token_ttl_minutes
+    assert default <= 15
+    assert Settings.model_fields["jwt_access_token_ttl_minutes"].default <= 15
