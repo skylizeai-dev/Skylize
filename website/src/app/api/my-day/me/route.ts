@@ -8,28 +8,22 @@
 // cookie before this handler ran. The backend request carries the USER'S OWN
 // access token as Bearer (mydayGet), never a service key.
 //
-// Stage-1 scope: NO refresh-on-401. If the backend rejects the access token
-// (expired/invalid), `mydayGet` throws MyDayApiError(401), which `mydayRoute`'s
-// `mapMyDayError` turns into a My Day 401 + cleared cookie — a clean forced
-// re-login, which the design says is the correct Stage 1 behaviour.
+// Refresh-on-401 (OD3-AMEND) is handled centrally, not here: the call goes
+// through `withAccessToken` (myday-handler.ts, `createAccessTokenRunner`), which
+// on a backend 401 refreshes the token pair once, re-seals the cookie, and
+// retries this call once; any further 401 is a My Day 401 + cleared cookie.
 
 import { NextResponse } from "next/server";
 
 import { mydayGet } from "@/lib/skylize/myday-client";
 import type { MyDayUser } from "@/lib/skylize/myday-client";
-import { errorResponse, mydayRoute } from "@/lib/skylize/myday-handler";
+import { mydayRoute } from "@/lib/skylize/myday-handler";
 
 export const GET = mydayRoute({
   method: "GET",
-  handler: async ({ session }) => {
-    // Non-null under requireAuth: true (mydayRoute guarantees it); this guard
-    // satisfies the type and would only ever fire on a wrapper contract change.
-    if (session === null) {
-      return errorResponse(401, "Authentication required.");
-    }
-    const user = await mydayGet<MyDayUser>(
-      "/api/v1/auth/me",
-      session.access_token,
+  handler: async ({ withAccessToken }) => {
+    const user = await withAccessToken((accessToken) =>
+      mydayGet<MyDayUser>("/api/v1/auth/me", accessToken),
     );
     return NextResponse.json(user);
   },

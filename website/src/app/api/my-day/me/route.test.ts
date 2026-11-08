@@ -22,9 +22,12 @@ const MYDAY_SECRET = "test-myday-me-secret-1111111111111-32+chars";
 
 // mydayGet(path, bearerToken) -> echoes the identity for that bearer token.
 const mydayGet = vi.fn();
+// Refresh-on-401 (route.refresh.test.ts covers it in full). Here the backend
+// rejects every refresh token, so an access-token 401 still ends the session.
+const mydayRefresh = vi.fn();
 vi.mock("@/lib/skylize/myday-client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/skylize/myday-client")>();
-  return { ...actual, mydayGet };
+  return { ...actual, mydayGet, mydayRefresh };
 });
 
 const { GET } = await import("./route");
@@ -81,6 +84,8 @@ function reqWithRawCookie(value: string): NextRequest {
 
 beforeEach(() => {
   mydayGet.mockReset();
+  mydayRefresh.mockReset();
+  mydayRefresh.mockRejectedValue(new MyDayApiError(401, "invalid refresh token"));
   vi.stubEnv("SKYLIZE_BACKEND_URL", "https://backend.test");
   vi.stubEnv("SKYLIZE_MYDAY_SESSION_SECRET", MYDAY_SECRET);
   vi.stubEnv("NODE_ENV", "test");
@@ -125,7 +130,7 @@ describe("GET /api/my-day/me — fail-closed", () => {
     expect(mydayGet).not.toHaveBeenCalled();
   });
 
-  it("maps a backend 401 on the access token to 401 + cleared cookie (session expired)", async () => {
+  it("maps a backend 401 whose refresh is also rejected to 401 + cleared cookie (session expired)", async () => {
     // A validly-decrypting cookie whose token the backend rejects: build a
     // cookie for an UNKNOWN token so the echo mock throws MyDayApiError(401).
     const key = await deriveMyDayKeyMaterial(MYDAY_SECRET);
@@ -143,6 +148,8 @@ describe("GET /api/my-day/me — fail-closed", () => {
       "/api/v1/auth/me",
       "unknown-token-the-backend-rejects",
     );
+    expect(mydayRefresh).toHaveBeenCalledTimes(1);
+    expect(mydayRefresh).toHaveBeenCalledWith("r");
   });
 });
 
