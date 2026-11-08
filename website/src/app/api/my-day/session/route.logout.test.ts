@@ -23,10 +23,17 @@ vi.mock("@/lib/skylize/myday-client", async (importOriginal) => {
 });
 
 const clearedSpy = vi.fn();
+// Call-through spy; one test makes it throw to simulate an unexpected read error.
+const decryptSpy = vi.fn();
 vi.mock("@/lib/skylize/myday-session", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/skylize/myday-session")>();
   clearedSpy.mockImplementation(actual.clearedMydaySessionCookie);
-  return { ...actual, clearedMydaySessionCookie: clearedSpy };
+  decryptSpy.mockImplementation(actual.decryptSession);
+  return {
+    ...actual,
+    clearedMydaySessionCookie: clearedSpy,
+    decryptSession: decryptSpy,
+  };
 });
 
 const { DELETE } = await import("./route");
@@ -67,6 +74,7 @@ function expectCleared(response: NextResponse): void {
 beforeEach(() => {
   mydayLogout.mockReset();
   clearedSpy.mockClear();
+  decryptSpy.mockClear();
   vi.stubEnv("SKYLIZE_BACKEND_URL", "https://backend.test");
   vi.stubEnv("SKYLIZE_MYDAY_SESSION_SECRET", MYDAY_SECRET);
   vi.stubEnv("NODE_ENV", "test");
@@ -155,6 +163,32 @@ describe("DELETE /api/my-day/session — OD20 always-clear logout", () => {
       expect(logged).not.toContain("myday_config_error");
     },
   );
+
+  it("an unexpected cookie-read error -> cookie IS cleared AND the logout is partial", async () => {
+    const cookie = await sealed();
+    decryptSpy.mockRejectedValueOnce(new TypeError(`leaky detail ${cookie} ${PAIR.refresh_token}`));
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const response = await DELETE(logoutReq(cookie));
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      logout: "partial",
+      serverSessionEnded: false,
+      message: "Signed out on this device; we could not end the session on the server.",
+    });
+    expectCleared(response);
+    expect(mydayLogout).not.toHaveBeenCalled();
+    expect(errorLog).toHaveBeenCalledTimes(1);
+    expect(String(errorLog.mock.calls[0][0])).toContain(MYDAY_LOGOUT_PARTIAL_TAG);
+    expect(errorLog.mock.calls[0][1]).toEqual({ reason: "cookie-read-error", error: "TypeError" });
+    // Only the error NAME is logged: never its message, the cookie, or a token.
+    const logged = JSON.stringify(errorLog.mock.calls);
+    expect(logged).not.toContain("leaky detail");
+    expect(logged).not.toContain(cookie);
+    expect(logged).not.toContain(PAIR.refresh_token);
+    expect(logged).not.toContain("myday_config_error");
+  });
 
   it("no cookie -> full logout (204), cookie cleared, no backend call", async () => {
     const response = await DELETE(logoutReq());

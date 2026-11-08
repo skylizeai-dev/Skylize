@@ -86,29 +86,32 @@ export const POST = mydayRoute<z.infer<typeof loginSchema>>({
 type SealedRefresh =
   | { kind: "none" } // no cookie, or it does not decrypt under a VALID config
   | { kind: "token"; refreshToken: string }
-  | { kind: "config-error"; error: MyDayConfigError }; // cannot even try to decrypt
+  | { kind: "config-error"; error: MyDayConfigError } // cannot even try to decrypt
+  | { kind: "read-error"; errorName: string }; // reading the cookie threw unexpectedly
 
 /**
- * The refresh token sealed inside the presented cookie. Never throws for a
- * config error: logout must work with a dead session. A config error is NOT
- * collapsed into "none" (OD20/OD21): with a cookie present and the config
- * broken, a live token may still exist server-side, so that is a PARTIAL
- * logout, never a full one.
+ * The refresh token sealed inside the presented cookie. NEVER throws: logout
+ * must work with a dead session, and OD20 requires the cookie to be cleared on
+ * every path. Neither failure below is collapsed into "none": with a cookie
+ * present, a live token may still exist server-side, so both are PARTIAL
+ * logouts, never full ones.
+ *   * config error (MyDayConfigError)        -> "config-error" (OD21 tag);
+ *   * anything else thrown while reading it  -> "read-error" (only the error
+ *     NAME is kept: a message could carry data, and the cookie never is).
  */
 async function sealedRefreshToken(request: NextRequest): Promise<SealedRefresh> {
   const value = request.cookies.get(MYDAY_SESSION_COOKIE_NAME)?.value;
   if (!value) return { kind: "none" };
-  let cookieSecret: string;
   try {
-    ({ cookieSecret } = getMyDayConfig());
+    const { cookieSecret } = getMyDayConfig();
+    const session = await decryptSession(value, await deriveMyDayKeyMaterial(cookieSecret));
+    return session === null
+      ? { kind: "none" }
+      : { kind: "token", refreshToken: session.refresh_token };
   } catch (error) {
     if (error instanceof MyDayConfigError) return { kind: "config-error", error };
-    throw error;
+    return { kind: "read-error", errorName: error instanceof Error ? error.name : typeof error };
   }
-  const session = await decryptSession(value, await deriveMyDayKeyMaterial(cookieSecret));
-  return session === null
-    ? { kind: "none" }
-    : { kind: "token", refreshToken: session.refresh_token };
 }
 
 /** Backend logout attempts: the first plus exactly ONE retry. */
@@ -168,6 +171,9 @@ function partialLogoutResponse(): NextResponse {
 //                       status only, never the token).
 //   * cookie present but getMyDayConfig() throws -> revocation cannot even be
 //       attempted -> PARTIAL, logged as `myday_config_error` (OD21).
+//   * cookie present but reading it throws for any other reason -> PARTIAL,
+//       logged as `myday_logout_partial` with reason "cookie-read-error" and
+//       the error name only (never the cookie, a token, or the message).
 //   * no cookie, or a cookie that does not decrypt under a valid config ->
 //       nothing to revoke -> FULL: 204 + cleared cookie, no backend call.
 export const DELETE = mydayRoute({
@@ -178,6 +184,13 @@ export const DELETE = mydayRoute({
     if (sealed.kind === "none") return fullLogoutResponse();
     if (sealed.kind === "config-error") {
       logMyDayConfigError(sealed.error, "DELETE /api/my-day/session (logout partial)");
+      return partialLogoutResponse();
+    }
+    if (sealed.kind === "read-error") {
+      console.error(`[api/my-day] ${MYDAY_LOGOUT_PARTIAL_TAG}:`, {
+        reason: "cookie-read-error",
+        error: sealed.errorName,
+      });
       return partialLogoutResponse();
     }
     const result = await revokeWithOneRetry(sealed.refreshToken);
