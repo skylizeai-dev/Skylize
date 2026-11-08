@@ -106,6 +106,23 @@ export function getMyDayConfig(): MyDayConfig {
     );
   }
 
+  // P03(d): the My Day secret must not BE the Console secret. Read the Console
+  // env var directly (process.env, never via config.ts — importing the Console
+  // config module is exactly what this file exists to avoid, see the header) and
+  // compare trimmed values, the same normalisation readServerEnv applies to both.
+  // An unset/blank Console secret is simply "not equal": Console's own getter
+  // enforces its presence. The message names the variables, NEVER a value.
+  const consoleSecretName = "SKYLIZE_CONSOLE_SESSION_SECRET";
+  const consoleSecret = process.env[consoleSecretName]; // computed: no inlining
+  if (consoleSecret !== undefined && consoleSecret.trim() === cookieSecret) {
+    throw new Error(
+      "SKYLIZE_MYDAY_SESSION_SECRET must not equal SKYLIZE_CONSOLE_SESSION_SECRET. " +
+        "The My Day cookie carries a real bearer token pair; sharing the Console " +
+        "cookie secret would defeat the cryptographic isolation between the two " +
+        "sessions. Generate a distinct high-entropy secret for each.",
+    );
+  }
+
   myDayConfig = {
     backendUrl: rawUrl.replace(/\/+$/, ""),
     cookieSecret,
