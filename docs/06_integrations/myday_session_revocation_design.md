@@ -153,7 +153,8 @@ still fails, answers `200` with a partial-logout body instead of `204`. The fail
 is logged as `myday_logout_partial` with attempt count and status only.]
 
 **The trade-off, stated plainly.** When the backend revocation fails, the refresh
-token stays valid server-side until it expires (up to 14 days, `config.py:111`). The
+token stays valid server-side until it expires (up to 14 days, `config.py:111`
+[Corrected 2026-11-08, see section 8.0: now `config.py:119`]). The
 risk is bounded by the cookie having been deleted from this browser: it only matters
 to someone who already captured the cookie, or the cookie key, before logout. The
 user is never shown a logout that "failed", and the error log is the operator's
@@ -339,7 +340,7 @@ All of it lives in one place, `createAccessTokenRunner`
 (`website/src/lib/skylize/myday-handler.ts:239`). Handlers reach it through
 `withAccessToken`, for example `website/src/app/api/my-day/me/route.ts:25`.
 - When an authenticated backend call returns `401`, the BFF calls `mydayRefresh`
-  **exactly once** per request (`myday-handler.ts:261`). It is a POST and is never
+  **exactly once** per request (`myday-handler.ts:264`). It is a POST and is never
   auto-retried (`myday-client.ts:104`, retries are GET-only).
 - If the refresh succeeds, the cookie is re-sealed with the NEW pair and set on
   whatever response goes out (`myday-handler.ts:310`). The original call is retried
@@ -352,23 +353,26 @@ All of it lives in one place, `createAccessTokenRunner`
 
 ### 8.0.4 BFF logout semantics (OD20) `[CODE-VERIFIED]`
 
-`DELETE /api/my-day/session` (`website/src/app/api/my-day/session/route.ts:173`;
-rationale comment at `:159`). The **cookie is ALWAYS cleared**, which restores the
+`DELETE /api/my-day/session` (`website/src/app/api/my-day/session/route.ts:179`;
+rationale comment at `:162`). The **cookie is ALWAYS cleared**, which restores the
 2026-10-14 "always close" rule with explicit reporting:
-- **Single retry:** `revokeWithOneRetry` makes at most 2 attempts (`route.ts:115,124`).
-- **FULL logout:** `204` with an empty body and a cleared cookie (`route.ts:144`).
+- **Single retry:** `revokeWithOneRetry` makes at most 2 attempts (`route.ts:118,127`).
+- **FULL logout:** `204` with an empty body and a cleared cookie (`route.ts:147`).
   This happens when revocation succeeded, or when there was nothing to revoke: no
   cookie, or a cookie that does not decrypt under a VALID config.
 - **PARTIAL logout:** `200` with a cleared cookie and
   `{"logout":"partial","serverSessionEnded":false,"message":"Signed out on this device; we could not end the session on the server."}`
-  (`route.ts:151`). The body and its type are exported from
+  (`route.ts:154`). The body and its type are exported from
   `website/src/lib/skylize/myday-logout.ts` (`MYDAY_PARTIAL_LOGOUT_BODY`,
   `MyDayPartialLogoutBody`). A partial logout happens when:
   - revocation fails after the retry. It is logged at error level under
     `myday_logout_partial` with attempt count and status only, never the token
-    (`route.ts:185`);
+    (`route.ts:198`);
   - a cookie is present but `getMyDayConfig()` throws, so revocation cannot even be
-    attempted. It is logged under `myday_config_error` (`route.ts:98,180`).
+    attempted. It is logged under `myday_config_error` (`route.ts:102,186`);
+  - a cookie is present but reading it throws for any other reason. It is logged
+    under `myday_logout_partial` with `reason: "cookie-read-error"` and the error
+    name only (`route.ts:102,190`).
 - **Superseded interim:** the T2 change `2b6bfbe` ("logout fails closed": `502` and
   KEEP the cookie on failure) did exist on this branch. OD20 supersedes it.
 
