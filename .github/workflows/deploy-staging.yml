@@ -3,8 +3,8 @@ name: Deploy → Staging
 # MANUAL ONLY (owner ruling OD14, 2026-11-07; docs/decisions/2026-11-07_owner_rulings.md).
 # The `push: branches: [main]` trigger was removed: AWS staging is not provisioned,
 # so every push to main produced a red run that failed at "Configure AWS credentials
-# (OIDC)" (e.g. runs 42406222420, 42406965841, 42407492832). Railway stays the
-# active staging environment until then.
+# (OIDC)" (e.g. runs 42406222420, 42406965841, 42407492832). No live staging
+# environment exists (OD16/OD27); the environment of record is CI's integration job.
 #
 # Restore the push trigger ONLY after all five provisioning prerequisites hold:
 #   1. OIDC trust fixed: infra/terraform/staging/modules/iam/main.tf (the
