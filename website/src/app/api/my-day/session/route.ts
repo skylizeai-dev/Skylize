@@ -1,8 +1,9 @@
 // POST /api/my-day/session   — My Day login: email + password -> 204 + encrypted
 //                               `skylize_myday` cookie.
-// DELETE /api/my-day/session  — My Day logout: revoke the refresh token on the
-//                               backend, then 204 + cleared cookie (502 and
-//                               the cookie kept if revocation fails twice).
+// DELETE /api/my-day/session  — My Day logout (OD20): revoke the refresh token
+//                               on the backend, then ALWAYS clear the cookie.
+//                               204 = full logout; 200 + partial body = this
+//                               device signed out, server session not ended.
 //
 // The My Day analogue of /api/console/session (console/session/route.ts), but:
 //   * it authenticates a REAL user (email + password) against the backend's
@@ -22,8 +23,17 @@ import type { NextRequest } from "next/server";
 import { z } from "zod";
 
 import { MyDayApiError, mydayLogin, mydayLogout } from "@/lib/skylize/myday-client";
-import { getMyDayConfig } from "@/lib/skylize/myday-config";
-import { errorResponse, mydayRoute } from "@/lib/skylize/myday-handler";
+import { MyDayConfigError, getMyDayConfig } from "@/lib/skylize/myday-config";
+import {
+  errorResponse,
+  logMyDayConfigError,
+  mydayRoute,
+} from "@/lib/skylize/myday-handler";
+import {
+  MYDAY_LOGOUT_PARTIAL_TAG,
+  MYDAY_PARTIAL_LOGOUT_BODY,
+  MYDAY_PARTIAL_LOGOUT_STATUS,
+} from "@/lib/skylize/myday-logout";
 import {
   MYDAY_SESSION_COOKIE_NAME,
   clearedMydaySessionCookie,
@@ -72,77 +82,110 @@ export const POST = mydayRoute<z.infer<typeof loginSchema>>({
   },
 });
 
+/** What the presented cookie yields for logout purposes. */
+type SealedRefresh =
+  | { kind: "none" } // no cookie, or it does not decrypt under a VALID config
+  | { kind: "token"; refreshToken: string }
+  | { kind: "config-error"; error: MyDayConfigError }; // cannot even try to decrypt
+
 /**
- * The refresh token sealed inside the presented cookie, or null when there is no
- * cookie or it does not decrypt (absent, tampered, wrong key, config missing).
- * Never throws: logout must work with a dead session.
+ * The refresh token sealed inside the presented cookie. Never throws for a
+ * config error: logout must work with a dead session. A config error is NOT
+ * collapsed into "none" (OD20/OD21): with a cookie present and the config
+ * broken, a live token may still exist server-side, so that is a PARTIAL
+ * logout, never a full one.
  */
-async function sealedRefreshToken(request: NextRequest): Promise<string | null> {
+async function sealedRefreshToken(request: NextRequest): Promise<SealedRefresh> {
   const value = request.cookies.get(MYDAY_SESSION_COOKIE_NAME)?.value;
-  if (!value) return null;
+  if (!value) return { kind: "none" };
+  let cookieSecret: string;
   try {
-    const { cookieSecret } = getMyDayConfig();
-    const session = await decryptSession(value, await deriveMyDayKeyMaterial(cookieSecret));
-    return session?.refresh_token ?? null;
-  } catch {
-    return null;
+    ({ cookieSecret } = getMyDayConfig());
+  } catch (error) {
+    if (error instanceof MyDayConfigError) return { kind: "config-error", error };
+    throw error;
   }
+  const session = await decryptSession(value, await deriveMyDayKeyMaterial(cookieSecret));
+  return session === null
+    ? { kind: "none" }
+    : { kind: "token", refreshToken: session.refresh_token };
 }
 
 /** Backend logout attempts: the first plus exactly ONE retry. */
 const LOGOUT_ATTEMPTS = 2;
 
+type RevokeResult = { ok: true } | { ok: false; attempts: number; status: number | "unknown" };
+
 /**
  * Revoke `refreshToken` server-side, retrying exactly once on any failure (the
- * backend logout is idempotent: 204 for any valid body). Resolves true on
- * success, false when both attempts failed. Never logs the token.
+ * backend logout is idempotent: 204 for any valid body). Logs only the attempt
+ * number and status, never the token or any message text.
  */
-async function revokeWithOneRetry(refreshToken: string): Promise<boolean> {
+async function revokeWithOneRetry(refreshToken: string): Promise<RevokeResult> {
+  let status: number | "unknown" = "unknown";
   for (let attempt = 1; attempt <= LOGOUT_ATTEMPTS; attempt += 1) {
     try {
       await mydayLogout(refreshToken);
-      return true;
+      return { ok: true };
     } catch (error) {
-      // The status and message carry no secret (MyDayApiError never echoes a token).
-      const detail = {
-        attempt,
-        status: error instanceof MyDayApiError ? error.status : "unknown",
-        message: error instanceof Error ? error.message : String(error),
-      };
+      status = error instanceof MyDayApiError ? error.status : "unknown";
       if (attempt < LOGOUT_ATTEMPTS) {
-        console.warn("[api/my-day] server-side logout failed; retrying once:", detail);
-      } else {
-        console.error(
-          "[api/my-day] server-side logout failed; cookie kept so the client can retry:",
-          detail,
-        );
+        console.warn("[api/my-day] server-side logout failed; retrying once:", {
+          attempt,
+          status,
+        });
       }
     }
   }
-  return false;
+  return { ok: false, attempts: LOGOUT_ATTEMPTS, status };
 }
 
-// Logout FAILS CLOSED (owner instruction, superseding the 2026-10-14 decision in
-// myday_session_revocation_design.md 2.0.3 that the cookie was ALWAYS cleared
-// and the answer ALWAYS 204). The refresh token is revoked server-side BEFORE
-// the cookie is cleared:
+/** 204, empty body, cleared cookie: the server session is ended (or never existed). */
+function fullLogoutResponse(): NextResponse {
+  const response = new NextResponse(null, { status: 204 });
+  response.cookies.set(clearedMydaySessionCookie());
+  return response;
+}
+
+/** 200 + MYDAY_PARTIAL_LOGOUT_BODY, cleared cookie: this device only. */
+function partialLogoutResponse(): NextResponse {
+  const response = NextResponse.json(MYDAY_PARTIAL_LOGOUT_BODY, {
+    status: MYDAY_PARTIAL_LOGOUT_STATUS,
+  });
+  response.cookies.set(clearedMydaySessionCookie());
+  return response;
+}
+
+// OD20 (owner ruling 2026-11-08): the cookie is ALWAYS cleared, even when the
+// server-side revocation fails. This RESTORES the 2026-10-14 "always close"
+// rule (myday_session_revocation_design.md 2.0.3) and SUPERSEDES the interim
+// T2 behaviour (2b6bfbe: 502 and keep the cookie on failure), now with EXPLICIT
+// reporting of which kind of logout happened (contract: myday-logout.ts):
 //   * decryptable cookie -> mydayLogout, retried exactly once on failure.
-//       success      -> 204 + cleared cookie;
-//       both failed  -> 502 JSON error, cookie NOT cleared (the client can retry
-//                       DELETE; clearing it would orphan a still-valid refresh
-//                       token server-side), logged at error level, no token.
-//   * no cookie, or a cookie that does not decrypt -> nothing to revoke:
-//       204 + cleared cookie, no backend call (unchanged).
+//       success      -> FULL: 204 + cleared cookie;
+//       both failed  -> PARTIAL: 200 + partial body + cleared cookie, logged at
+//                       error level as `myday_logout_partial` (attempts +
+//                       status only, never the token).
+//   * cookie present but getMyDayConfig() throws -> revocation cannot even be
+//       attempted -> PARTIAL, logged as `myday_config_error` (OD21).
+//   * no cookie, or a cookie that does not decrypt under a valid config ->
+//       nothing to revoke -> FULL: 204 + cleared cookie, no backend call.
 export const DELETE = mydayRoute({
   method: "DELETE",
   requireAuth: false,
   handler: async ({ request }) => {
-    const refreshToken = await sealedRefreshToken(request);
-    if (refreshToken !== null && !(await revokeWithOneRetry(refreshToken))) {
-      return errorResponse(502, "Logout could not be completed. Please try again.");
+    const sealed = await sealedRefreshToken(request);
+    if (sealed.kind === "none") return fullLogoutResponse();
+    if (sealed.kind === "config-error") {
+      logMyDayConfigError(sealed.error, "DELETE /api/my-day/session (logout partial)");
+      return partialLogoutResponse();
     }
-    const response = new NextResponse(null, { status: 204 });
-    response.cookies.set(clearedMydaySessionCookie());
-    return response;
+    const result = await revokeWithOneRetry(sealed.refreshToken);
+    if (result.ok) return fullLogoutResponse();
+    console.error(`[api/my-day] ${MYDAY_LOGOUT_PARTIAL_TAG}:`, {
+      attempts: result.attempts,
+      status: result.status,
+    });
+    return partialLogoutResponse();
   },
 });
