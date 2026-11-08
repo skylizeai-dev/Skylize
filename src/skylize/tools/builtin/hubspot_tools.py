@@ -90,8 +90,9 @@ _PRE_SEND_TRANSPORT_ERRORS = (
 
 # Owner ruling OD4: create_contact is the one non-idempotent POST here, so it
 # retries ONLY on 429 and on pre-send connect failures; a 5xx or a timeout after
-# the request may have been sent is surfaced, never retried (same shape as
-# asana_tools.py's 429-only create predicate).
+# the request may have been sent is surfaced, never retried. Unlike
+# asana_tools.py's create predicate (:142-153), which declines every transport
+# failure, pre-send connect failures ARE retried here, as OD4 permits.
 def _is_retryable_create(exc: BaseException) -> bool:
     if isinstance(exc, httpx.HTTPStatusError):
         return exc.response.status_code == 429
