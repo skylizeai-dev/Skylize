@@ -24,6 +24,25 @@
 /** Minimum characters for the raw My Day cookie secret before SHA-256 derivation. */
 export const MYDAY_SESSION_SECRET_MIN_LENGTH = 32;
 
+/**
+ * Every failure of `getMyDayConfig` is a MyDayConfigError, so callers can tell
+ * an OPERATOR misconfiguration apart from a user-side session failure (OD21):
+ * a config error is logged under MYDAY_CONFIG_ERROR_TAG and answered 500
+ * WITHOUT clearing the user's cookie, never collapsed into a silent 401.
+ *
+ * Messages name environment VARIABLES only, never a value (a secret or a URL),
+ * so a message is safe to log verbatim.
+ */
+export class MyDayConfigError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "MyDayConfigError";
+  }
+}
+
+/** Greppable server-log tag for a My Day configuration error (OD21). */
+export const MYDAY_CONFIG_ERROR_TAG = "myday_config_error";
+
 export interface MyDayConfig {
   /** Railway backend origin, no trailing slash — the SAME origin Console reads. */
   backendUrl: string;
@@ -37,7 +56,7 @@ export interface MyDayConfig {
 
 function assertServerOnly(): void {
   if (typeof window !== "undefined") {
-    throw new Error(
+    throw new MyDayConfigError(
       "lib/skylize/myday-config was imported into client-side code. " +
         "It reads server-only environment and must only be used from route " +
         "handlers, the proxy gate, or other server-only modules.",
@@ -50,7 +69,7 @@ function readServerEnv(name: string): string {
   // probe the NEXT_PUBLIC_ variant without referencing it statically.
   const leakedName = `NEXT_PUBLIC_${name}`;
   if (process.env[leakedName] !== undefined) {
-    throw new Error(
+    throw new MyDayConfigError(
       `${leakedName} is set. ${name} is a server-only secret and must never ` +
         "be exposed with a NEXT_PUBLIC_ prefix — Next.js would inline it into " +
         `the client bundle. Remove ${leakedName} and set ${name} instead.`,
@@ -58,7 +77,7 @@ function readServerEnv(name: string): string {
   }
   const value = process.env[name];
   if (value === undefined || value.trim() === "") {
-    throw new Error(
+    throw new MyDayConfigError(
       `Missing required server environment variable ${name}. ` +
         "Set it in the deployment environment (or website/.env.local for " +
         "local development). It must NOT be prefixed with NEXT_PUBLIC_.",
@@ -87,17 +106,16 @@ export function getMyDayConfig(): MyDayConfig {
   try {
     parsed = new URL(rawUrl);
   } catch {
-    throw new Error(
-      `SKYLIZE_BACKEND_URL is not a valid URL: received ${JSON.stringify(rawUrl)}.`,
-    );
+    // OD21: name the variable, never echo its value into a log line.
+    throw new MyDayConfigError("SKYLIZE_BACKEND_URL is not a valid URL.");
   }
   if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
-    throw new Error("SKYLIZE_BACKEND_URL must be an http(s) URL.");
+    throw new MyDayConfigError("SKYLIZE_BACKEND_URL must be an http(s) URL.");
   }
 
   const cookieSecret = readServerEnv("SKYLIZE_MYDAY_SESSION_SECRET");
   if (cookieSecret.length < MYDAY_SESSION_SECRET_MIN_LENGTH) {
-    throw new Error(
+    throw new MyDayConfigError(
       `SKYLIZE_MYDAY_SESSION_SECRET must be at least ${MYDAY_SESSION_SECRET_MIN_LENGTH} ` +
         "characters of high-entropy random data. It is SHA-256-derived into the " +
         "32-byte AES-256-GCM key that encrypts My Day session cookies, and must " +
@@ -115,7 +133,7 @@ export function getMyDayConfig(): MyDayConfig {
   const consoleSecretName = "SKYLIZE_CONSOLE_SESSION_SECRET";
   const consoleSecret = process.env[consoleSecretName]; // computed: no inlining
   if (consoleSecret !== undefined && consoleSecret.trim() === cookieSecret) {
-    throw new Error(
+    throw new MyDayConfigError(
       "SKYLIZE_MYDAY_SESSION_SECRET must not equal SKYLIZE_CONSOLE_SESSION_SECRET. " +
         "The My Day cookie carries a real bearer token pair; sharing the Console " +
         "cookie secret would defeat the cryptographic isolation between the two " +

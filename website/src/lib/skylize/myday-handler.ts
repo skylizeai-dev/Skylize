@@ -12,7 +12,9 @@
 //
 // The authoritative My Day auth check is HERE (and re-run in the edge gate below
 // only as defense-in-depth): read the `skylize_myday` cookie, decrypt it, and on
-// any failure fail closed with 401 AND a cleared cookie. This mirrors Console,
+// any failure fail closed with 401 AND a cleared cookie — except a My Day
+// CONFIG error, which is an operator fault: logged as `myday_config_error`,
+// answered 500, cookie left alone (OD21). This mirrors Console,
 // where the route handler is authoritative and the proxy is defense-in-depth
 // (proxy.ts:11-13).
 
@@ -21,7 +23,7 @@ import type { NextRequest } from "next/server";
 import type { ZodType } from "zod";
 
 import { MyDayApiError, mydayRefresh } from "./myday-client";
-import { getMyDayConfig } from "./myday-config";
+import { MYDAY_CONFIG_ERROR_TAG, MyDayConfigError, getMyDayConfig } from "./myday-config";
 import { isStateChangingMethod, verifySameOrigin } from "./myday-csrf";
 import {
   MYDAY_SESSION_COOKIE_NAME,
@@ -101,24 +103,43 @@ function unauthenticatedResponse(): NextResponse {
 }
 
 /**
+ * Log a My Day configuration error under the greppable MYDAY_CONFIG_ERROR_TAG
+ * (OD21). Only the message is logged: every MyDayConfigError message names
+ * variables, never values (myday-config.ts), so no secret reaches the log.
+ */
+export function logMyDayConfigError(error: MyDayConfigError, during: string): void {
+  console.error(`[api/my-day] ${MYDAY_CONFIG_ERROR_TAG}:`, {
+    during,
+    message: error.message,
+  });
+}
+
+/** The opaque 500 for a config error. It does NOT touch the user's cookie. */
+function configErrorResponse(error: MyDayConfigError, during: string): NextResponse {
+  logMyDayConfigError(error, during);
+  return errorResponse(500, "Internal server error.");
+}
+
+/**
  * Read and decrypt the `skylize_myday` cookie. Returns the session payload, or
- * `null` on any failure (absent cookie, config error, un-decryptable/expired/
- * tampered value). `decryptSession` never throws; a config error (missing env)
- * is caught here and also collapses to null so a fail-closed 401 results rather
- * than a 500 leaking configuration state.
+ * `null` when the cookie is absent or does not decrypt (tampered, wrong key,
+ * malformed): that is a USER-side session failure, answered 401 + clear, and
+ * deliberately not logged.
+ *
+ * A CONFIG error is NOT collapsed into null (OD21): `getMyDayConfig` throws a
+ * MyDayConfigError, which propagates to `mydayRoute`, is logged under
+ * MYDAY_CONFIG_ERROR_TAG and answered 500 WITHOUT clearing the cookie. An
+ * operator misconfiguration must neither be silent nor log everyone out.
+ * `decryptSession` itself never throws.
  */
 async function readMyDaySession(
   request: NextRequest,
 ): Promise<MyDaySessionPayload | null> {
   const cookieValue = request.cookies.get(MYDAY_SESSION_COOKIE_NAME)?.value;
   if (cookieValue === undefined || cookieValue === "") return null;
-  try {
-    const { cookieSecret } = getMyDayConfig();
-    const keyMaterial = await deriveMyDayKeyMaterial(cookieSecret);
-    return await decryptSession(cookieValue, keyMaterial);
-  } catch {
-    return null;
-  }
+  const { cookieSecret } = getMyDayConfig(); // throws MyDayConfigError: not caught here
+  const keyMaterial = await deriveMyDayKeyMaterial(cookieSecret);
+  return decryptSession(cookieValue, keyMaterial);
 }
 
 /**
@@ -319,6 +340,10 @@ export function mydayRoute<TBody = undefined, TParams = Record<string, never>>(
     } catch (error) {
       if (error instanceof MyDaySessionEndedError) {
         response = sessionEndedResponse(error.status);
+      } else if (error instanceof MyDayConfigError) {
+        // OD21: logged under its own tag, 500, cookie untouched. Covers the
+        // session read here AND the login path (myday-client.ts myDayFetch).
+        response = configErrorResponse(error, `${request.method} ${request.nextUrl.pathname}`);
       } else if (error instanceof MyDayApiError) {
         response = mapMyDayError(error);
       } else {
