@@ -208,7 +208,8 @@ export async function mydayRefresh(
  * schema-valid body. Like refresh it carries no Authorization header: possession
  * of the refresh token is the whole authorization. Throws MyDayApiError on a
  * network failure, timeout, or any non-2xx answer; the caller decides what that
- * means (the BFF logout still clears the cookie and logs it).
+ * means (the BFF logout retries once, then answers 502 and KEEPS the cookie).
+ * Being a POST it is never auto-retried here; that single retry is the route's.
  */
 export async function mydayLogout(refreshToken: string): Promise<void> {
   await myDayFetch<null>("/api/v1/auth/logout", {

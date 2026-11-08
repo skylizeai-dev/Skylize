@@ -1,7 +1,8 @@
 // POST /api/my-day/session   — My Day login: email + password -> 204 + encrypted
 //                               `skylize_myday` cookie.
 // DELETE /api/my-day/session  — My Day logout: revoke the refresh token on the
-//                               backend, then 204 + cleared cookie.
+//                               backend, then 204 + cleared cookie (502 and
+//                               the cookie kept if revocation fails twice).
 //
 // The My Day analogue of /api/console/session (console/session/route.ts), but:
 //   * it authenticates a REAL user (email + password) against the backend's
@@ -88,27 +89,57 @@ async function sealedRefreshToken(request: NextRequest): Promise<string | null> 
   }
 }
 
-// Owner decision 2026-10-14 (myday_session_revocation_design.md, 2.0.3): the
-// cookie is ALWAYS cleared and the answer is ALWAYS 204, even when the backend
-// revocation fails. A failure is logged at error level, never swallowed. The
-// trade-off: that refresh token then stays valid server-side until it expires,
-// a risk bounded by the cookie being gone from this browser.
+/** Backend logout attempts: the first plus exactly ONE retry. */
+const LOGOUT_ATTEMPTS = 2;
+
+/**
+ * Revoke `refreshToken` server-side, retrying exactly once on any failure (the
+ * backend logout is idempotent: 204 for any valid body). Resolves true on
+ * success, false when both attempts failed. Never logs the token.
+ */
+async function revokeWithOneRetry(refreshToken: string): Promise<boolean> {
+  for (let attempt = 1; attempt <= LOGOUT_ATTEMPTS; attempt += 1) {
+    try {
+      await mydayLogout(refreshToken);
+      return true;
+    } catch (error) {
+      // The status and message carry no secret (MyDayApiError never echoes a token).
+      const detail = {
+        attempt,
+        status: error instanceof MyDayApiError ? error.status : "unknown",
+        message: error instanceof Error ? error.message : String(error),
+      };
+      if (attempt < LOGOUT_ATTEMPTS) {
+        console.warn("[api/my-day] server-side logout failed; retrying once:", detail);
+      } else {
+        console.error(
+          "[api/my-day] server-side logout failed; cookie kept so the client can retry:",
+          detail,
+        );
+      }
+    }
+  }
+  return false;
+}
+
+// Logout FAILS CLOSED (owner instruction, superseding the 2026-10-14 decision in
+// myday_session_revocation_design.md 2.0.3 that the cookie was ALWAYS cleared
+// and the answer ALWAYS 204). The refresh token is revoked server-side BEFORE
+// the cookie is cleared:
+//   * decryptable cookie -> mydayLogout, retried exactly once on failure.
+//       success      -> 204 + cleared cookie;
+//       both failed  -> 502 JSON error, cookie NOT cleared (the client can retry
+//                       DELETE; clearing it would orphan a still-valid refresh
+//                       token server-side), logged at error level, no token.
+//   * no cookie, or a cookie that does not decrypt -> nothing to revoke:
+//       204 + cleared cookie, no backend call (unchanged).
 export const DELETE = mydayRoute({
   method: "DELETE",
   requireAuth: false,
   handler: async ({ request }) => {
     const refreshToken = await sealedRefreshToken(request);
-    if (refreshToken !== null) {
-      try {
-        await mydayLogout(refreshToken);
-      } catch (error) {
-        // Never log the token; the status and message carry no secret.
-        const status = error instanceof MyDayApiError ? error.status : "unknown";
-        console.error(
-          "[api/my-day] server-side logout failed; refresh token stays valid until expiry:",
-          { status, message: error instanceof Error ? error.message : String(error) },
-        );
-      }
+    if (refreshToken !== null && !(await revokeWithOneRetry(refreshToken))) {
+      return errorResponse(502, "Logout could not be completed. Please try again.");
     }
     const response = new NextResponse(null, { status: 204 });
     response.cookies.set(clearedMydaySessionCookie());

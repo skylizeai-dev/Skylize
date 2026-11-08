@@ -1,14 +1,17 @@
 // @vitest-environment node
 //
-// DELETE /api/my-day/session — server-side logout (myday_session_revocation_design.md).
-// The backend is MOCKED via vi.mock of myday-client.
+// DELETE /api/my-day/session — server-side logout that FAILS CLOSED (owner
+// instruction superseding the 2026-10-14 "always 204" decision). The backend is
+// MOCKED via vi.mock of myday-client; clearedMydaySessionCookie is wrapped in a
+// spy (calling through) so the ORDER "revoke, then clear" is observable.
 //
 // What these prove:
 //   * logout sends the refresh token sealed INSIDE the cookie to the backend
-//     (and nothing else), then clears the cookie with 204;
-//   * when the backend call fails, the cookie is STILL cleared and the answer is
-//     STILL 204, and the failure is logged at error level without the token
-//     (owner decision, design 2.0.3);
+//     BEFORE the cookie is cleared, then 204 + cleared cookie;
+//   * a backend failure is retried exactly ONCE; a second failure is a 502 JSON
+//     error with NO cookie clearing (so the client can retry), logged at error
+//     level without the token;
+//   * fail-once-then-succeed is a normal 204 + cleared cookie;
 //   * with no cookie, or one that does not decrypt, there is nothing to revoke:
 //     no backend call, cookie cleared, 204.
 
@@ -22,6 +25,13 @@ const mydayLogout = vi.fn();
 vi.mock("@/lib/skylize/myday-client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/skylize/myday-client")>();
   return { ...actual, mydayLogout };
+});
+
+const clearedSpy = vi.fn();
+vi.mock("@/lib/skylize/myday-session", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/skylize/myday-session")>();
+  clearedSpy.mockImplementation(actual.clearedMydaySessionCookie);
+  return { ...actual, clearedMydaySessionCookie: clearedSpy };
 });
 
 const { DELETE } = await import("./route");
@@ -50,6 +60,7 @@ function expectCleared(response: NextResponse): void {
 
 beforeEach(() => {
   mydayLogout.mockReset();
+  clearedSpy.mockClear();
   vi.stubEnv("SKYLIZE_BACKEND_URL", "https://backend.test");
   vi.stubEnv("SKYLIZE_MYDAY_SESSION_SECRET", MYDAY_SECRET);
   vi.stubEnv("NODE_ENV", "test");
@@ -60,8 +71,8 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("DELETE /api/my-day/session (server-side logout)", () => {
-  it("revokes the sealed refresh token on the backend, then clears the cookie", async () => {
+describe("DELETE /api/my-day/session (server-side logout, fail-closed)", () => {
+  it("backend success: 204 + cleared cookie, and mydayLogout ran BEFORE the cookie was cleared", async () => {
     mydayLogout.mockResolvedValue(undefined);
 
     const response = await DELETE(logoutReq(await sealed()));
@@ -70,6 +81,10 @@ describe("DELETE /api/my-day/session (server-side logout)", () => {
     expect(mydayLogout).toHaveBeenCalledTimes(1);
     expect(mydayLogout).toHaveBeenCalledWith(PAIR.refresh_token);
     expectCleared(response);
+    expect(clearedSpy).toHaveBeenCalled();
+    const lastLogout = Math.max(...mydayLogout.mock.invocationCallOrder);
+    const firstClear = Math.min(...clearedSpy.mock.invocationCallOrder);
+    expect(lastLogout).toBeLessThan(firstClear);
   });
 
   it.each([
@@ -77,37 +92,66 @@ describe("DELETE /api/my-day/session (server-side logout)", () => {
     ["timeout", new MyDayApiError(504, "Backend request timed out after 10000ms.")],
     ["backend 500", new MyDayApiError(500, "Backend error (HTTP 500).")],
     ["unexpected error", new Error("boom")],
-  ])("still clears the cookie and 204s on %s, and logs it", async (_label, failure) => {
-    mydayLogout.mockRejectedValue(failure);
+  ])(
+    "backend fails twice (%s): 502 JSON, NO cookie clearing, exactly 2 calls, error logged without the token",
+    async (_label, failure) => {
+      mydayLogout.mockRejectedValue(failure);
+      const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+      const warnLog = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const response = await DELETE(logoutReq(await sealed()));
+
+      expect(response.status).toBe(502);
+      const body = await response.json();
+      expect(typeof body.error).toBe("string");
+      expect(JSON.stringify(body)).not.toContain(PAIR.refresh_token);
+      expect(JSON.stringify(body)).not.toContain(PAIR.access_token);
+      // No Set-Cookie at all: the cookie stays so the client can retry.
+      expect(response.cookies.get(MYDAY_SESSION_COOKIE_NAME)).toBeUndefined();
+      expect(response.headers.get("set-cookie")).toBeNull();
+      expect(clearedSpy).not.toHaveBeenCalled();
+      expect(mydayLogout).toHaveBeenCalledTimes(2);
+      expect(mydayLogout).toHaveBeenNthCalledWith(1, PAIR.refresh_token);
+      expect(mydayLogout).toHaveBeenNthCalledWith(2, PAIR.refresh_token);
+
+      expect(errorLog).toHaveBeenCalledTimes(1);
+      const logged = JSON.stringify([...errorLog.mock.calls, ...warnLog.mock.calls]);
+      expect(logged).toMatch(/server-side logout failed/);
+      expect(logged).not.toContain(PAIR.refresh_token);
+      expect(logged).not.toContain(PAIR.access_token);
+    },
+  );
+
+  it("backend fails once then succeeds: 204 + cleared cookie after 2 calls", async () => {
+    mydayLogout
+      .mockRejectedValueOnce(new MyDayApiError(500, "Backend error (HTTP 500)."))
+      .mockResolvedValueOnce(undefined);
+    vi.spyOn(console, "warn").mockImplementation(() => {});
     const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
 
     const response = await DELETE(logoutReq(await sealed()));
 
     expect(response.status).toBe(204);
+    expect(mydayLogout).toHaveBeenCalledTimes(2);
     expectCleared(response);
-    expect(errorLog).toHaveBeenCalledTimes(1);
-    // The log line must never carry the refresh (or access) token.
-    const logged = JSON.stringify(errorLog.mock.calls);
-    expect(logged).toMatch(/server-side logout failed/);
-    expect(logged).not.toContain(PAIR.refresh_token);
-    expect(logged).not.toContain(PAIR.access_token);
+    expect(errorLog).not.toHaveBeenCalled();
   });
 
-  it("makes no backend call when there is no cookie", async () => {
+  it("no cookie: 204 + cleared cookie and no backend call", async () => {
     const response = await DELETE(logoutReq());
     expect(response.status).toBe(204);
     expect(mydayLogout).not.toHaveBeenCalled();
     expectCleared(response);
   });
 
-  it("makes no backend call when the cookie does not decrypt", async () => {
+  it("undecryptable cookie: 204 + cleared cookie and no backend call", async () => {
     const response = await DELETE(logoutReq("not-a-real-ciphertext"));
     expect(response.status).toBe(204);
     expect(mydayLogout).not.toHaveBeenCalled();
     expectCleared(response);
   });
 
-  it("makes no backend call for a cookie sealed under a different key", async () => {
+  it("cookie sealed under a different key: 204 and no backend call", async () => {
     const foreign = await encryptSession(
       PAIR,
       await deriveMyDayKeyMaterial("some-other-secret-of-at-least-32-characters!!"),
@@ -115,5 +159,6 @@ describe("DELETE /api/my-day/session (server-side logout)", () => {
     const response = await DELETE(logoutReq(foreign));
     expect(response.status).toBe(204);
     expect(mydayLogout).not.toHaveBeenCalled();
+    expectCleared(response);
   });
 });
