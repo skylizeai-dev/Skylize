@@ -18,7 +18,13 @@ from typing import Any
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
-from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
+from tenacity import (
+    RetryCallState,
+    retry,
+    retry_if_exception,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from ...app.credentials.vault import CredentialNotFoundError, CredentialVault
 from ..base import ToolContext, ToolDefinition, ToolExecutionError
@@ -66,12 +72,55 @@ class HubSpotSearchContactsOut(BaseModel):
 
 
 _RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
+_RETRY_AFTER_CAP_SECONDS = 10.0
+
+# Transport errors that are raised strictly BEFORE any request byte is written
+# (httpcore 1.0.9): ConnectError/ConnectTimeout only inside
+# httpcore/_async/connection.py `_connect` (connect_tcp / start_tls,
+# httpcore/_backends/anyio.py:62-65,109-111); PoolTimeout at
+# httpcore/_async/connection_pool.py:232, before "Send the request" at :235.
+# Every other transport error (ReadTimeout, WriteError, RemoteProtocolError,
+# ...) may happen after the request was sent, so its outcome is ambiguous.
+_PRE_SEND_TRANSPORT_ERRORS = (
+    httpx.ConnectError,
+    httpx.ConnectTimeout,
+    httpx.PoolTimeout,
+)
 
 
-def _is_retryable(exc: BaseException) -> bool:
+# Owner ruling OD4: create_contact is the one non-idempotent POST here, so it
+# retries ONLY on 429 and on pre-send connect failures; a 5xx or a timeout after
+# the request may have been sent is surfaced, never retried. Unlike
+# asana_tools.py's create predicate (:142-153), which declines every transport
+# failure, pre-send connect failures ARE retried here, as OD4 permits.
+def _is_retryable_create(exc: BaseException) -> bool:
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code == 429
+    return isinstance(exc, _PRE_SEND_TRANSPORT_ERRORS)
+
+
+# search_contacts is a read-only POST: retrying 5xx/timeouts duplicates nothing.
+def _is_retryable_read(exc: BaseException) -> bool:
     if isinstance(exc, httpx.HTTPStatusError):
         return exc.response.status_code in _RETRYABLE_STATUS
     return isinstance(exc, (httpx.ConnectError, httpx.TimeoutException))
+
+
+_backoff = wait_exponential(multiplier=1, min=1, max=10)
+
+
+def _wait_retry_after(retry_state: RetryCallState) -> float:
+    """Honor a bounded `Retry-After` on 429; otherwise exponential backoff."""
+    outcome = retry_state.outcome
+    exc = outcome.exception() if outcome is not None else None
+    if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 429:
+        header = exc.response.headers.get("retry-after")
+        if header is not None:
+            try:
+                return max(0.0, min(float(header), _RETRY_AFTER_CAP_SECONDS))
+            except ValueError:
+                pass
+    return float(_backoff(retry_state))
 
 
 class HubSpotClient:
@@ -93,25 +142,26 @@ class HubSpotClient:
         await self._client.aclose()
 
     @retry(
-        retry=retry_if_exception(_is_retryable),
+        retry=retry_if_exception(_is_retryable_create),
         stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=1, max=10),
+        wait=_wait_retry_after,
         reraise=True,
     )
     async def create_contact(self, properties: dict[str, str]) -> httpx.Response:
         response = await self._client.post(
             "/crm/v3/objects/contacts", json={"properties": properties},
         )
-        # 409 (duplicate contact) and other 4xx are handled by the caller, not
-        # retried; only rate-limit/server errors are worth a retry here.
-        if response.status_code in _RETRYABLE_STATUS:
+        # Only 429 is raised (and retried). 409 and other 4xx are handled by the
+        # caller; 5xx is returned unraised so the handler can report an
+        # ambiguous outcome instead of retrying a non-idempotent create.
+        if response.status_code == 429:
             response.raise_for_status()
         return response
 
     @retry(
-        retry=retry_if_exception(_is_retryable),
+        retry=retry_if_exception(_is_retryable_read),
         stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=1, max=10),
+        wait=_wait_retry_after,
         reraise=True,
     )
     async def search_contacts(self, query: str, limit: int) -> httpx.Response:
@@ -163,7 +213,30 @@ def build_hubspot_create_contact_tool(vault: CredentialVault) -> ToolDefinition:
 
         client = HubSpotClient(token)
         try:
-            response = await client.create_contact(properties)
+            try:
+                response = await client.create_contact(properties)
+            except _PRE_SEND_TRANSPORT_ERRORS as exc:
+                raise ToolExecutionError(
+                    "Could not connect to HubSpot after retries; the request "
+                    "was NOT sent, so no contact was created. Safe to retry "
+                    "later."
+                ) from exc
+            except httpx.TransportError as exc:
+                raise ToolExecutionError(
+                    f"HubSpot create-contact OUTCOME UNKNOWN for {inp.email!r}: "
+                    f"{type(exc).__name__} after the request may have been "
+                    "sent. The contact may or may not exist. Do NOT re-run "
+                    "this tool; first verify via "
+                    f"integration.hubspot_search_contacts for {inp.email!r}."
+                ) from exc
+            if response.status_code >= 500:
+                raise ToolExecutionError(
+                    f"HubSpot create-contact OUTCOME UNKNOWN for {inp.email!r}: "
+                    f"HubSpot returned {response.status_code}; the contact may "
+                    "or may not have been created. Do NOT re-run this tool; "
+                    "first verify via integration.hubspot_search_contacts for "
+                    f"{inp.email!r}."
+                )
             if response.status_code == 409:
                 search_response = await client.search_contacts(inp.email, 1)
                 search_response.raise_for_status()
