@@ -7,6 +7,9 @@
 > review: logout revokes nothing server-side, and refresh rotation has a race.
 > **Companion:** login CSRF (finding N1) is fixed separately in PR #31; that guard
 > also protects the logout `DELETE` described here.
+> **[Corrected 2026-11-08, see section 8.0:** the access-token TTL, refresh-on-401
+> and logout semantics have changed since approval. Stale passages below keep
+> their original wording and carry an inline bracketed correction.**]**
 >
 > **How to read this file.** Every claim is marked:
 > - `[CODE-VERIFIED]` - read from `origin/main` @ `7604fa8`, cites `file:line`.
@@ -22,6 +25,8 @@
 - `[CODE-VERIFIED]` The BFF logout only clears the cookie. `DELETE /api/my-day/session`
   builds a 204 and sets `clearedMydaySessionCookie()`, with no backend call
   (`website/src/app/api/my-day/session/route.ts:70-77`).
+  [Corrected 2026-11-08, see section 8.0: true only at `7604fa8`. The BFF logout now
+  revokes server-side first, with one retry, and reports full vs partial logout.]
 - `[CODE-VERIFIED]` The backend has no logout or revoke route. `auth.py` defines only
   `register` (`:88`), `login` (`:145`), `refresh` (`:165`) and `me` (`:183`).
 - `[CODE-VERIFIED]` The only caller of `revoke_refresh_token` anywhere in `src/` is
@@ -29,7 +34,8 @@
 
 Consequence: after logout, the refresh token that was inside the cookie stays valid
 server-side until its natural expiry, 14 days by default
-(`src/skylize/config.py:111`). Anyone who captured the cookie before logout (and
+(`src/skylize/config.py:111`) [Corrected 2026-11-08, see section 8.0: still 14
+days, now at `src/skylize/config.py:119`]. Anyone who captured the cookie before logout (and
 holds the cookie key, or replays the cookie itself) can keep minting fresh access
 tokens for two weeks.
 
@@ -106,10 +112,10 @@ RETURNING token_id
 |---|---|
 | Path, method | `POST /api/v1/auth/logout` in `src/skylize/edge/routes/auth.py` |
 | Body | `{"refresh_token": "<jwt>"}`, `extra="forbid"`, same shape as `RefreshRequest` (`auth.py:66-68`) |
-| Identity | **Proof of possession of the refresh token itself.** No access token required: at logout time the 30-minute access token (`config.py:110`) is often already expired, and requiring it would make logout fail exactly when it matters. |
+| Identity | **Proof of possession of the refresh token itself.** No access token required: at logout time the 30-minute access token (`config.py:110`) is often already expired, and requiring it would make logout fail exactly when it matters. [Corrected 2026-11-08, see section 8.0: the access token is now 15 minutes, capped and refused above that at boot (`config.py:17,118,373-387`).] |
 | What it revokes | Only the `jti` inside a refresh token whose HS256 signature verifies under the server secret and whose `type == "refresh"`. No `user_id` or `token_id` is accepted from the body. |
 | Mechanism | The same atomic `UPDATE ... WHERE revoked_at IS NULL` as 2.0.1 (the result is ignored). |
-| Response | **Always `204`** for a schema-valid body: valid token revoked, already revoked, expired, unknown `jti`, or bad signature. It never reveals whether a token existed or was live (no token-validity oracle). `422` only for a malformed body. |
+| Response | **Always `204`** for a schema-valid body: valid token revoked, already revoked, expired, unknown `jti`, or bad signature. It never reveals whether a token existed or was live (no token-validity oracle). `422` only for a malformed body. [Corrected 2026-11-08, see section 8.0: a failure of the revoke WRITE itself is not caught and surfaces as a 5xx (`auth.py:224-229`), so the BFF can tell "revoked" from "not recorded".] |
 | Idempotent | Yes. A second logout with the same token is a no-op `204`. |
 | Rate limit | `enforce_anonymous_rate_limit`, like `login`/`refresh` (`auth.py:146-147,166-167`). |
 | Logging | Log `user_id` and `jti` on a successful revoke; never log the token. |
@@ -128,6 +134,11 @@ session) and becomes:
    Stage 1 design, section 5.0, still holds).
 3. **Always** clear the cookie and return `204`, whether or not step 1 or 2 worked.
    The user's browser is logged out locally in every case.
+   [Corrected 2026-11-08, see section 8.0: the cookie is still ALWAYS cleared (OD20),
+   but the status is no longer always `204`. Step 2 is retried once; if it still
+   fails, or a config error prevents step 1, the answer is `200` with a "partial
+   logout" body. `204` now means the server-side session was ended, or there was
+   nothing to revoke.]
 4. The CSRF guard from PR #31 already refuses a cross-site `DELETE` before any of
    this runs.
 
@@ -135,6 +146,11 @@ session) and becomes:
 5xx, or any non-204 answer): the BFF still clears the cookie and returns `204`, and it
 **logs the failure** at error level (never silently swallowed). The log line names the
 failure class and status, never the token.
+[Corrected 2026-11-08, see section 8.0: superseded in two steps. The interim T2
+change (`2b6bfbe`) answered `502` and KEPT the cookie; OD20 reverses that and
+restores "always clear", but the BFF now retries the backend call once and, if it
+still fails, answers `200` with a partial-logout body instead of `204`. The failure
+is logged as `myday_logout_partial` with attempt count and status only.]
 
 **The trade-off, stated plainly.** When the backend revocation fails, the refresh
 token stays valid server-side until it expires (up to 14 days, `config.py:111`). The
@@ -144,10 +160,18 @@ user is never shown a logout that "failed", and the error log is the operator's
 signal that a token outlived its session. The rejected alternative was returning
 `502` with the cookie cleared, which would surface an error for an outcome the user
 cannot act on.
+[Corrected 2026-11-08, see section 8.0: under OD20 the user IS told, without an
+error status, when the server-side session could not be ended: `200` plus
+`{"logout":"partial","serverSessionEnded":false,...}`. The local logout still
+always succeeds.]
 
 If the cookie does not decrypt (absent, tampered, or wrong key), there is no refresh
 token to send. The BFF clears the cookie and returns `204` without calling the
 backend; that is the normal path, not a failure.
+[Corrected 2026-11-08, see section 8.0: this holds only under a VALID My Day config.
+If a cookie is present but the config is broken, decryption cannot be attempted and
+a live token may exist server-side. That is a PARTIAL logout (`200`, body, cookie
+cleared), logged as `myday_config_error` (OD21), never a `204`.]
 
 ### 2.0.4 Absolute session lifetime in the BFF `[PROPOSED - NOT IN THIS BUILD]`
 
@@ -159,6 +183,8 @@ Kept here as a proposal for a separate small change.
 (`myday-handler.ts`): reject a session older than the cookie `maxAge` (14 days,
 `myday-session.ts:26`). BFF-only, no migration. It caps how long a replayed cookie
 is useful even once refresh-on-401 is wired.
+[Corrected 2026-11-08, see section 8.0: refresh-on-401 IS now wired in the BFF.
+The `iat` lifetime check itself is still not built.]
 
 ---
 
@@ -191,6 +217,9 @@ this build. See section 7.0.
   issued: access tokens are stateless HS256 JWTs (`app/auth/tokens.py:16-33`) and
   stay valid until they expire, at most 30 minutes (`config.py:110`). An access-token
   denylist is out of scope; record this as an accepted residual risk.
+  [Corrected 2026-11-08, see section 8.0: at most 15 minutes. The TTL is capped
+  at 15 and a higher value is refused at boot (`config.py:17,118,373-387`), which
+  bounds this post-logout window.]
 - **Rate limiting.** Logout uses the anonymous peer-address limiter. All My Day
   traffic reaches the backend from the BFF's address, so it shares one bucket with
   My Day logins (review finding N5); this design does not make that worse.
@@ -228,6 +257,8 @@ detection (section 7.0, needs a migration).
 - logout is `204` for unknown, expired, already-revoked and bad-signature tokens;
 - a BFF test showing `DELETE` calls `mydayLogout` with the decrypted refresh token
   and clears the cookie even when the backend call fails;
+  [Corrected 2026-11-08, see section 8.0: the tests also prove the single retry,
+  the `200` partial body on a failure that persists, and the config-error case.]
 - the existing My Day import-isolation test still passes (no service-key reach).
 
 ---
@@ -271,4 +302,88 @@ because each existing row becomes its own family.
 - **Approved:** owner, 2026-10-14.
 - **Decisions:** 2.0.3, backend logout failure means cookie cleared, `204`, failure
   logged at error level; 7.0, reuse detection deferred to a later, separate change.
+  [Corrected 2026-11-08, see section 8.0: 2.0.3 is now governed by OD20. The cookie
+  is still always cleared, but a persistent failure answers `200` with a partial body
+  after one retry. It is not a `204`.]
 - **Build scope:** section 6.0 steps 1-3 plus tests, no migration, Console untouched.
+
+---
+
+## 8.0 - Correction 2026-11-08 (OD3-AMEND, OD20-OD22)
+
+Appended, not rewritten (OD22): the earlier sections keep their 2026-10-14 wording,
+and each stale passage carries an inline `[Corrected 2026-11-08 ...]` note pointing
+here. Line numbers are those of the `feat/myday-revocation` branch as of this
+correction.
+
+### 8.0.1 Access-token TTL (OD3-AMEND) `[CODE-VERIFIED]`
+
+- The access-token TTL defaults to **15 minutes** (`src/skylize/config.py:118`) and is
+  **capped at 15** (`_MAX_ACCESS_TOKEN_TTL_MINUTES`, `config.py:17`). A higher value is
+  **refused at boot** by the `_cap_access_token_ttl` validator (`config.py:373-387`).
+  Every "30 minutes" above is superseded. The refresh TTL is still 14 days
+  (`config.py:119`).
+- This bounds the residual risk in 4.0: an access token already issued outlives
+  logout by at most 15 minutes.
+
+### 8.0.2 `/refresh` refusals are indistinguishable `[CODE-VERIFIED]`
+
+- Every refusal from `POST /api/v1/auth/refresh` answers `401` with one fixed detail,
+  `REFRESH_REFUSED_DETAIL = "invalid refresh token"`
+  (`src/skylize/edge/routes/auth.py:40`, raised at `:192`). The specific reason is
+  logged server-side only. The BFF branches on the status, never on the detail.
+
+### 8.0.3 BFF refresh-on-401 (OD3-AMEND) `[CODE-VERIFIED]`
+
+All of it lives in one place, `createAccessTokenRunner`
+(`website/src/lib/skylize/myday-handler.ts:239`). Handlers reach it through
+`withAccessToken`, for example `website/src/app/api/my-day/me/route.ts:25`.
+- When an authenticated backend call returns `401`, the BFF calls `mydayRefresh`
+  **exactly once** per request (`myday-handler.ts:261`). It is a POST and is never
+  auto-retried (`myday-client.ts:104`, retries are GET-only).
+- If the refresh succeeds, the cookie is re-sealed with the NEW pair and set on
+  whatever response goes out (`myday-handler.ts:310`). The original call is retried
+  **once** (`:287`). A second `401` gives `401` plus a cleared cookie, with no second
+  refresh.
+- A refresh that gets `401` gives `401` plus a cleared cookie. Any other refresh
+  failure gives `502` plus a cleared cookie (`:267`).
+- Known two-tab race: the loser's refresh `401` clears the cookie the winner just set,
+  forcing a re-login. This fails closed and is documented at `myday-handler.ts:201`.
+
+### 8.0.4 BFF logout semantics (OD20) `[CODE-VERIFIED]`
+
+`DELETE /api/my-day/session` (`website/src/app/api/my-day/session/route.ts:173`;
+rationale comment at `:159`). The **cookie is ALWAYS cleared**, which restores the
+2026-10-14 "always close" rule with explicit reporting:
+- **Single retry:** `revokeWithOneRetry` makes at most 2 attempts (`route.ts:115,124`).
+- **FULL logout:** `204` with an empty body and a cleared cookie (`route.ts:144`).
+  This happens when revocation succeeded, or when there was nothing to revoke: no
+  cookie, or a cookie that does not decrypt under a VALID config.
+- **PARTIAL logout:** `200` with a cleared cookie and
+  `{"logout":"partial","serverSessionEnded":false,"message":"Signed out on this device; we could not end the session on the server."}`
+  (`route.ts:151`). The body and its type are exported from
+  `website/src/lib/skylize/myday-logout.ts` (`MYDAY_PARTIAL_LOGOUT_BODY`,
+  `MyDayPartialLogoutBody`). A partial logout happens when:
+  - revocation fails after the retry. It is logged at error level under
+    `myday_logout_partial` with attempt count and status only, never the token
+    (`route.ts:185`);
+  - a cookie is present but `getMyDayConfig()` throws, so revocation cannot even be
+    attempted. It is logged under `myday_config_error` (`route.ts:98,180`).
+- **Superseded interim:** the T2 change `2b6bfbe` ("logout fails closed": `502` and
+  KEEP the cookie on failure) did exist on this branch. OD20 supersedes it.
+
+### 8.0.5 Config errors are logged and distinguishable (OD21) `[CODE-VERIFIED]`
+
+- Every `getMyDayConfig` failure is a `MyDayConfigError`
+  (`website/src/lib/skylize/myday-config.ts:36`). Its messages name variables, never
+  values. The one message that used to echo the backend URL no longer does
+  (`myday-config.ts:110`).
+- `readMyDaySession` no longer collapses a config error into a silent `401`
+  (`myday-handler.ts:135`). `mydayRoute` handles it in one place
+  (`myday-handler.ts:343`): the error is logged under `myday_config_error` with the
+  message only (`:110`), the answer is an opaque `500`, and the user's cookie is
+  **not** cleared (`:118`). The login path, which fails inside `mydayLogin`, goes
+  through the same branch and the same tag.
+- An absent, tampered or expired cookie under a valid config is still `401` plus a
+  cleared cookie, and is not logged with the config tag.
+- Boot-time validation of the My Day config is out of scope here (tracked as T5).
