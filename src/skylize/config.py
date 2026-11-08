@@ -13,6 +13,9 @@ from typing import Literal
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+#: Upper bound on `Settings.jwt_access_token_ttl_minutes` (owner ruling OD3-AMEND).
+_MAX_ACCESS_TOKEN_TTL_MINUTES = 15
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -107,7 +110,12 @@ class Settings(BaseSettings):
     # check below fails closed when dev_auth is off and no secret is set, so
     # production never signs tokens with a missing/placeholder key.
     jwt_secret: str = ""
-    jwt_access_token_ttl_minutes: int = 30
+    # Access-token lifetime. CAPPED at 15 (owner ruling OD3-AMEND): an access
+    # token is a stateless JWT that logout cannot revoke, so this value IS the
+    # worst-case window a logged-out session's access token stays usable. A
+    # value above the cap is refused at boot (`_cap_access_token_ttl` below).
+    # Deliberately no lower bound: tests mint already-expired tokens with -1.
+    jwt_access_token_ttl_minutes: int = 15
     jwt_refresh_token_ttl_days: int = 14
 
     # Credential vault at-rest encryption (Fernet key: urlsafe base64, 32 bytes).
@@ -358,6 +366,23 @@ class Settings(BaseSettings):
         if not self.dev_auth and not self.jwt_secret:
             raise ValueError(
                 "SKYLIZE_JWT_SECRET must be set when dev_auth is disabled"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _cap_access_token_ttl(self) -> "Settings":
+        # Fail closed at boot (owner ruling OD3-AMEND). Logout revokes only the
+        # refresh token; an access token already issued stays valid until it
+        # expires (docs/06_integrations/myday_session_revocation_design.md 4.0).
+        # The cap bounds that post-logout window, so a longer TTL is a config
+        # error, not a tuning choice. No lower bound: -1 mints expired tokens
+        # in tests (tests/unit/test_user_auth_service.py).
+        if self.jwt_access_token_ttl_minutes > _MAX_ACCESS_TOKEN_TTL_MINUTES:
+            raise ValueError(
+                "SKYLIZE_JWT_ACCESS_TOKEN_TTL_MINUTES must be <= "
+                f"{_MAX_ACCESS_TOKEN_TTL_MINUTES} (got "
+                f"{self.jwt_access_token_ttl_minutes}). An access token cannot be "
+                "revoked by logout, so its TTL is the post-logout exposure window."
             )
         return self
 

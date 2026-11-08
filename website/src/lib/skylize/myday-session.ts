@@ -16,8 +16,10 @@ export const MYDAY_SESSION_COOKIE_NAME = "skylize_myday";
 
 /**
  * Cookie lifetime. The backend refresh token's default TTL is 14 days
- * (src/skylize/config.py:111); the access token's is 30 min
- * (src/skylize/config.py:110). The cookie should stay usable for as long as its
+ * (src/skylize/config.py:119); the access token's is 15 min, capped there and
+ * refused above it at boot (src/skylize/config.py:17,118,373-387; OD3-AMEND),
+ * which is why the BFF refreshes on a backend 401 (myday-handler.ts,
+ * `createAccessTokenRunner`). The cookie should stay usable for as long as its
  * refresh token can still mint a fresh access token, so maxAge tracks the
  * refresh TTL — a shorter maxAge would log the user out while their refresh
  * token was still valid, and a longer one would leave a dead cookie the backend

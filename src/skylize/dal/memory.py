@@ -394,6 +394,25 @@ class InMemoryUserRepository:
         if rt is not None:
             self._refresh[token_id] = replace(rt, revoked_at=datetime.now(timezone.utc))
 
+    async def consume_refresh_token(self, token_id: UUID, user_id: UUID) -> bool:
+        """Mirror of the Pg conditional UPDATE (dal/users.py), ownership included.
+
+        Single-winner without a lock: there is no `await` between the check and
+        the write, so on this store's single event loop no other coroutine can
+        run in between (same reasoning as `create_owner_of_new_org` above).
+        """
+        rt = self._refresh.get(token_id)
+        now = datetime.now(timezone.utc)
+        if (
+            rt is None
+            or rt.user_id != user_id
+            or rt.revoked_at is not None
+            or rt.expires_at <= now
+        ):
+            return False
+        self._refresh[token_id] = replace(rt, revoked_at=now)
+        return True
+
 
 class InMemoryDeliverableRepository:
     """In-memory deliverable store (memory backend + tests). Every read is
