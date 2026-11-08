@@ -127,3 +127,61 @@ Status: SCHEDULED T2 (amends OD3's "add access-token revocation first")
 T1 merged #37 before CI completed (pre-ruleset); now prevented mechanically by the ruleset.
 
 (Evidence: #37 was merged at 2026-11-07T19:42:08Z in the GitHub UI by skylizeai-dev while `unit` and `integration` were still pending; ruleset 26770388 was created at 19:44:41Z; the post-merge push CI run 42407492854 on a198ae7 succeeded.)
+
+---
+
+## Correction 2026-11-08 (OD16-OD19)
+
+approved in chat 2026-11-08, recorded by T1 follow-up 2. This section corrects the
+record above; the original text of OD14 is left unchanged on purpose.
+
+**Correction to OD14.** OD14's sentence "Railway stays the active staging." is
+WRONG and is superseded by OD16: no working staging environment exists, on Railway
+or anywhere else. The rest of OD14 (deploy-staging.yml is workflow_dispatch only)
+still stands.
+
+**OD16** No working staging environment exists (evidence: no backend railway.json; last
+     Railway deployment 2026-07-27, all inactive; the example URL 404s). Correct OD14's
+     "Railway stays the active staging" line in the decision record — do NOT rewrite
+     history, append a dated correction. Environment of record for proving behavior,
+     until further notice: the CI integration job on real Postgres.
+
+Status: EXECUTED (this correction). Evidence, re-derivable read-only:
+- No backend Railway config: the only railway.json files are `website/railway.json`
+  (Next.js site) and `infra/opa/railway.json` (OPA); `git ls-tree -r --name-only HEAD | grep -i railway`.
+- Last Railway deployment: `gh api "repos/skylizeai-dev/Skylize/deployments?environment=radiant-encouragement%20/%20production"`
+  -> newest is 2026-07-27T19:50:13Z (sha 603936a, creator railway-app[bot]); every status checked is `inactive`.
+- The example backend URL in `website/.env.local.example:9` (`https://skylize-backend.up.railway.app`)
+  returned HTTP 404 "Application not found" on `/health` and `/` (2026-11-07).
+- Environment of record: the `integration` job of `.github/workflows/ci.yml` (real Postgres 16 + Redis 7 service containers).
+- Not corrected here (hygiene backlog): the header comment of `.github/workflows/deploy-staging.yml`
+  still says "Railway stays the active staging environment".
+
+---
+
+**OD17** Standing up an environment is its own topic (T7), NOT a prerequisite of T4
+     (Stripe test-mode wiring). Trigger: first pilot or a YC demo date. When triggered,
+     one environment only: Railway.
+
+Status: RECORDED (T7 not started; waits for its trigger)
+
+---
+
+**OD18** Delete feat/t1-followup (remote + local) after proving its content is on main
+     (`git diff origin/main feat/t1-followup -- <its files>` empty). Add an ignored-build
+     step for archive/** on both Vercel projects — if that cannot be done from the repo,
+     report it as OWNER-CHECK with the exact dashboard path; do not guess a config key.
+
+Status: branch deletion SCHEDULED for T1 follow-up 2, after this record merges (proof
+and result in that report). Vercel ignored-build step: OWNER-CHECK. It is not changed
+from this PR, whose owned files are this record only; the Vercel connection available
+to T1 could not read the two projects (404), so their current setting is UNVERIFIED.
+
+---
+
+**OD19** The 21:42 reflog event is closed: the 2026-11-07 audit session's own fetch. The
+     gc --auto part stays UNVERIFIED and will not be pursued.
+
+Status: CLOSED. The audit session ran `git fetch --all --prune` against the primary
+tree at 2026-11-07T18:41:55Z (21:41:55 +03:00). Whether that fetch's automatic
+maintenance (gc --auto / reflog expire) rewrote the reflogs is UNVERIFIED and not pursued.
