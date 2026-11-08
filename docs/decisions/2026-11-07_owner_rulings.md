@@ -185,3 +185,37 @@ to T1 could not read the two projects (404), so their current setting is UNVERIF
 Status: CLOSED. The audit session ran `git fetch --all --prune` against the primary
 tree at 2026-11-07T18:41:55Z (21:41:55 +03:00). Whether that fetch's automatic
 maintenance (gc --auto / reflog expire) rewrote the reflogs is UNVERIFIED and not pursued.
+
+---
+
+## 2026-11-08 (OD26-OD27)
+
+approved in chat 2026-11-08, recorded by T1 follow-up 3
+
+**OD26** Accept tree-equality as merge proof. Delete, remote + local, both branches whose
+     tree == main's (921e10b): feat/myday-revocation (local at 2acd81e) and
+     feat/staging-record-correction (#40). Re-confirm tree equality per branch
+     (`git rev-parse <branch>^{tree}` == main's blob at that path set) before each delete.
+
+Status: EXECUTED. Re-confirmed per branch against its own PR's squash commit, because
+main's tree moved from 921e10b to d479a77 when #40 merged:
+- origin/feat/myday-revocation (1102f6d) tree 921e10b == #34 merge 5fcc081 tree; its diff to
+  main is exactly #40's diff; local 2acd81e was an ancestor of it with 0 unique commits.
+- feat/staging-record-correction (b3b3ea5, local == remote) tree d479a77 == #40 merge 0fe978b
+  tree == main's tree.
+Both deleted remote + local.
+
+---
+
+**OD27** Fix the one self-contradiction OD16 created: deploy-staging.yml:6-7 still says
+     "Railway stays the active staging environment". Change it to state no live staging
+     exists; environment of record is the CI integration job. One-line workflow-comment
+     edit, its own commit, cite OD16/OD27.
+
+Status: EXECUTED (.github/workflows/deploy-staging.yml:6-7 comment changed; triggers and jobs unchanged)
+
+---
+
+## Backlog (tracked)
+
+- [ ] Railway doc wording: website/docs/CONSOLE_BFF.md, website/docs/DEPLOY_RAILWAY.md, docs/audits/tier0_status_audit.md, docs/audits/epic_user_auth_buildout.md, website/.env.local.example, scripts/anytype_sync/.env.example and the code comments in website/src/lib/skylize/config.ts, website/src/lib/skylize/myday-config.ts, website/src/app/console/page.tsx describe the INTENDED Railway setup (OD17) and stay as is; only their present-tense "it exists" phrasing is wrong (OD16). Not worth a sweep pre-pilot; revisit when T7 stands up Railway.
