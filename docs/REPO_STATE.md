@@ -1,6 +1,9 @@
 # REPO_STATE - derived facts only
 
-**Derived at 93ff73fbce67ece77a64db705edf6667c978ee00, 2026-11-07.**
+**Derived at 490b6dd40ae99c08fe79f8b669c0d9c1652abb25, re-derived 2026-11-14** (previous
+derivation: 93ff73fbce67ece77a64db705edf6667c978ee00, 2026-11-07). Every figure in
+section 1 was re-run at 490b6dd; the line numbers that moved since 93ff73f are corrected
+in place (deploy-staging.yml job keys and the two `AWS_GITHUB_ACTIONS_ROLE_ARN` lines).
 
 Every number below sits next to the exact command that produced it. All commands
 run from the repository root (bash syntax; on PowerShell use the Bash tool or
@@ -27,12 +30,15 @@ all measured against a different commit and are NOT carried forward).
 | CI jobs in ci.yml | 5 (output: `['unit', 'roster', 'console-black', 'website', 'integration']`) | `python -c "import yaml; print(list(yaml.safe_load(open('.github/workflows/ci.yml'))['jobs']))"` |
 | Workflow files | 3: `ci.yml`, `deploy-staging.yml`, `merge-guard.yml` | `ls .github/workflows` |
 | ADR files | 6 (`0001`..`0006`) | `ls docs/architecture/adr` |
+| Owner rulings recorded | 22 entries: OD1-OD19, OD3-AMEND, OD26, OD27 (no OD20-OD25) | `grep -o "^\*\*OD[0-9A-Z-]*" docs/decisions/2026-11-07_owner_rulings.md` |
+| CI on this commit | run `42460712057`: success | `gh run list --branch main --limit 1 --json databaseId,headSha,conclusion` (read-only) |
+| Deploy -> Staging runs since 2026-11-07 | none (newest is `42407492832` on a198ae7, 2026-11-07, failure; trigger is `workflow_dispatch` only per OD14) | `gh run list --workflow deploy-staging.yml --limit 5` (read-only) |
 
 What each count means (so it is not re-interpreted later):
 
 - **Agent contracts**: `len(MVP_REGISTRY.all())`, where `MVP_REGISTRY = AgentRegistry(ALL_MVP_CONTRACTS)` is the governed roster (`src/skylize/contracts/registry.py:130`; contract modules live in `src/skylize/contracts/mvp/`). It is the runtime count of registered `AgentContract`s, not a count of docs/specs on the roster.
 - **FastAPI routers**: number of `app.include_router(...)` calls in `create_app()` (`src/skylize/edge/gateway.py:64` defines it; the calls are at lines 89-119). All are unconditional statements in that function; the `/health` route is a plain route, not a router, and is not counted. No other file in `src/` calls `include_router` (`grep -rn include_router src --include=*.py`, excluding gateway.py: no hits).
-- **CI jobs**: top-level keys under `jobs:` in `.github/workflows/ci.yml` (job keys at lines 13, 43, 68, 97, 122; the list above is the command's output, no line-number interpretation needed). `deploy-staging.yml` has its own jobs (`lint-and-test`, `integration-test`, `build-and-push`, `deploy`; lines 21, 74, 143, 191) and is a separate workflow named "Deploy -> Staging", not part of CI.
+- **CI jobs**: top-level keys under `jobs:` in `.github/workflows/ci.yml` (job keys at lines 13, 43, 68, 97, 122; the list above is the command's output, no line-number interpretation needed). `deploy-staging.yml` has its own jobs (`lint-and-test`, `integration-test`, `build-and-push`, `deploy`; lines 38, 91, 160, 208 at 490b6dd) and is a separate workflow named "Deploy -> Staging", not part of CI.
 
 Decision-engine selection, for orientation (re-verify the line before relying on it): `src/skylize/bootstrap.py:755` is the `settings.decision_engine != "inline"` interlock (CLAUDE.md ARCHITECTURE CONSTRAINTS describes it as fail-closed). OD7 in `docs/decisions/2026-11-07_owner_rulings.md` re-scopes ADR-0004 (LATER; neither the ADR nor CLAUDE.md has been edited).
 
@@ -41,10 +47,10 @@ Decision-engine selection, for orientation (re-verify the line before relying on
 Attributed as given; evidence is stated, outcomes not guessed.
 
 1. **Deploy -> Staging has never gone green** (recorded by T1 orchestrator). Workflow `.github/workflows/deploy-staging.yml`; all runs before T1 failed. T1's run on the #35 merge commit `19b149e` is run id `42406222420`: **failure** (orchestrator-verified). Jobs: Lint & Test 128504386119 success; Integration Tests 128505234946 success (397 passed, 2 skipped [OPA URL unset]; #35's password-auth failure is gone); Build & Push Image 128506097395 failure at step "Configure AWS credentials (OIDC)" ("Credentials could not be loaded ... Could not load credentials from any providers") because `secrets.AWS_GITHUB_ACTIONS_ROLE_ARN` resolves empty (0 repo secrets, item 2); Deploy to ECS Staging 128506138032 skipped. Additional verified blocker: `infra/terraform/staging/modules/iam/main.tf:105` OIDC trust condition is the placeholder `repo:YOUR_GITHUB_ORG/skylize:ref:refs/heads/main`. Evidence: GitHub Actions run history (re-derive with `gh run list --workflow deploy-staging.yml`, read-only).
-2. **The repo has 0 GitHub Actions secrets and 0 variables** (recorded by T1 orchestrator), while the deploy workflow references `secrets.AWS_GITHUB_ACTIONS_ROLE_ARN` at `.github/workflows/deploy-staging.yml:156` and `:203`. Re-run at derivation time (2026-11-07):
+2. **The repo has 0 GitHub Actions secrets and 0 variables** (recorded by T1 orchestrator), while the deploy workflow references `secrets.AWS_GITHUB_ACTIONS_ROLE_ARN` at `.github/workflows/deploy-staging.yml:173` and `:220` (were :156/:203 at 93ff73f; net +17 lines from c8da308 (OD14) and 2a5191c (OD16/OD27): `git diff --numstat 93ff73f 490b6dd -- .github/workflows/deploy-staging.yml` -> `19 2`). Re-run at 2026-11-14:
    - `gh api repos/skylizeai-dev/Skylize/actions/secrets --jq .total_count` -> `0`
    - `gh api repos/skylizeai-dev/Skylize/actions/variables --jq .total_count` -> `0`
-   - `grep -n AWS_GITHUB_ACTIONS_ROLE_ARN .github/workflows/deploy-staging.yml` -> lines 156 and 203.
+   - `grep -n AWS_GITHUB_ACTIONS_ROLE_ARN .github/workflows/deploy-staging.yml` -> lines 173 and 220 (`role-to-assume`), plus the header comment at line 17.
 3. **Remote archive refs created by T1 (OD12)** (recorded by T1 orchestrator). Command: `git ls-remote origin 'refs/heads/archive/*'`. Output at derivation time matches the orchestrator's list:
 
    | Ref | SHA |
@@ -69,5 +75,5 @@ Dropped from the previous version because no cheap command derives them here, or
 ## 4. Pointers
 
 - `CLAUDE.md` (repo root): durable orientation; points here for changing state.
-- `docs/decisions/2026-11-07_owner_rulings.md`: owner rulings OD1-OD12 and their statuses.
+- `docs/decisions/2026-11-07_owner_rulings.md`: owner rulings OD1-OD19, OD3-AMEND, OD26, OD27 and their statuses (22 entries; OD20-OD25 are not recorded there - a ruling cited elsewhere under one of those numbers is UNVERIFIED until it is).
 - `docs/audits/_137_agent_evidence_audit.md`: moved here from `docs/03_agents/` by OD12 so the manifest generator (`scripts/gen_manifest.js`) does not treat it as an agent.
