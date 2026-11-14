@@ -62,6 +62,7 @@ from .base import (
     ToolExecutionError,
     ToolInputError,
     ToolNotRegistered,
+    ToolOutcomeUnknownError,
     ToolPermissionDenied,
     ToolPermissionTierDenied,
     ToolPermissionUnavailable,
@@ -502,6 +503,11 @@ class ToolProxy:
                 correlation_id=correlation_id, governance_token=governance_token,
                 result="failed", reason=f"handler error: {exc}",
             )
+            # An OUTCOME UNKNOWN (OD4) keeps its type: the caller must verify
+            # before retrying, and normalizing it to the base class would make
+            # that signal recoverable only by string-matching the message.
+            if isinstance(exc, ToolOutcomeUnknownError):
+                raise ToolOutcomeUnknownError(str(exc)) from exc
             raise ToolExecutionError(str(exc)) from exc
 
         # What the hold should settle for. Computed BEFORE the audit call so an

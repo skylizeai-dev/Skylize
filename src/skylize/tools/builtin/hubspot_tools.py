@@ -27,7 +27,12 @@ from tenacity import (
 )
 
 from ...app.credentials.vault import CredentialNotFoundError, CredentialVault
-from ..base import ToolContext, ToolDefinition, ToolExecutionError
+from ..base import (
+    ToolContext,
+    ToolDefinition,
+    ToolExecutionError,
+    ToolOutcomeUnknownError,
+)
 
 _PROVIDER = "hubspot"
 _BASE_URL = "https://api.hubapi.com"
@@ -222,7 +227,7 @@ def build_hubspot_create_contact_tool(vault: CredentialVault) -> ToolDefinition:
                     "later."
                 ) from exc
             except httpx.TransportError as exc:
-                raise ToolExecutionError(
+                raise ToolOutcomeUnknownError(
                     f"HubSpot create-contact OUTCOME UNKNOWN for {inp.email!r}: "
                     f"{type(exc).__name__} after the request may have been "
                     "sent. The contact may or may not exist. Do NOT re-run "
@@ -230,7 +235,7 @@ def build_hubspot_create_contact_tool(vault: CredentialVault) -> ToolDefinition:
                     f"integration.hubspot_search_contacts for {inp.email!r}."
                 ) from exc
             if response.status_code >= 500:
-                raise ToolExecutionError(
+                raise ToolOutcomeUnknownError(
                     f"HubSpot create-contact OUTCOME UNKNOWN for {inp.email!r}: "
                     f"HubSpot returned {response.status_code}; the contact may "
                     "or may not have been created. Do NOT re-run this tool; "
