@@ -31,8 +31,8 @@ all measured against a different commit and are NOT carried forward).
 | Workflow files | 3: `ci.yml`, `deploy-staging.yml`, `merge-guard.yml` | `ls .github/workflows` |
 | ADR files | 6 (`0001`..`0006`) | `ls docs/architecture/adr` |
 | Owner rulings recorded | 22 entries: OD1-OD19, OD3-AMEND, OD26, OD27 (no OD20-OD25) | `grep -o "^\*\*OD[0-9A-Z-]*" docs/decisions/2026-11-07_owner_rulings.md` |
-| CI on this commit | run `42460712057`: success | `gh run list --branch main --limit 1 --json databaseId,headSha,conclusion` (read-only) |
-| Deploy -> Staging runs since 2026-11-07 | none (newest is `42407492832` on a198ae7, 2026-11-07, failure; trigger is `workflow_dispatch` only per OD14) | `gh run list --workflow deploy-staging.yml --limit 5` (read-only) |
+| CI on this commit | run `42460712057`: success | `gh run list --commit 490b6dd40ae99c08fe79f8b669c0d9c1652abb25 --workflow ci.yml --json databaseId,conclusion` (read-only) |
+| Deploy -> Staging runs after 2026-11-07T19:42:10Z | none (newest is `42407492832` on a198ae7, 2026-11-07, failure; trigger is `workflow_dispatch` only per OD14) | `gh run list --workflow deploy-staging.yml --limit 5` (read-only) |
 
 What each count means (so it is not re-interpreted later):
 
@@ -47,7 +47,7 @@ Decision-engine selection, for orientation (re-verify the line before relying on
 Attributed as given; evidence is stated, outcomes not guessed.
 
 1. **Deploy -> Staging has never gone green** (recorded by T1 orchestrator). Workflow `.github/workflows/deploy-staging.yml`; all runs before T1 failed. T1's run on the #35 merge commit `19b149e` is run id `42406222420`: **failure** (orchestrator-verified). Jobs: Lint & Test 128504386119 success; Integration Tests 128505234946 success (397 passed, 2 skipped [OPA URL unset]; #35's password-auth failure is gone); Build & Push Image 128506097395 failure at step "Configure AWS credentials (OIDC)" ("Credentials could not be loaded ... Could not load credentials from any providers") because `secrets.AWS_GITHUB_ACTIONS_ROLE_ARN` resolves empty (0 repo secrets, item 2); Deploy to ECS Staging 128506138032 skipped. Additional verified blocker: `infra/terraform/staging/modules/iam/main.tf:105` OIDC trust condition is the placeholder `repo:YOUR_GITHUB_ORG/skylize:ref:refs/heads/main`. Evidence: GitHub Actions run history (re-derive with `gh run list --workflow deploy-staging.yml`, read-only).
-2. **The repo has 0 GitHub Actions secrets and 0 variables** (recorded by T1 orchestrator), while the deploy workflow references `secrets.AWS_GITHUB_ACTIONS_ROLE_ARN` at `.github/workflows/deploy-staging.yml:173` and `:220` (were :156/:203 at 93ff73f; net +17 lines from c8da308 (OD14) and 2a5191c (OD16/OD27): `git diff --numstat 93ff73f 490b6dd -- .github/workflows/deploy-staging.yml` -> `19 2`). Re-run at 2026-11-14:
+2. **The repo has 0 GitHub Actions secrets and 0 variables** (recorded by T1 orchestrator), while the deploy workflow references `secrets.AWS_GITHUB_ACTIONS_ROLE_ARN` at `.github/workflows/deploy-staging.yml:173` and `:220` (were :156/:203 at 93ff73f; net +17 lines, all from c8da308 (OD14, `19 2`); 2a5191c (OD16/OD27) only rewrote 2 lines in place (`2 2`). Whole range: `git diff --numstat 93ff73f 490b6dd -- .github/workflows/deploy-staging.yml` -> `19 2`). Re-run at 2026-11-14:
    - `gh api repos/skylizeai-dev/Skylize/actions/secrets --jq .total_count` -> `0`
    - `gh api repos/skylizeai-dev/Skylize/actions/variables --jq .total_count` -> `0`
    - `grep -n AWS_GITHUB_ACTIONS_ROLE_ARN .github/workflows/deploy-staging.yml` -> lines 173 and 220 (`role-to-assume`), plus the header comment at line 17.
