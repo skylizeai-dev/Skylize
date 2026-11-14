@@ -98,13 +98,7 @@ class PgUserRepository:
         self, token_id: UUID, user_id: UUID, expires_at: datetime
     ) -> None:
         async with self._db.admin_session() as conn:
-            await conn.execute(
-                """
-                INSERT INTO user_refresh_tokens (token_id, user_id, expires_at)
-                VALUES ($1,$2,$3)
-                """,
-                token_id, user_id, expires_at,
-            )
+            await conn.execute(_INSERT_REFRESH_SQL, token_id, user_id, expires_at)
 
     async def get_refresh_token(self, token_id: UUID) -> RefreshTokenRow | None:
         async with self._db.admin_session() as conn:
@@ -136,19 +130,67 @@ class PgUserRepository:
         A `user_id` that does not own the row matches nothing and revokes nothing.
         """
         async with self._db.admin_session() as conn:
-            consumed = await conn.fetchval(
+            consumed = await conn.fetchval(_CONSUME_SQL, token_id, user_id)
+        return consumed is not None
+
+    async def rotate_refresh_token(
+        self,
+        *,
+        old_token_id: UUID,
+        user_id: UUID,
+        new_token_id: UUID,
+        new_expires_at: datetime,
+    ) -> bool:
+        """Consume the old token and insert the new one in ONE transaction.
+
+        `admin_session` is a bare pool acquire that autocommits each statement
+        (dal/connection.py `admin_session`), so the consume and the insert used to
+        commit separately: a failure between them lost the session. Here both run
+        on one connection inside `conn.transaction()`; any exception rolls the
+        consume back and the old token stays live. The single-winner property is
+        unchanged: a concurrent rotation's UPDATE waits on this row lock and, after
+        this transaction commits, re-checks `revoked_at IS NULL` and matches
+        nothing.
+        """
+        async with self._db.admin_session() as conn:
+            async with conn.transaction():
+                consumed = await conn.fetchval(_CONSUME_SQL, old_token_id, user_id)
+                if consumed is None:
+                    return False
+                await conn.execute(_INSERT_REFRESH_SQL, new_token_id, user_id, new_expires_at)
+        return True
+
+    async def revoke_all_refresh_tokens(self, user_id: UUID) -> int:
+        async with self._db.admin_session() as conn:
+            revoked = await conn.fetch(
                 """
                 UPDATE user_refresh_tokens
                    SET revoked_at = now()
-                 WHERE token_id = $1
-                   AND user_id = $2
+                 WHERE user_id = $1
                    AND revoked_at IS NULL
-                   AND expires_at > now()
                 RETURNING token_id
                 """,
-                token_id, user_id,
+                user_id,
             )
-        return consumed is not None
+        return len(revoked)
+
+
+#: The single-winner consume shared by `consume_refresh_token` and
+#: `rotate_refresh_token`, so the two can never drift apart.
+_CONSUME_SQL = """
+    UPDATE user_refresh_tokens
+       SET revoked_at = now()
+     WHERE token_id = $1
+       AND user_id = $2
+       AND revoked_at IS NULL
+       AND expires_at > now()
+    RETURNING token_id
+"""
+
+_INSERT_REFRESH_SQL = """
+    INSERT INTO user_refresh_tokens (token_id, user_id, expires_at)
+    VALUES ($1,$2,$3)
+"""
 
 
 def _row(rec: object) -> UserRow:

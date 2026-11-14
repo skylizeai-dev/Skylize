@@ -382,6 +382,13 @@ class InMemoryUserRepository:
     async def store_refresh_token(
         self, token_id: UUID, user_id: UUID, expires_at: datetime
     ) -> None:
+        self._insert_refresh(token_id, user_id, expires_at)
+
+    def _insert_refresh(self, token_id: UUID, user_id: UUID, expires_at: datetime) -> None:
+        """The one place a refresh row is created. Refuses a duplicate `token_id`
+        like the Pg primary key does, instead of silently overwriting a row."""
+        if token_id in self._refresh:
+            raise KeyError(f"duplicate refresh token_id {token_id}")
         self._refresh[token_id] = RefreshTokenRow(
             token_id=token_id, user_id=user_id, expires_at=expires_at
         )
@@ -403,15 +410,48 @@ class InMemoryUserRepository:
         """
         rt = self._refresh.get(token_id)
         now = datetime.now(timezone.utc)
-        if (
-            rt is None
-            or rt.user_id != user_id
-            or rt.revoked_at is not None
-            or rt.expires_at <= now
-        ):
+        if rt is None or not _consumable(rt, user_id, now):
             return False
         self._refresh[token_id] = replace(rt, revoked_at=now)
         return True
+
+    async def rotate_refresh_token(
+        self,
+        *,
+        old_token_id: UUID,
+        user_id: UUID,
+        new_token_id: UUID,
+        new_expires_at: datetime,
+    ) -> bool:
+        """Mirror of the Pg one-transaction rotation (dal/users.py).
+
+        Atomic by ordering, with no `await` anywhere: the new row is inserted
+        FIRST and the old one is marked consumed only after that succeeded, so an
+        insert failure raises with the old token still live (the in-memory
+        equivalent of the Pg rollback).
+        """
+        rt = self._refresh.get(old_token_id)
+        now = datetime.now(timezone.utc)
+        if rt is None or not _consumable(rt, user_id, now):
+            return False
+        self._insert_refresh(new_token_id, user_id, new_expires_at)
+        self._refresh[old_token_id] = replace(rt, revoked_at=now)
+        return True
+
+    async def revoke_all_refresh_tokens(self, user_id: UUID) -> int:
+        now = datetime.now(timezone.utc)
+        live = [
+            rt for rt in self._refresh.values()
+            if rt.user_id == user_id and rt.revoked_at is None
+        ]
+        for rt in live:
+            self._refresh[rt.token_id] = replace(rt, revoked_at=now)
+        return len(live)
+
+
+def _consumable(rt: RefreshTokenRow, user_id: UUID, now: datetime) -> bool:
+    """Same condition as the Pg consume UPDATE (dal/users.py `_CONSUME_SQL`)."""
+    return rt.user_id == user_id and rt.revoked_at is None and rt.expires_at > now
 
 
 class InMemoryDeliverableRepository:

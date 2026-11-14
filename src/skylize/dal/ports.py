@@ -292,6 +292,33 @@ class UserRepository(Protocol):
         """
         ...
 
+    async def rotate_refresh_token(
+        self,
+        *,
+        old_token_id: UUID,
+        user_id: UUID,
+        new_token_id: UUID,
+        new_expires_at: datetime,
+    ) -> bool:
+        """Consume `old_token_id` and store its replacement as ONE atomic unit.
+
+        The consume has exactly the semantics of `consume_refresh_token` (live,
+        owned by `user_id`, single winner). Returns False, writing nothing, when
+        the old token is not consumable. Returns True only when BOTH writes are
+        durable. If storing the new row fails, the consume MUST be undone too, so
+        the caller's old token stays usable instead of the session being lost
+        between two separately committed statements (design doc, Round 2 N1).
+        """
+        ...
+
+    async def revoke_all_refresh_tokens(self, user_id: UUID) -> int:
+        """Revoke every LIVE refresh token of `user_id`; return how many.
+
+        Used on refresh-token reuse detection (design doc, Round 2 N2). Rows that
+        are already revoked keep their original `revoked_at`.
+        """
+        ...
+
 
 # ---------------------------------------------------------------------------
 # Deliverables (agent-produced artifacts, versioned, human-approvable)
