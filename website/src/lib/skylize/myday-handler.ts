@@ -25,6 +25,7 @@ import type { ZodType } from "zod";
 import { MyDayApiError, mydayRefresh } from "./myday-client";
 import { MYDAY_CONFIG_ERROR_TAG, MyDayConfigError, getMyDayConfig } from "./myday-config";
 import { isStateChangingMethod, verifySameOrigin } from "./myday-csrf";
+import { refreshOnce } from "./myday-refresh-lock";
 import {
   MYDAY_SESSION_COOKIE_NAME,
   clearedMydaySessionCookie,
@@ -198,13 +199,19 @@ function mapMyDayError(error: MyDayApiError): NextResponse {
 // Only 401 triggers a refresh. A 403 (valid token, not permitted) and every
 // other status go straight to `mapMyDayError` unchanged.
 //
-// KNOWN RACE (documented, deliberately NOT solved): two tabs whose access token
-// expired at the same moment both get a 401 and both refresh with the SAME old
-// refresh token. The backend rotates it for the first (the winner, whose
-// response sets the new cookie); the second (the loser) gets a refresh 401 and
-// its response CLEARS the cookie — possibly after the winner's response set it.
-// The user is then forced to re-login. This fails CLOSED (no token is reused,
-// no session is extended), so it is accepted rather than papered over.
+// TWO-TAB RACE (mitigated in-process, NOT eliminated): two tabs whose access
+// token expired at the same moment both get a 401 and both refresh with the SAME
+// old refresh token. The backend rotation is single-winner, so the loser used to
+// get a refresh 401 and CLEAR the cookie, forcing a re-login. The refresh now
+// goes through `refreshOnce` (myday-refresh-lock.ts): concurrent requests
+// carrying the same refresh token share ONE upstream refresh, so both get the
+// new pair, both retry with it, and neither clears the cookie. A failed shared
+// refresh fails every waiter exactly as a single refresh would (step 4).
+// Limits: ONE Node process only (deployment topology UNKNOWN), and a request
+// whose cookie predates a refresh that already SETTLED still refreshes with the
+// consumed token and loses as before. Across those gaps the backend's reuse
+// grace window (user_service.py `REFRESH_REUSE_GRACE_SECONDS`) keeps the loser a
+// plain 401 rather than a revocation of every session of the user.
 
 /** Thrown inside a handler when the session must end (refresh failed/rejected). */
 class MyDaySessionEndedError extends Error {
@@ -261,7 +268,8 @@ function createAccessTokenRunner(
     refreshAttempted = true;
     let pair;
     try {
-      pair = await mydayRefresh(session.refresh_token);
+      // Single-flight per refresh token, within this process (see the note above).
+      pair = await refreshOnce(session.refresh_token, mydayRefresh);
     } catch (error) {
       const rejected = error instanceof MyDayApiError && error.status === 401;
       outcome.ended = rejected ? 401 : 502;
