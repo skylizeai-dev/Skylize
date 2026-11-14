@@ -25,7 +25,7 @@ raises ``LangfuseConfigurationError`` naming the variables — never their value
 Neither key set means "Langfuse off" and returns ``None``.
 
 NOT DONE HERE (serialized, see the PR): passing the bridge into
-``AnthropicAdapter(langfuse_client=...)`` at bootstrap.py, a ``langfuse_host``
+``AnthropicAdapter(langfuse_client=...)`` at bootstrap.py, a ``langfuse_base_url``
 setting, and declaring ``langfuse`` as a dependency in pyproject.toml.
 """
 
@@ -125,6 +125,16 @@ class _TraceHandle:
             for v2, v3 in _USAGE_KEYS.items()
             if metadata is not None and isinstance(metadata.get(v2), int)
         }
+        # The adapter prices every call from the ai_cost_ledger price table
+        # (ADR-0006, micro units). Sending that figure as `cost_details` makes
+        # Langfuse display OUR cost instead of inferring its own from a model
+        # price list that can drift from the ledger. Langfuse costs are USD floats.
+        micros = metadata.get("cost_usd_micros") if metadata is not None else None
+        cost = (
+            {"total": micros / 1_000_000}
+            if isinstance(micros, int) and not isinstance(micros, bool)
+            else None
+        )
         self._emit(
             as_type="generation",
             name=name,
@@ -133,6 +143,7 @@ class _TraceHandle:
             input=input,
             output=output,
             usage_details=usage or None,
+            cost_details=cost,
         )
 
     def span(
@@ -188,12 +199,12 @@ def build_langfuse_bridge(
 
     Reads ``langfuse_public_key`` / ``langfuse_secret_key`` (config.py, env
     ``SKYLIZE_LANGFUSE_PUBLIC_KEY`` / ``SKYLIZE_LANGFUSE_SECRET_KEY``) and an
-    optional ``langfuse_host`` (no such Settings field exists yet; the SDK
+    optional ``langfuse_base_url`` (no such Settings field exists yet; the SDK
     default applies when absent).
     """
     public_key = str(getattr(settings, "langfuse_public_key", "") or "").strip()
     secret_key = str(getattr(settings, "langfuse_secret_key", "") or "").strip()
-    host = str(getattr(settings, "langfuse_host", "") or "").strip()
+    base_url = str(getattr(settings, "langfuse_base_url", "") or "").strip()
 
     if not public_key and not secret_key:
         return None
@@ -212,8 +223,11 @@ def build_langfuse_bridge(
         ) from exc
 
     kwargs: dict[str, Any] = {"public_key": public_key, "secret_key": secret_key}
-    if host:
-        kwargs["host"] = host
+    if base_url:
+        # `base_url`, not the deprecated `host`: in langfuse 4.x a LANGFUSE_BASE_URL
+        # environment variable silently wins over `host=`, so an operator's
+        # explicit setting could be ignored.
+        kwargs["base_url"] = base_url
     bridge = LangfuseBridge(sdk(**kwargs))
-    log.info("langfuse_enabled host=%s", host or "<sdk default>")
+    log.info("langfuse_enabled base_url=%s", base_url or "<sdk default>")
     return bridge

@@ -113,10 +113,10 @@ def test_configured_builds_client_with_keys_and_optional_host() -> None:
     assert bridge.client.init_kwargs == {"public_key": "pk", "secret_key": "sk"}
 
     bridge = build_langfuse_bridge(
-        _settings(langfuse_public_key="pk", langfuse_secret_key="sk", langfuse_host="https://lf.example"),
+        _settings(langfuse_public_key="pk", langfuse_secret_key="sk", langfuse_base_url="https://lf.example"),
         sdk_loader=lambda: _FakeV3Client,
     )
-    assert bridge is not None and bridge.client.init_kwargs["host"] == "https://lf.example"
+    assert bridge is not None and bridge.client.init_kwargs["base_url"] == "https://lf.example"
 
 
 def test_secret_never_logged(caplog: pytest.LogCaptureFixture) -> None:
@@ -161,6 +161,15 @@ def test_generation_maps_to_start_observation_and_ends_it() -> None:
     assert kwargs["metadata"]["org_id"] == "o1"
     assert kwargs["metadata"]["trace_name"] == "llm.generate"
     assert kwargs["metadata"]["cost_usd_micros"] == 5
+    # Ledger-priced cost is sent so Langfuse does not infer a drifting one.
+    assert kwargs["cost_details"] == {"total": 5 / 1_000_000}
+
+
+def test_generation_without_cost_sends_no_cost_details() -> None:
+    client = _FakeV3Client()
+    LangfuseBridge(client).trace(id="t").generation(name="g", metadata={"cost_usd_micros": True})
+    (kwargs, _), = client.observations
+    assert "cost_details" not in kwargs
 
 
 def test_span_maps_to_span_observation() -> None:
@@ -233,9 +242,11 @@ def test_real_installed_sdk_accepts_the_bridge_calls() -> None:
     exporter = export.InMemorySpanExporter()
     provider = TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
+    # span_exporter replaces the SDK's OTLP/HTTP exporter, so nothing leaves the
+    # process; the base_url is never contacted.
     client = langfuse.Langfuse(
-        public_key="pk-lf-test", secret_key="sk-lf-test", host="http://127.0.0.1:9",
-        tracer_provider=provider,
+        public_key="pk-lf-test", secret_key="sk-lf-test", base_url="https://langfuse.invalid",
+        tracer_provider=provider, span_exporter=export.InMemorySpanExporter(),
     )
     try:
         tid = uuid.uuid4()
@@ -249,4 +260,5 @@ def test_real_installed_sdk_accepts_the_bridge_calls() -> None:
             for s in spans
         )
     finally:
+        client.shutdown()
         provider.shutdown()
