@@ -37,6 +37,16 @@ AGENTS.forEach((a) => { byId[a.id] = a; });
 const deptById = {};
 DEPARTMENTS.forEach((d) => { deptById[d.id] = d; });
 
+// ── roster lifecycle (owner ruling OD6, proposal) ─────────────────────────
+// `lifecycle` is emitted by scripts/gen_agent_network_data.js: "governed" when
+// the agent has a registered AgentContract, "planned" when it is spec-only.
+// The agent views show governed agents by default; `showPlanned` reveals the
+// rest. Every count below is DERIVED from the generated roster -- never typed.
+const isGoverned = (a) => a.lifecycle === 'governed';
+const ROSTER_GOVERNED_N = AGENTS.filter(isGoverned).length;
+const ROSTER_PLANNED_N = AGENTS.length - ROSTER_GOVERNED_N;
+const ROSTER_GOVERNED_DEPT_N = new Set(AGENTS.filter(isGoverned).map((a) => a.department)).size;
+
 const CONNECTORS = [
   { name: 'Slack', mono: 'SL', color: '#7A9BFF' },
   { name: 'Salesforce', mono: 'SF', color: '#34C579' },
@@ -174,6 +184,9 @@ function initialState() {
     netSel: persisted.netSel || null,
     starDeptIdx: (function (list) { const i = list.findIndex((d) => d.id === persisted.netSel); return i < 0 ? 0 : i; })(DEPARTMENTS),
     starQ: '',
+    // Governed-only by default (OD6). Deliberately not persisted: every fresh
+    // load starts on the governed view.
+    showPlanned: false,
     // ── approvals: the real HITL queue ──────────────────────────────────
     // The six sample rows that used to live here carried risk/amount/chain,
     // none of which exists behind /api/v1/hitl. They are gone rather than
@@ -262,8 +275,9 @@ function initialState() {
 
     // ── live agent registry ─────────────────────────────────────────────
     // GET /api/v1/agents. The generated 151-agent fixture is still imported
-    // for the Starmap GEOMETRY only (see the note at `agentsLive`); every
-    // COUNT and roster the operator reads comes from here.
+    // for the Starmap geometry and the Dashboard roster headline (counts
+    // derived from it, labelled as roster counts); the GOVERNED AGENTS tile
+    // and the command blurb read the live registry from here.
     agentsLive: [],
     agentsLoading: true,
     agentsError: null,
@@ -484,15 +498,16 @@ export function useConsoleState(props) {
   }, [setState]);
 
   // ── starmap ──
-  const starGeom = useCallback((id) => {
+  const starGeom = useCallback((id, showPlanned) => {
     if (!AGENTS.length) return { nodes: [], lines: [], head: null };
-    if (sgCache.current[id]) return sgCache.current[id];
+    const key = id + (showPlanned ? ':all' : ':governed');
+    if (sgCache.current[key]) return sgCache.current[key];
     const cx = 380, cy = 250;
     const RANK = { executive: 0, vp: 1, director: 2, manager: 3, worker: 4 };
     const rankOf = (a) => (RANK[a.authority] != null ? RANK[a.authority] : 4);
-    const A = AGENTS.filter((a) => a.department === id).slice().sort((a, b) => rankOf(a) - rankOf(b) || b.tokensUsed - a.tokensUsed);
+    const A = AGENTS.filter((a) => a.department === id && (showPlanned || isGoverned(a))).slice().sort((a, b) => rankOf(a) - rankOf(b) || b.tokensUsed - a.tokensUsed);
     const nodes = [], pos = {}, lines = [];
-    if (!A.length) { const r0 = { nodes, lines, head: null }; sgCache.current[id] = r0; return r0; }
+    if (!A.length) { const r0 = { nodes, lines, head: null }; sgCache.current[key] = r0; return r0; }
     const rng = mulberry(seedStr(id));
     const R = { 0: 66, 1: 96, 2: 150, 3: 200, 4: 232 };
     const SZ = { 0: 22, 1: 18, 2: 15, 3: 12, 4: 9 };
@@ -525,7 +540,7 @@ export function useConsoleState(props) {
       if (p && qp) lines.push({ x1: p.x, y1: p.y, x2: qp.x, y2: qp.y, strong: tgt === head.id || rankOf(a) === 2 });
     });
     const res = { nodes, lines, head: head.id };
-    sgCache.current[id] = res; return res;
+    sgCache.current[key] = res; return res;
   }, []);
 
   function flyStars(dir) {
@@ -1209,7 +1224,9 @@ function buildViewModel(ctx) {
     // real now, and that figure never was.
     { label: 'PENDING APPROVALS', value: s.approvalsError ? '\u2014' : String(s.approvals.length), sub: s.approvalsError ? 'unavailable' : 'in queue', delta: '', deltaColor: '#D19A3F', spark: sparks[3], sparkColor: '#D19A3F', valColor: '#D19A3F' },
     // WIRED: the real registry size. This tile used to read "N of 151", the
-    // fixture count; the governed registry holds 23.
+    // fixture count. The registry size is whatever /api/v1/agents returns -- at
+    // 490b6dd4 that is 33 (`len(MVP_REGISTRY.all())`), of which 25 also appear
+    // in the generated roster; no number is hard-coded here.
     { label: 'GOVERNED AGENTS', value: s.agentsLoading ? '\u2026' : (s.agentsError ? '\u2014' : String(s.agentsLive.length)), sub: s.agentsError ? 'unavailable' : 'in registry', delta: '', deltaColor: '#77809A', spark: sparks[4], sparkColor: acc, valColor: '#E9EBF2' },
   ];
   const deptTok = DEPARTMENTS.map((d) => ({ d, tok: AGENTS.filter((a) => a.department === d.id).reduce((tt, a) => tt + a.tokensUsed, 0) })).sort((a, b) => b.tok - a.tok);
@@ -1276,8 +1293,10 @@ function buildViewModel(ctx) {
   const nDept = DEPARTMENTS.length || 1;
   const starIdx = ((s.starDeptIdx % nDept) + nDept) % nDept;
   const sdept = DEPARTMENTS[starIdx] || { name: '—', tagline: '', color: '#7A86A6', id: '' };
-  const sgeom = starGeom(sdept.id);
-  const smembers = AGENTS.filter((a) => a.department === sdept.id).slice().sort((a, b) => b.tokensUsed - a.tokensUsed);
+  const sgeom = starGeom(sdept.id, s.showPlanned);
+  const deptAll = AGENTS.filter((a) => a.department === sdept.id);
+  const deptPlannedN = deptAll.filter((a) => !isGoverned(a)).length;
+  const smembers = deptAll.filter((a) => s.showPlanned || isGoverned(a)).slice().sort((a, b) => b.tokensUsed - a.tokensUsed);
   const sq = s.starQ.toLowerCase();
   const smatch = (a) => !sq || a.name.toLowerCase().includes(sq) || (a.role && a.role.toLowerCase().includes(sq));
   const shead = byId[sgeom.head];
@@ -1747,13 +1766,17 @@ function buildViewModel(ctx) {
     onDirInput: (e) => setState({ dirInput: e.target.value }),
     dirKey: (e) => { if (e.key === 'Enter') { e.preventDefault(); const tx = s.dirInput; set({ screen: 'chat' }); doSend(tx); } },
     sendDir: () => { const tx = s.dirInput; set({ screen: 'chat' }); doSend(tx); },
-    heroStackDisp: 'block', tierLayers, kpis, tiltMove, tiltLeave,
+    heroStackDisp: 'block',
+    heroHeadline: ROSTER_GOVERNED_N + ' governed agents across ' + ROSTER_GOVERNED_DEPT_N
+      + ' departments · ' + AGENTS.length + ' on the roster (' + ROSTER_PLANNED_N
+      + ' planned) in ' + DEPARTMENTS.length + ' departments.',
+    tierLayers, kpis, tiltMove, tiltLeave,
     deptBars, apPrevN: String(s.approvals.length), apPrev, pulseLogs,
     // chat
     isChat: s.screen === 'chat', chatRef: chatElRef, chatEmpty: s.messages.length === 0 && !s.chatBusy,
     // THE COUNT IS THE LIVE ONE. The empty state used to read "executed by 151
-    // governed agents" -- the generated fixture count. The registry holds 23
-    // (ALL_MVP_CONTRACTS), and a turn goes to ONE of them, `cowork_agent`, not
+    // governed agents" -- the generated fixture count. The registry size is
+    // live (33 at 490b6dd4, `len(MVP_REGISTRY.all())`), and a turn goes to ONE of them, `cowork_agent`, not
     // to a fleet. The blurb now says what actually happens and reports the real
     // roster size, or stays silent about it when the registry read failed.
     commandBlurb: s.agentsLoading
@@ -1816,6 +1839,17 @@ function buildViewModel(ctx) {
     starDeptName: sdept.name, starTagline: sdept.tagline, starColor: sdept.color,
     starGlow: 'color-mix(in oklab, ' + sdept.color + ' 42%, transparent)',
     starIdxLabel: String(starIdx + 1).padStart(2, '0'),
+    starDeptTotal: String(nDept).padStart(2, '0'),
+    showPlanned: s.showPlanned,
+    toggleShowPlanned: () => setState((st) => ({ showPlanned: !st.showPlanned, selId: null })),
+    rosterToggleLabel: s.showPlanned
+      ? 'ALL AGENTS · ' + AGENTS.length
+      : 'GOVERNED ONLY · ' + ROSTER_GOVERNED_N,
+    starEmptyText: s.showPlanned
+      ? 'No agents stationed in this department yet.'
+      : (deptPlannedN
+        ? 'No governed agents in this department. ' + deptPlannedN + ' planned (no contract yet) — use SHOW PLANNED to see them.'
+        : 'No agents stationed in this department yet.'),
     starPrev: () => starStep(-1), starNext: () => starStep(1),
     starTilt, starTiltReset, starTiltRef: starTiltElRef, starPlaneRef: starPlaneElRef,
     starNodes, starLines, starDots, starList,
