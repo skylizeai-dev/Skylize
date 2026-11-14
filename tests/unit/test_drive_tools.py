@@ -8,7 +8,10 @@ the sharing handler, and error normalization. The Drive API is faked with
 from __future__ import annotations
 
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
@@ -30,6 +33,7 @@ from skylize.tools.base import PermissionGrant, ToolContext, ToolExecutionError,
 from skylize.tools.builtin.drive_tools import (
     DRIVE_PROVIDER,
     DRIVE_SHARE_ACTION_CLASS,
+    DriveClient,
     DriveCreateFileIn,
     DriveShareFileIn,
     build_drive_create_file_tool,
@@ -90,6 +94,19 @@ def _patch_drive_http(monkeypatch, handler) -> list[httpx.Request]:
 
     monkeypatch.setattr(httpx.AsyncClient, "__init__", patched)
     return seen
+
+
+@contextmanager
+def _patched_sleep(method) -> Iterator[AsyncMock]:
+    """Replace the tenacity sleep of a @retry-wrapped method; yields the mock.
+
+    Same device as `test_hubspot_tools.py` `_patched_sleep`: tenacity's async
+    wrapper copies `method.retry` per call and awaits `copy.sleep(seconds)`, so
+    patching `.retry.sleep` captures every backoff and no test really waits.
+    """
+    sleep = AsyncMock()
+    with patch.object(method.retry, "sleep", sleep):
+        yield sleep
 
 
 #: The pre-generated id the fake Drive hands out. Every create in this module
@@ -386,6 +403,254 @@ async def test_share_normalizes_a_drive_error(monkeypatch) -> None:
         await tool.handler(
             DriveShareFileIn(file_id="missing", grantee="a@example.com"), _ctx(_grant())
         )
+
+
+# ---------------------------------------------------------------------------
+# Sharing — no blind retry of the non-idempotent POST (OD25, same rule as OD4)
+# ---------------------------------------------------------------------------
+
+_SHARE_IN = DriveShareFileIn(file_id="f1", grantee="alice@example.com")
+
+#: What an ambiguous share failure must say. Message-level contract, like HubSpot.
+_AMBIGUOUS = ("OUTCOME UNKNOWN", "Do NOT re-run", "permissions.list")
+
+
+def _is_share_post(request: httpx.Request) -> bool:
+    return request.method == "POST" and str(request.url.path).endswith("/permissions")
+
+
+@pytest.mark.parametrize("status", [500, 502, 503, 504])
+async def test_share_5xx_is_attempted_once_and_reports_outcome_unknown(
+    monkeypatch, status: int
+) -> None:
+    """A 5xx does not say whether Drive applied the share: surface it, never retry.
+
+    Before this change the POST sat under the shared 429/5xx predicate and was
+    sent three times.
+    """
+    seen = _patch_drive_http(
+        monkeypatch,
+        lambda r: httpx.Response(status, json={"error": {"message": "backend error"}}),
+    )
+    tool = build_drive_share_file_tool(await _oauth_service(None))
+
+    with _patched_sleep(DriveClient.create_permission) as sleep:
+        with pytest.raises(ToolExecutionError) as excinfo:
+            await tool.handler(_SHARE_IN, _ctx(_grant()))
+
+    assert len([r for r in seen if _is_share_post(r)]) == 1
+    assert len(seen) == 1, "no other Drive request may follow an ambiguous share"
+    sleep.assert_not_awaited()
+    message = str(excinfo.value)
+    for fragment in _AMBIGUOUS:
+        assert fragment in message
+    assert str(status) in message
+    assert "'f1'" in message and "'alice@example.com'" in message
+
+
+async def test_share_timeout_after_send_is_attempted_once_and_reports_outcome_unknown(
+    monkeypatch,
+) -> None:
+    """A read timeout can fire after Drive received (and applied) the request."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    seen = _patch_drive_http(monkeypatch, handler)
+    tool = build_drive_share_file_tool(await _oauth_service(None))
+
+    with _patched_sleep(DriveClient.create_permission) as sleep:
+        with pytest.raises(ToolExecutionError) as excinfo:
+            await tool.handler(_SHARE_IN, _ctx(_grant()))
+
+    assert len([r for r in seen if _is_share_post(r)]) == 1
+    sleep.assert_not_awaited()
+    message = str(excinfo.value)
+    for fragment in _AMBIGUOUS:
+        assert fragment in message
+    assert "ReadTimeout" in message
+    assert isinstance(excinfo.value.__cause__, httpx.TimeoutException)
+
+
+async def test_share_dropped_connection_after_send_is_attempted_once(monkeypatch) -> None:
+    """Not only timeouts: any post-send transport failure is equally ambiguous."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.RemoteProtocolError("server disconnected", request=request)
+
+    seen = _patch_drive_http(monkeypatch, handler)
+    tool = build_drive_share_file_tool(await _oauth_service(None))
+
+    with _patched_sleep(DriveClient.create_permission) as sleep:
+        with pytest.raises(ToolExecutionError, match="OUTCOME UNKNOWN"):
+            await tool.handler(_SHARE_IN, _ctx(_grant()))
+
+    assert len(seen) == 1
+    sleep.assert_not_awaited()
+
+
+async def test_share_429_is_still_retried_then_succeeds(monkeypatch) -> None:
+    """429 is a refusal, not an ambiguous outcome, so it keeps its retry —
+    the same split HubSpot makes for its non-idempotent create."""
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return httpx.Response(429, json={"error": {"message": "slow down"}})
+        return httpx.Response(200, json={"id": "perm-429"})
+
+    _patch_drive_http(monkeypatch, handler)
+    tool = build_drive_share_file_tool(await _oauth_service(None))
+
+    with _patched_sleep(DriveClient.create_permission) as sleep:
+        out = await tool.handler(_SHARE_IN, _ctx(_grant()))
+
+    assert out.permission_id == "perm-429"
+    assert attempts == 2
+    assert sleep.await_count == 1
+
+
+async def test_share_persistent_429_exhausts_retries_as_a_clean_non_ambiguous_error(
+    monkeypatch,
+) -> None:
+    seen = _patch_drive_http(
+        monkeypatch,
+        lambda r: httpx.Response(429, json={"error": {"message": "slow down"}}),
+    )
+    tool = build_drive_share_file_tool(await _oauth_service(None))
+
+    with _patched_sleep(DriveClient.create_permission):
+        with pytest.raises(ToolExecutionError, match="rate limited") as excinfo:
+            await tool.handler(_SHARE_IN, _ctx(_grant()))
+
+    assert len(seen) == 3
+    assert "OUTCOME UNKNOWN" not in str(excinfo.value)
+    assert "(429)" in str(excinfo.value)
+
+
+async def test_share_pre_send_connect_failure_is_retried_then_succeeds(monkeypatch) -> None:
+    """A connect failure happens before any byte is sent, so a retry cannot duplicate."""
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise httpx.ConnectError("refused", request=request)
+        return httpx.Response(200, json={"id": "perm-connect"})
+
+    _patch_drive_http(monkeypatch, handler)
+    tool = build_drive_share_file_tool(await _oauth_service(None))
+
+    with _patched_sleep(DriveClient.create_permission) as sleep:
+        out = await tool.handler(_SHARE_IN, _ctx(_grant()))
+
+    assert out.permission_id == "perm-connect"
+    assert attempts == 2
+    assert sleep.await_count == 1
+
+
+async def test_share_persistent_connect_failure_says_the_request_was_not_sent(
+    monkeypatch,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectTimeout("connect timed out", request=request)
+
+    seen = _patch_drive_http(monkeypatch, handler)
+    tool = build_drive_share_file_tool(await _oauth_service(None))
+
+    with _patched_sleep(DriveClient.create_permission):
+        with pytest.raises(ToolExecutionError, match="NOT sent") as excinfo:
+            await tool.handler(_SHARE_IN, _ctx(_grant()))
+
+    assert len(seen) == 3
+    assert "OUTCOME UNKNOWN" not in str(excinfo.value)
+
+
+async def test_share_success_makes_exactly_one_post(monkeypatch) -> None:
+    seen = _patch_drive_http(monkeypatch, lambda r: httpx.Response(200, json={"id": "perm-ok"}))
+    tool = build_drive_share_file_tool(await _oauth_service(None))
+
+    with _patched_sleep(DriveClient.create_permission) as sleep:
+        out = await tool.handler(_SHARE_IN, _ctx(_grant()))
+
+    assert out.permission_id == "perm-ok"
+    assert out.file_id == "f1"
+    assert out.grantee == "alice@example.com"
+    assert out.role == "reader"
+    assert len(seen) == 1 and _is_share_post(seen[0])
+    assert str(seen[0].url.path) == "/drive/v3/files/f1/permissions"
+    sleep.assert_not_awaited()
+
+
+@pytest.mark.parametrize("status", [400, 403, 404])
+async def test_share_4xx_maps_to_the_same_error_as_before(monkeypatch, status: int) -> None:
+    """Unchanged: a 4xx is a definite refusal, normalized by `_drive_error`."""
+    seen = _patch_drive_http(
+        monkeypatch,
+        lambda r: httpx.Response(status, json={"error": {"message": "nope"}}),
+    )
+    tool = build_drive_share_file_tool(await _oauth_service(None))
+
+    with _patched_sleep(DriveClient.create_permission) as sleep:
+        with pytest.raises(ToolExecutionError) as excinfo:
+            await tool.handler(_SHARE_IN, _ctx(_grant()))
+
+    assert str(excinfo.value) == f"Google Drive sharing failed ({status}): nope"
+    assert len(seen) == 1
+    sleep.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# The idempotent Drive calls KEEP their retry (unchanged by the share fix)
+# ---------------------------------------------------------------------------
+
+async def test_generate_id_still_retries_three_times_on_503(monkeypatch) -> None:
+    """`generateIds` reserves ids and writes nothing, so it stays retryable."""
+    seen = _patch_drive_http(
+        monkeypatch, lambda r: httpx.Response(503, json={"error": {"message": "down"}})
+    )
+    tool = build_drive_create_file_tool(await _oauth_service(None))
+
+    with _patched_sleep(DriveClient.generate_id) as sleep:
+        with pytest.raises(ToolExecutionError, match="retries exhausted"):
+            await tool.handler(DriveCreateFileIn(name="a", content="b"), _ctx())
+
+    assert len([r for r in seen if "generateIds" in str(r.url)]) == 3
+    assert sleep.await_count == 2
+    assert not [r for r in seen if "upload/drive" in str(r.url)]
+
+
+async def test_generate_id_still_retries_three_times_on_timeout(monkeypatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    seen = _patch_drive_http(monkeypatch, handler)
+    tool = build_drive_create_file_tool(await _oauth_service(None))
+
+    with _patched_sleep(DriveClient.generate_id) as sleep:
+        with pytest.raises(httpx.TimeoutException):
+            await tool.handler(DriveCreateFileIn(name="a", content="b"), _ctx())
+
+    assert len(seen) == 3
+    assert sleep.await_count == 2
+
+
+async def test_create_file_upload_still_retries_three_times_on_503(monkeypatch) -> None:
+    """The keyed upload is safe to repeat (pre-generated id), so it stays retryable."""
+    seen = _patch_drive_http(
+        monkeypatch,
+        _with_generate_ids(lambda r: httpx.Response(503, json={"error": {"message": "down"}})),
+    )
+    tool = build_drive_create_file_tool(await _oauth_service(None))
+
+    with _patched_sleep(DriveClient.create_file) as sleep:
+        with pytest.raises(ToolExecutionError, match="retries exhausted"):
+            await tool.handler(DriveCreateFileIn(name="a", content="b"), _ctx())
+
+    assert len([r for r in seen if "upload/drive" in str(r.url)]) == 3
+    assert len([r for r in seen if "generateIds" in str(r.url)]) == 1
+    assert sleep.await_count == 2
 
 
 # ---------------------------------------------------------------------------
