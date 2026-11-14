@@ -391,3 +391,95 @@ rationale comment at `:162`). The **cookie is ALWAYS cleared**, which restores t
 - An absent, tampered or expired cookie under a valid config is still `401` plus a
   cleared cookie, and is not logged with the config tag.
 - Boot-time validation of the My Day config is out of scope here (tracked as T5).
+
+
+---
+
+## 9.0 - Round 2 (proposed - pending owner approval), 2026-11-14
+
+`[PROPOSED - PENDING OWNER APPROVAL]` Branch `feat/security-session-hardening`.
+No migration, no new column. Section numbers above are unchanged; nothing above
+is rewritten.
+
+**Scope of the supersession.** This section supersedes the statements that
+reuse detection is "deferred" / "would need a migration" (section 3.0 "Reuse
+detection would need a migration", section 6.0 "Not in this build: ... reuse
+detection", section 7.0 title and "Why it needs a migration") ONLY for the
+USER-WIDE variant described here. The per-FAMILY variant of section 7.0
+(revoke only the stolen token's lineage) still needs the `family_id` migration
+and is still not built.
+
+### 9.0.1 N1 - rotation is one transaction
+
+Before: `refresh` ran the consume `UPDATE`, a `users` read and the new token's
+`INSERT` as three statements, each on its own `admin_session()` and so each
+autocommitted (`admin_session` is a bare pool acquire,
+`src/skylize/dal/connection.py` `admin_session`). A failure after the consume
+lost the session: old token consumed, no new token stored.
+
+After: one port method `UserRepository.rotate_refresh_token(*, old_token_id,
+user_id, new_token_id, new_expires_at) -> bool` (`src/skylize/dal/ports.py`).
+The Pg implementation (`src/skylize/dal/users.py` `rotate_refresh_token`) runs
+the same single-winner consume `UPDATE` (`_CONSUME_SQL`, shared with
+`consume_refresh_token`) and the `INSERT` on ONE connection inside
+`conn.transaction()`; any exception rolls the consume back, so the old token
+stays live. The in-memory implementation inserts first and marks the old row
+consumed only after that succeeded, with no `await` in between. The user is now
+read before the rotation (an inactive user's token is refused without being
+consumed; every later attempt is refused by the same check).
+
+### 9.0.2 N2 - user-wide reuse detection, with a grace window
+
+When a refresh is refused, `UserAuthService._on_refused_refresh`
+(`src/skylize/app/auth/user_service.py`) reads the presented token's row. Only
+a row that exists, is owned by the token's `sub`, has `revoked_at` set and is
+not expired counts as reuse:
+
+- consumed LESS than `REFRESH_REUSE_GRACE_SECONDS = 10` seconds ago
+  (module-level constant in `user_service.py`): treated as a benign concurrent
+  refresh (two tabs on one cookie). Plain refusal, no side effect, no log line;
+- consumed 10 s ago or more: `revoke_all_refresh_tokens(user_id)` revokes EVERY
+  live refresh token of that user, and a structured WARNING is logged:
+  `auth_refresh_reuse_detected user_id=... token_id=... consumed_age_seconds=...
+  grace_seconds=10 revoked_count=...`. No token value appears in it (`token_id`
+  is the row id / `jti`, which is not usable without the signed JWT);
+- unknown, expired, wrongly signed, or sub/jti-mismatched tokens: unchanged,
+  refused and nothing else touched.
+
+The caller always gets the same fixed 401 (`REFRESH_REFUSED_DETAIL`); the route
+contract is unchanged.
+
+**Why the grace window is required.** Without it the losing request of an
+ordinary two-tab refresh race would revoke every session of the user,
+including the winner's fresh pair. The BFF single-flight (same branch,
+`website/src/lib/skylize/myday-refresh-lock.ts`) removes that race inside one
+Node process; the grace window bounds it across processes. The window is
+compared against the DB-stamped `revoked_at` using the API process clock, so
+clock skew between the DB and the API host shifts it.
+
+### 9.0.3 Known limitation - decision for the owner
+
+`revoked_at` cannot distinguish ROTATION from LOGOUT (logout uses the same
+consume). A LOGGED-OUT refresh token presented to `/refresh` more than 10 s
+after logout is therefore treated as reuse and revokes the user's other
+sessions. This is pinned by
+`test_a_logged_out_token_replayed_after_grace_also_revokes_all`
+(`tests/unit/test_session_revocation.py`). Distinguishing the two needs a
+column (for example a revocation reason) = a migration = an owner decision; it
+was deliberately not added.
+
+### 9.0.4 Tests
+
+- `tests/unit/test_session_revocation.py`: the old
+  `test_a_rotated_token_cannot_be_refreshed_again` became
+  `test_a_rotated_token_reused_within_grace_is_refused_without_side_effect`;
+  new tests cover reuse after grace (revoke-all + log line without token),
+  within grace (no revoke, no log), other users untouched, unknown/expired
+  tokens, the logout limitation, and the N1 rollback.
+- `tests/integration/test_refresh_revocation_pg.py`: the old
+  `test_reuse_of_rotated_token_is_rejected` became
+  `test_reuse_of_rotated_token_within_grace_is_rejected`; new
+  `test_reuse_after_grace_revokes_all_the_users_tokens` and
+  `test_rotation_rolls_back_the_consume_when_the_insert_fails` (a primary-key
+  collision on the INSERT after the consume ran). These run only in CI's
+  `integration` job.

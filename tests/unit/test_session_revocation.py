@@ -18,6 +18,7 @@ tests/integration/test_refresh_revocation_pg.py.
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
@@ -27,7 +28,11 @@ from pydantic import ValidationError
 
 import skylize.config as config_module
 from skylize.app.auth.tokens import create_refresh_token, decode_token
-from skylize.app.auth.user_service import InvalidCredentialsError, UserAuthService
+from skylize.app.auth.user_service import (
+    REFRESH_REUSE_GRACE_SECONDS,
+    InvalidCredentialsError,
+    UserAuthService,
+)
 from skylize.config import Settings
 from skylize.dal.memory import InMemoryUserRepository
 from skylize.edge.gateway import create_app
@@ -36,9 +41,23 @@ from skylize.edge.routes.auth import REFRESH_REFUSED_DETAIL
 SECRET = "test-secret"
 
 
-def _service() -> tuple[UserAuthService, InMemoryUserRepository]:
+class _Clock:
+    """Wall clock plus a settable offset, so the reuse grace window is crossed
+    without sleeping."""
+
+    def __init__(self) -> None:
+        self._offset = timedelta(0)
+
+    def advance(self, seconds: float) -> None:
+        self._offset += timedelta(seconds=seconds)
+
+    def __call__(self) -> datetime:
+        return datetime.now(timezone.utc) + self._offset
+
+
+def _service(clock: _Clock | None = None) -> tuple[UserAuthService, InMemoryUserRepository]:
     repo = InMemoryUserRepository()
-    return UserAuthService(repo, Settings(jwt_secret=SECRET)), repo
+    return UserAuthService(repo, Settings(jwt_secret=SECRET), clock=clock), repo
 
 
 async def _logged_in(svc: UserAuthService, org: str = "org_a", email: str = "a@example.com"):
@@ -99,15 +118,168 @@ async def test_concurrent_refreshes_of_one_token_mint_exactly_one_pair() -> None
     assert len(refused) == 1, results
 
 
-async def test_a_rotated_token_cannot_be_refreshed_again() -> None:
-    svc, _ = _service()
+async def test_a_rotated_token_reused_within_grace_is_refused_without_side_effect() -> None:
+    """UPDATED for Round 2 N2 (was `test_a_rotated_token_cannot_be_refreshed_again`).
+
+    It used to pin "reuse never revokes the family". Reuse detection now exists,
+    so this pins only the WITHIN-grace case: a re-presentation inside the window
+    is the benign two-tab race, so it is refused and the rotated-to token stays
+    live. The after-grace case is
+    `test_reuse_after_the_grace_window_revokes_all_the_users_refresh_tokens`.
+    """
+    clock = _Clock()
+    svc, _ = _service(clock)
     first = await _logged_in(svc)
     second = await svc.refresh(refresh_token=first.refresh_token)
 
+    clock.advance(REFRESH_REUSE_GRACE_SECONDS - 1)
     with pytest.raises(InvalidCredentialsError):
         await svc.refresh(refresh_token=first.refresh_token)
     # The new token from the rotation is live.
     assert (await svc.refresh(refresh_token=second.refresh_token)).access_token
+
+
+# ── Round 2: reuse detection with a grace window (N2) ───────────────────────
+
+async def test_reuse_after_the_grace_window_revokes_all_the_users_refresh_tokens(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    clock = _Clock()
+    svc, _ = _service(clock)
+    first = await _logged_in(svc)
+    other_session = await svc.login(email="a@example.com", password="hunter2pw")
+    rotated = await svc.refresh(refresh_token=first.refresh_token)
+
+    clock.advance(REFRESH_REUSE_GRACE_SECONDS + 1)
+    with caplog.at_level(logging.WARNING, logger="skylize.app.auth.user_service"):
+        with pytest.raises(InvalidCredentialsError):
+            await svc.refresh(refresh_token=first.refresh_token)
+    # Read the log BEFORE probing the siblings: under the offset clock their
+    # (now revoked) tokens also look aged and log again with revoked_count=0.
+    records = [r for r in caplog.records if "auth_refresh_reuse_detected" in r.getMessage()]
+
+    # Every live token of the user is gone: the rotated-to one AND a sibling.
+    for live in (rotated.refresh_token, other_session.refresh_token):
+        with pytest.raises(InvalidCredentialsError):
+            await svc.refresh(refresh_token=live)
+
+    assert len(records) == 1
+    message = records[0].getMessage()
+    assert "revoked_count=2" in message
+    # The log line carries ids only, never a token or its signature.
+    for token in (first.refresh_token, rotated.refresh_token, other_session.refresh_token):
+        assert token not in message
+        assert token.split(".")[-1] not in message
+
+
+async def test_reuse_after_grace_does_not_touch_another_users_sessions() -> None:
+    clock = _Clock()
+    svc, _ = _service(clock)
+    a = await _logged_in(svc, org="org_a", email="a@example.com")
+    b = await _logged_in(svc, org="org_b", email="b@example.com")
+    await svc.refresh(refresh_token=a.refresh_token)
+
+    clock.advance(REFRESH_REUSE_GRACE_SECONDS + 1)
+    with pytest.raises(InvalidCredentialsError):
+        await svc.refresh(refresh_token=a.refresh_token)
+    assert (await svc.refresh(refresh_token=b.refresh_token)).access_token
+
+
+async def test_reuse_within_the_grace_window_logs_nothing_and_revokes_nothing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    clock = _Clock()
+    svc, _ = _service(clock)
+    first = await _logged_in(svc)
+    other_session = await svc.login(email="a@example.com", password="hunter2pw")
+    rotated = await svc.refresh(refresh_token=first.refresh_token)
+
+    with caplog.at_level(logging.WARNING, logger="skylize.app.auth.user_service"):
+        with pytest.raises(InvalidCredentialsError):
+            await svc.refresh(refresh_token=first.refresh_token)
+
+    assert not [r for r in caplog.records if "auth_refresh_reuse_detected" in r.getMessage()]
+    assert (await svc.refresh(refresh_token=rotated.refresh_token)).access_token
+    assert (await svc.refresh(refresh_token=other_session.refresh_token)).access_token
+
+
+async def test_unknown_or_expired_tokens_never_trigger_revoke_all() -> None:
+    clock = _Clock()
+    svc, repo = _service(clock)
+    first = await _logged_in(svc)
+    user = await repo.get_by_email("a@example.com")
+    assert user is not None
+
+    unknown = create_refresh_token(
+        user_id=str(user.user_id), token_id=uuid4(), secret=SECRET, ttl_days=1
+    )
+    expired_id = uuid4()
+    await repo.store_refresh_token(
+        expired_id, user.user_id, datetime.now(timezone.utc) - timedelta(seconds=1)
+    )
+    expired = create_refresh_token(
+        user_id=str(user.user_id), token_id=expired_id, secret=SECRET, ttl_days=1
+    )
+
+    clock.advance(REFRESH_REUSE_GRACE_SECONDS + 1)
+    for bad in (unknown, expired):
+        with pytest.raises(InvalidCredentialsError):
+            await svc.refresh(refresh_token=bad)
+    assert (await svc.refresh(refresh_token=first.refresh_token)).access_token
+
+
+async def test_a_logged_out_token_replayed_after_grace_also_revokes_all() -> None:
+    """PINS A KNOWN LIMITATION, not a goal. `revoked_at` is set by logout and by
+    rotation alike, so a logged-out token replayed after the grace window is
+    indistinguishable from a replayed rotated token and revokes the user's other
+    sessions. Telling them apart needs a column = owner decision (design doc,
+    Round 2)."""
+    clock = _Clock()
+    svc, _ = _service(clock)
+    first = await _logged_in(svc)
+    other_session = await svc.login(email="a@example.com", password="hunter2pw")
+    assert await svc.logout(refresh_token=first.refresh_token) is True
+
+    clock.advance(REFRESH_REUSE_GRACE_SECONDS + 1)
+    with pytest.raises(InvalidCredentialsError):
+        await svc.refresh(refresh_token=first.refresh_token)
+    with pytest.raises(InvalidCredentialsError):
+        await svc.refresh(refresh_token=other_session.refresh_token)
+
+
+# ── Round 2: rotation is one atomic unit (N1) ────────────────────────────────
+
+async def test_a_failed_insert_during_rotation_leaves_the_old_token_usable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    svc, repo = _service()
+    first = await _logged_in(svc)
+    jti = UUID(decode_token(first.refresh_token, SECRET)["jti"])
+
+    def _boom(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("simulated failure storing the new refresh token")
+
+    monkeypatch.setattr(repo, "_insert_refresh", _boom)
+    with pytest.raises(RuntimeError, match="simulated failure"):
+        await svc.refresh(refresh_token=first.refresh_token)
+
+    row = await repo.get_refresh_token(jti)
+    assert row is not None and row.revoked_at is None, "old token was consumed"
+    monkeypatch.undo()
+    assert (await svc.refresh(refresh_token=first.refresh_token)).access_token
+
+
+async def test_rotate_refuses_a_non_consumable_token_and_writes_nothing() -> None:
+    repo = InMemoryUserRepository()
+    old, new, owner = uuid4(), uuid4(), uuid4()
+    later = datetime.now(timezone.utc) + timedelta(days=1)
+    await repo.store_refresh_token(old, owner, later)
+    assert await repo.consume_refresh_token(old, owner) is True
+
+    assert await repo.rotate_refresh_token(
+        old_token_id=old, user_id=owner, new_token_id=new, new_expires_at=later
+    ) is False
+    assert await repo.get_refresh_token(new) is None
 
 
 async def _mismatched_token(svc: UserAuthService, repo: InMemoryUserRepository):

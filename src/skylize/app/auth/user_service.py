@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from typing import Final
 from uuid import UUID, uuid4
 
 import logging
@@ -15,6 +17,17 @@ from .passwords import hash_password, verify_password
 from .tokens import InvalidTokenError, create_access_token, create_refresh_token, decode_token
 
 VALID_ROLES = frozenset({"owner", "admin", "operator", "viewer"})
+
+#: Refresh-token reuse detection grace window, in seconds (design doc, Round 2
+#: N2 - proposed, pending owner approval). An already-consumed refresh token
+#: re-presented LESS than this long after it was consumed is treated as a benign
+#: concurrent refresh (two browser tabs racing on one cookie): plain refusal, no
+#: side effect. Re-presented later, it is treated as reuse of a stolen token and
+#: EVERY live refresh token of the user is revoked. Without this window the
+#: losing tab of an ordinary two-tab race would log the user out everywhere.
+REFRESH_REUSE_GRACE_SECONDS: Final = 10
+
+_log = logging.getLogger(__name__)
 
 
 class DuplicateEmailError(Exception):
@@ -53,10 +66,14 @@ class UserAuthService:
         repo: UserRepository,
         settings: Settings,
         provisioner: PrincipalProvisioner | None = None,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._repo = repo
         self._settings = settings
         self._provisioner = provisioner
+        # Used only to age a consumed refresh token against the reuse grace
+        # window; injectable so tests need not sleep.
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
 
     async def register(
         self,
@@ -213,20 +230,60 @@ class UserAuthService:
     async def refresh(self, *, refresh_token: str) -> LoginResult:
         jti, sub = self._refresh_claims(refresh_token)
 
-        # Rotate. `consume_refresh_token` is ONE conditional write: of two
-        # concurrent refreshes with the same token, exactly one wins and the other
-        # is refused. The former read-then-revoke let both through and minted two
-        # live token families (design doc 1.0.2). Ownership (`sub` must own the
-        # `jti` row) is inside the same condition, so a mismatched token is
-        # refused WITHOUT consuming the other user's row.
-        if not await self._repo.consume_refresh_token(jti, sub):
-            raise InvalidCredentialsError("refresh token revoked, expired, or not found")
-
+        # The user is read BEFORE the rotation (it used to be read after the
+        # consume) so that the consume and the insert of the new token can be one
+        # transaction (Round 2 N1). Consequence: an inactive or deleted user's
+        # token is refused without being consumed - harmless, every later attempt
+        # is refused by this same check.
         user = await self._repo.get_by_id(sub)
         if user is None or not user.is_active:
             raise InvalidCredentialsError("user not found or inactive")
 
-        return await self._mint_pair(user)
+        # Rotate. `rotate_refresh_token` consumes with ONE conditional write: of
+        # two concurrent refreshes with the same token, exactly one wins and the
+        # other is refused. The former read-then-revoke let both through and
+        # minted two live token families (design doc 1.0.2). Ownership (`sub`
+        # must own the `jti` row) is inside the same condition, so a mismatched
+        # token is refused WITHOUT consuming the other user's row. The consume
+        # and the INSERT of the new row commit together or not at all.
+        pair, token_id, expires_at = self._new_pair(user)
+        if await self._repo.rotate_refresh_token(
+            old_token_id=jti, user_id=sub, new_token_id=token_id, new_expires_at=expires_at
+        ):
+            return pair
+
+        await self._on_refused_refresh(jti, sub)
+        raise InvalidCredentialsError("refresh token revoked, expired, or not found")
+
+    async def _on_refused_refresh(self, jti: UUID, sub: UUID) -> None:
+        """Reuse detection (Round 2 N2 - proposed, pending owner approval).
+
+        Only an already-CONSUMED token that is still unexpired and owned by
+        `sub` counts as reuse. Unknown, expired, and sub/jti-mismatched tokens
+        keep the old behaviour: refused, nothing else touched.
+
+        `revoked_at` is set both by rotation and by logout, so this cannot tell
+        a replayed rotated token from a replayed LOGGED-OUT one: a logged-out
+        token re-presented after the grace window also revokes the user's other
+        sessions. Distinguishing them needs a column (owner decision).
+        """
+        row = await self._repo.get_refresh_token(jti)
+        if row is None or row.user_id != sub or row.revoked_at is None:
+            return
+        now = self._clock()
+        if row.expires_at <= now:
+            return
+        age = now - row.revoked_at
+        if age < timedelta(seconds=REFRESH_REUSE_GRACE_SECONDS):
+            # A benign concurrent refresh: the other request won the rotation.
+            return
+        revoked = await self._repo.revoke_all_refresh_tokens(sub)
+        # Structured, and never the token: only ids, the age, and the count.
+        _log.warning(
+            "auth_refresh_reuse_detected user_id=%s token_id=%s "
+            "consumed_age_seconds=%d grace_seconds=%d revoked_count=%d",
+            sub, jti, int(age.total_seconds()), REFRESH_REUSE_GRACE_SECONDS, revoked,
+        )
 
     async def logout(self, *, refresh_token: str) -> bool:
         """Revoke the refresh token's own row. Never raises for a bad token.
@@ -249,6 +306,15 @@ class UserAuthService:
     # ── internal ──────────────────────────────────────────────────────────────
 
     async def _mint_pair(self, user: UserRow) -> LoginResult:
+        pair, token_id, expires_at = self._new_pair(user)
+        await self._repo.store_refresh_token(
+            token_id=token_id, user_id=user.user_id, expires_at=expires_at
+        )
+        return pair
+
+    def _new_pair(self, user: UserRow) -> tuple[LoginResult, UUID, datetime]:
+        """Sign a fresh access/refresh pair. Persists NOTHING: the caller stores
+        the refresh row (login) or rotates onto it (refresh)."""
         secret = self._settings.jwt_secret
         access = create_access_token(
             user_id=str(user.user_id),
@@ -267,7 +333,5 @@ class UserAuthService:
         expires_at = datetime.now(timezone.utc) + timedelta(
             days=self._settings.jwt_refresh_token_ttl_days
         )
-        await self._repo.store_refresh_token(
-            token_id=token_id, user_id=user.user_id, expires_at=expires_at
-        )
-        return LoginResult(access_token=access, refresh_token=refresh, user=user)
+        pair = LoginResult(access_token=access, refresh_token=refresh, user=user)
+        return pair, token_id, expires_at
