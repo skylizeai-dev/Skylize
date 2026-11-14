@@ -24,6 +24,7 @@ from .contracts import (
     ProposalDraft,
 )
 from .flows import (
+    ActiveAgentGate,
     DepartmentDeps,
     DepartmentRunResult,
     build_department_graph,
@@ -32,6 +33,7 @@ from .flows import (
 )
 
 __all__ = [
+    "ActiveAgentGate",
     "DEFAULT_DEPARTMENT_SPECS",
     "DepartmentDeps",
     "DepartmentRunResult",

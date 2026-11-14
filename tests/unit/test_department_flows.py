@@ -85,6 +85,23 @@ class SpyEvaluator(DecisionEvaluator):
         return await super().evaluate(proposal)
 
 
+class FakeAuthority:
+    """Stands in for GovernanceAuthority.assert_active (governance/authority.py:254)."""
+
+    def __init__(self, deny: str | None = None) -> None:
+        self.deny = deny
+        self.checks: list[tuple[str, str]] = []
+
+    async def assert_active(self, agent_id: str, org_id: str) -> None:
+        self.checks.append((agent_id, org_id))
+        if self.deny:
+            raise PermissionError(self.deny)
+
+
+async def _launched_before(org_id: str, spec: DepartmentSpec, draft: ProposalDraft) -> bool:
+    return True
+
+
 def _capital(**ceilings: int) -> InMemoryCapitalRepository:
     cap = InMemoryCapitalRepository()
     for scope, ceiling in ceilings.items():
@@ -96,8 +113,10 @@ def _evaluator(capital: InMemoryCapitalRepository | None = None, **kw: Any) -> S
     return SpyEvaluator(registry=MVP_REGISTRY, capital=capital or _capital(), **kw)
 
 
-async def _run(dept: str, tool: MockTool, evaluator: DecisionEvaluator, **kw: Any):
-    deps = DepartmentDeps(evaluator=evaluator, tool=tool, now_fn=_Clock())
+async def _run(dept: str, tool: MockTool, evaluator: DecisionEvaluator, *, authority: FakeAuthority | None = None,
+               launch_history: Any = None, **kw: Any):
+    deps = DepartmentDeps(evaluator=evaluator, tool=tool, authority=authority or FakeAuthority(),
+                          launch_history=launch_history, now_fn=_Clock())
     return await run_department(SPECS[dept], deps, org_id=ORG, **kw)
 
 
@@ -132,7 +151,7 @@ def test_draft_spend_and_currency_travel_together() -> None:
 
 
 def test_graph_nodes_are_explicit() -> None:
-    graph = build_department_graph(SPECS["creative_ops"], DepartmentDeps(evaluator=_evaluator(), tool=MockTool()))
+    graph = build_department_graph(SPECS["creative_ops"], DepartmentDeps(evaluator=_evaluator(), tool=MockTool(), authority=FakeAuthority()))
     assert set(graph.get_graph().nodes) >= {"plan", "govern", "act", "await_human", "rejected", "failed"}
 
 
@@ -160,16 +179,16 @@ async def test_marketing_ops_first_external_launch_defers_to_human() -> None:
 
 async def test_marketing_ops_repeat_launch_within_budget_executes() -> None:
     tool = MockTool(ProposalDraft(summary="relaunch", partition_key="campaign:1", spend_minor_units=50_000,
-                                  currency="USD", metadata={"previously_launched": True}))
-    result = await _run("marketing_ops", tool, _evaluator(_capital(growth=100_000)))
+                                  currency="USD"))
+    result = await _run("marketing_ops", tool, _evaluator(_capital(growth=100_000)), launch_history=_launched_before)
     assert result.status == "executed"
     _assert_invariant(result, tool)
 
 
 async def test_marketing_ops_spend_over_ceiling_defers_at_capital() -> None:
     tool = MockTool(ProposalDraft(summary="big", partition_key="campaign:2", spend_minor_units=150_000,
-                                  currency="USD", metadata={"previously_launched": True}))
-    result = await _run("marketing_ops", tool, _evaluator(_capital(growth=100_000)))
+                                  currency="USD"))
+    result = await _run("marketing_ops", tool, _evaluator(_capital(growth=100_000)), launch_history=_launched_before)
     assert result.status == "deferred_to_human"
     assert result.decision.stage_failed_at == STAGE_CAPITAL
     assert any("spend_over_ceiling" in r for r in result.decision.reasons)
@@ -178,8 +197,8 @@ async def test_marketing_ops_spend_over_ceiling_defers_at_capital() -> None:
 
 async def test_missing_budget_ceiling_fails_closed_to_human() -> None:
     tool = MockTool(ProposalDraft(summary="x", partition_key="campaign:3", spend_minor_units=1,
-                                  currency="USD", metadata={"previously_launched": True}))
-    result = await _run("marketing_ops", tool, _evaluator(_capital()))
+                                  currency="USD"))
+    result = await _run("marketing_ops", tool, _evaluator(_capital()), launch_history=_launched_before)
     assert result.status == "deferred_to_human"
     assert any("no_budget_ceiling_configured" in r for r in result.decision.reasons)
     _assert_invariant(result, tool)
@@ -216,7 +235,8 @@ async def test_unregistered_agent_fails_closed() -> None:
     spec = DepartmentSpec(department_id="ghost", proposing_agent_id="ghost_agent",
                           action_kind="creative.review", capital_scope="growth")
     tool = MockTool()
-    result = await run_department(spec, DepartmentDeps(evaluator=_evaluator(), tool=tool), org_id=ORG)
+    result = await run_department(spec, DepartmentDeps(evaluator=_evaluator(), tool=tool, authority=FakeAuthority()),
+                                  org_id=ORG)
     assert result.status == "rejected" and result.decision.stage_failed_at == STAGE_AUTHORITY
     _assert_invariant(result, tool)
 
@@ -225,11 +245,14 @@ async def test_lower_authority_loses_conflict_on_same_partition() -> None:
     evaluator = _evaluator(_capital(growth=100_000))
     clock = _Clock()
     director = MockTool(ProposalDraft(summary="launch", partition_key="campaign:shared", spend_minor_units=1_000,
-                                      currency="USD", metadata={"previously_launched": True}))
-    first = await run_department(SPECS["marketing_ops"], DepartmentDeps(evaluator=evaluator, tool=director, now_fn=clock), org_id=ORG)
+                                      currency="USD"))
+    first = await run_department(SPECS["marketing_ops"], DepartmentDeps(
+        evaluator=evaluator, tool=director, authority=FakeAuthority(), launch_history=_launched_before, now_fn=clock),
+        org_id=ORG)
     assert first.status == "executed"
     manager = MockTool(ProposalDraft(summary="rework", partition_key="campaign:shared"))
-    second = await run_department(SPECS["creative_ops"], DepartmentDeps(evaluator=evaluator, tool=manager, now_fn=clock), org_id=ORG)
+    second = await run_department(SPECS["creative_ops"], DepartmentDeps(
+        evaluator=evaluator, tool=manager, authority=FakeAuthority(), now_fn=clock), org_id=ORG)
     assert second.status == "rejected" and second.decision.stage_failed_at == STAGE_CONFLICT
     _assert_invariant(second, manager)
 
@@ -264,15 +287,14 @@ async def test_execute_error_is_reported_as_failed() -> None:
 # Chain
 # ---------------------------------------------------------------------------
 
-def _chain_tools(*, previously_launched: bool) -> dict[str, MockTool]:
+def _chain_tools() -> dict[str, MockTool]:
     return {
         "market_intelligence": MockTool(ProposalDraft(summary="trend scan", partition_key="mi:chain"),
                                         result={"trend": "eco bottles"}),
         "creative_ops": MockTool(ProposalDraft(summary="ad set", partition_key="creative:chain"),
                                  result={"creative_id": "c-1"}),
         "marketing_ops": MockTool(ProposalDraft(summary="launch", partition_key="campaign:chain",
-                                                spend_minor_units=40_000, currency="USD",
-                                                metadata={"previously_launched": previously_launched}),
+                                                spend_minor_units=40_000, currency="USD"),
                                   result={"campaign_id": "cmp-1"}),
         "finance_risk": MockTool(ProposalDraft(summary="rebalance", partition_key="budget:chain",
                                                spend_minor_units=10_000, currency="USD"),
@@ -281,10 +303,10 @@ def _chain_tools(*, previously_launched: bool) -> dict[str, MockTool]:
 
 
 async def test_chain_halts_at_first_deferral_and_never_acts_downstream() -> None:
-    tools = _chain_tools(previously_launched=False)
+    tools = _chain_tools()
     results = await run_department_chain(
         DEFAULT_DEPARTMENT_SPECS, tools, _evaluator(_capital(growth=100_000, finance=100_000)),
-        org_id=ORG, payload={"niche": "kitchen"}, now_fn=_Clock(),
+        authority=FakeAuthority(), org_id=ORG, payload={"niche": "kitchen"}, now_fn=_Clock(),
     )
     assert [(r.department_id, r.status) for r in results] == [
         ("market_intelligence", "executed"), ("creative_ops", "executed"), ("marketing_ops", "deferred_to_human"),
@@ -295,10 +317,10 @@ async def test_chain_halts_at_first_deferral_and_never_acts_downstream() -> None
 
 
 async def test_chain_all_approved_runs_all_four() -> None:
-    tools = _chain_tools(previously_launched=True)
+    tools = _chain_tools()
     results = await run_department_chain(
         DEFAULT_DEPARTMENT_SPECS, tools, _evaluator(_capital(growth=100_000, finance=100_000)),
-        org_id=ORG, now_fn=_Clock(),
+        authority=FakeAuthority(), launch_history=_launched_before, org_id=ORG, now_fn=_Clock(),
     )
     assert [r.status for r in results] == ["executed"] * 4
     assert tools["finance_risk"].plans == [{"campaign_id": "cmp-1"}]
@@ -306,4 +328,76 @@ async def test_chain_all_approved_runs_all_four() -> None:
 
 async def test_chain_requires_a_tool_per_department() -> None:
     with pytest.raises(ValueError, match="no tool supplied"):
-        await run_department_chain(DEFAULT_DEPARTMENT_SPECS, {}, _evaluator(), org_id=ORG)
+        await run_department_chain(DEFAULT_DEPARTMENT_SPECS, {}, _evaluator(), authority=FakeAuthority(), org_id=ORG)
+
+
+# ---------------------------------------------------------------------------
+# Independent-auditor findings (audit-D4 F1, F2, F4) and the M5 test gap
+# ---------------------------------------------------------------------------
+
+async def test_tool_cannot_declare_its_own_launch_history() -> None:
+    """F1: a tool-supplied previously_launched is discarded; without history the
+    launch is a first launch and defers to a human."""
+    tool = MockTool(ProposalDraft(summary="launch", partition_key="campaign:f1", spend_minor_units=1_000,
+                                  currency="USD", metadata={"previously_launched": True}))
+    result = await _run("marketing_ops", tool, _evaluator(_capital(growth=100_000)))
+    assert result.status == "deferred_to_human"
+    assert result.decision.hitl_trigger == HumanInLoopTrigger.FIRST_EXTERNAL_LAUNCH.value
+    _assert_invariant(result, tool)
+
+
+@pytest.mark.parametrize("meta", [
+    {"irreversible": True},                              # missing: evaluator would default to 1.0
+    {"irreversible": True, "confidence": float("nan")},
+    {"irreversible": True, "confidence": "0.99"},
+    {"irreversible": True, "confidence": 7},
+    {"irreversible": True, "confidence": True},
+])
+async def test_unusable_confidence_on_irreversible_draft_defers(meta: dict) -> None:
+    """F1: missing / NaN / non-numeric / out-of-range confidence must not pass the gate."""
+    tool = MockTool(ProposalDraft(summary="move budget", partition_key="budget:f1", spend_minor_units=1_000,
+                                  currency="USD", metadata=meta))
+    result = await _run("finance_risk", tool, _evaluator(_capital(finance=100_000)))
+    assert result.status == "deferred_to_human"
+    assert result.decision.hitl_trigger == HumanInLoopTrigger.LOW_CONFIDENCE_IRREVERSIBLE.value
+    _assert_invariant(result, tool)
+
+
+async def test_kill_switch_blocks_the_act_after_approval() -> None:
+    """F2: live state is re-checked right before execute."""
+    authority = FakeAuthority(deny="kill switch engaged")
+    tool = MockTool(ProposalDraft(summary="refresh", partition_key="creative:f2"))
+    result = await _run("creative_ops", tool, _evaluator(), authority=authority)
+    assert result.decision.outcome == "approved"
+    assert result.status == "blocked" and "kill switch engaged" in (result.failure or "")
+    assert tool.executions == []
+    assert authority.checks == [("creative_operations_manager", ORG)]
+
+
+async def test_live_state_gate_not_consulted_without_approval() -> None:
+    authority = FakeAuthority()
+    tool = MockTool(ProposalDraft(summary="edgy", partition_key="creative:f2b", metadata={"brand_safety": "blocked"}))
+    result = await _run("creative_ops", tool, _evaluator(), authority=authority)
+    assert result.status == "rejected" and authority.checks == []
+
+
+async def test_non_mapping_execute_result_is_outcome_unknown() -> None:
+    """F4: the action may have happened; the run must still produce a record."""
+    tool = MockTool(ProposalDraft(summary="x", partition_key="creative:f4"))
+    tool.result = ["not", "a", "mapping"]  # type: ignore[assignment]
+    result = await _run("creative_ops", tool, _evaluator())
+    assert result.status == "failed" and "OUTCOME UNKNOWN" in (result.failure or "")
+    assert len(tool.executions) == 1
+
+
+async def test_unknown_outcome_never_acts() -> None:
+    """M5: an outcome outside the vocabulary routes to failed, never to act."""
+
+    class _OddEvaluator(SpyEvaluator):
+        async def evaluate(self, proposal):  # type: ignore[no-untyped-def]
+            real = await DecisionEvaluator.evaluate(self, proposal)
+            return real.model_copy(update={"outcome": "maybe"})
+
+    tool = MockTool(ProposalDraft(summary="x", partition_key="creative:m5"))
+    result = await _run("creative_ops", tool, _OddEvaluator(registry=MVP_REGISTRY, capital=_capital()))
+    assert result.status == "failed" and tool.executions == []

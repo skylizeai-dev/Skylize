@@ -6,19 +6,32 @@ orchestrator/workflows/creative_workflow.py):
     START -> plan -> govern -+-> act ---------> END     (outcome == "approved")
                     |        +-> await_human -> END     (outcome == "deferred_to_human")
                     |        +-> rejected ----> END     (outcome == "rejected")
-                    +-> failed -----------------> END   (plan or govern raised)
+                    +-> failed -----------------> END   (plan/govern raised, unknown outcome)
 
 THE INVARIANT: the department tool's `execute` is reachable only through the
 `act` node, and `act` is reachable only on an `approved` verdict from the real
 `DecisionEvaluator`. Every other path — including any exception in planning or
 evaluation — ends without acting (fail closed).
+
+TWO GATES THE TOOL DOES NOT CONTROL
+- Governance signals. The tool that will `execute` must not be the one that
+  tells the HITL stage whether a launch is a first launch: `previously_launched`
+  is stripped from the draft and set ONLY from `DepartmentDeps.launch_history`
+  (absent -> False -> every external launch is a first launch). `confidence`
+  that is missing (on an irreversible draft), non-numeric, NaN or outside
+  [0, 1] becomes 0.0, so the low-confidence-irreversible trigger fires instead
+  of silently passing (the evaluator defaults a missing value to 1.0).
+- Live state. Immediately before `execute`, `DepartmentDeps.authority
+  .assert_active(agent_id, org_id)` (GovernanceAuthority, governance/authority.py)
+  re-checks suspension and the kill switch; any exception there blocks the act.
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Callable, Literal, Mapping, Sequence, TypedDict
+from typing import Any, Awaitable, Callable, Literal, Mapping, Protocol, Sequence, TypedDict
 from uuid import UUID, uuid4
 
 from langgraph.graph import END, START, StateGraph
@@ -27,7 +40,20 @@ from ...decision_engine.evaluator import DecisionEvaluator
 from ...decision_engine.events import DecisionProposal, DecisionResult
 from .contracts import DepartmentSpec, DepartmentTool, ProposalDraft
 
-RunStatus = Literal["executed", "deferred_to_human", "rejected", "failed"]
+RunStatus = Literal["executed", "deferred_to_human", "rejected", "blocked", "failed"]
+
+#: Metadata keys only the flow may set; a tool-supplied value is discarded.
+_FLOW_OWNED_SIGNALS = frozenset({"previously_launched"})
+
+
+class ActiveAgentGate(Protocol):
+    """The live-state check run right before `execute` (GovernanceAuthority
+    satisfies it). Must RAISE when the agent is suspended or kill-switched."""
+
+    async def assert_active(self, agent_id: str, org_id: str) -> None: ...
+
+
+LaunchHistory = Callable[[str, DepartmentSpec, ProposalDraft], Awaitable[bool]]
 
 
 class DepartmentState(TypedDict, total=False):
@@ -45,6 +71,11 @@ class DepartmentState(TypedDict, total=False):
 class DepartmentDeps:
     evaluator: DecisionEvaluator
     tool: DepartmentTool
+    #: Required, no default: a flow without a live-state gate cannot act.
+    authority: ActiveAgentGate
+    #: Whether this org has launched this department's action before. None
+    #: means "unknown", which is treated as "never" (fail closed to HITL).
+    launch_history: LaunchHistory | None = None
     now_fn: Callable[[], datetime] = field(default=lambda: datetime.now(timezone.utc))
     id_fn: Callable[[], UUID] = uuid4
 
@@ -59,7 +90,34 @@ class DepartmentRunResult:
     failure: str | None
 
 
-def _proposal(spec: DepartmentSpec, deps: DepartmentDeps, state: DepartmentState, draft: ProposalDraft) -> DecisionProposal:
+def _confidence(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    f = float(value)
+    return f if math.isfinite(f) and 0.0 <= f <= 1.0 else None
+
+
+async def _governed_metadata(
+    spec: DepartmentSpec, deps: DepartmentDeps, state: DepartmentState, draft: ProposalDraft
+) -> dict[str, Any]:
+    meta = {k: v for k, v in draft.metadata.items() if k not in _FLOW_OWNED_SIGNALS}
+    launched = False
+    if deps.launch_history is not None:
+        launched = await deps.launch_history(state["org_id"], spec, draft) is True
+    meta["previously_launched"] = launched
+    if "confidence" in meta or meta.get("irreversible"):
+        conf = _confidence(meta.get("confidence"))
+        meta["confidence"] = 0.0 if conf is None else conf
+    return meta
+
+
+def _proposal(
+    spec: DepartmentSpec,
+    deps: DepartmentDeps,
+    state: DepartmentState,
+    draft: ProposalDraft,
+    metadata: dict[str, Any],
+) -> DecisionProposal:
     pid = deps.id_fn()
     return DecisionProposal(
         proposal_id=pid,
@@ -76,7 +134,7 @@ def _proposal(spec: DepartmentSpec, deps: DepartmentDeps, state: DepartmentState
         occurred_at=deps.now_fn(),
         source_event_id=pid,
         source_type=f"department.{spec.department_id}",
-        metadata=dict(draft.metadata),
+        metadata=metadata,
     )
 
 
@@ -96,7 +154,8 @@ def build_department_graph(spec: DepartmentSpec, deps: DepartmentDeps) -> Any:
         if draft is None:
             return {"failure": "govern reached without a draft"}
         try:
-            decision = await deps.evaluator.evaluate(_proposal(spec, deps, state, draft))
+            metadata = await _governed_metadata(spec, deps, state, draft)
+            decision = await deps.evaluator.evaluate(_proposal(spec, deps, state, draft, metadata))
         except Exception as exc:  # noqa: BLE001 — evaluation failure never acts
             return {"failure": f"govern error: {type(exc).__name__}: {exc}"}
         return {"decision": decision}
@@ -107,9 +166,20 @@ def build_department_graph(spec: DepartmentSpec, deps: DepartmentDeps) -> Any:
         if draft is None or decision is None or decision.outcome != "approved":
             return {"status": "failed", "failure": "act reached without an approved decision"}
         try:
+            await deps.authority.assert_active(spec.proposing_agent_id, state["org_id"])
+        except Exception as exc:  # noqa: BLE001 — any doubt about live state blocks the act
+            return {"status": "blocked", "failure": f"live-state gate: {type(exc).__name__}: {exc}"}
+        try:
             result = await deps.tool.execute(org_id=state["org_id"], draft=draft, decision=decision)
         except Exception as exc:  # noqa: BLE001
             return {"status": "failed", "failure": f"execute error: {type(exc).__name__}: {exc}"}
+        if not isinstance(result, Mapping):
+            # The action may have happened; only its report is unusable.
+            return {
+                "status": "failed",
+                "failure": "OUTCOME UNKNOWN: execute returned a non-mapping result "
+                f"({type(result).__name__}); verify before re-running",
+            }
         return {"status": "executed", "action_result": dict(result)}
 
     async def await_human(state: DepartmentState) -> DepartmentState:
@@ -189,6 +259,8 @@ async def run_department_chain(
     tools: Mapping[str, DepartmentTool],
     evaluator: DecisionEvaluator,
     *,
+    authority: ActiveAgentGate,
+    launch_history: LaunchHistory | None = None,
     org_id: str,
     payload: Mapping[str, Any] | None = None,
     now_fn: Callable[[], datetime] | None = None,
@@ -205,7 +277,12 @@ async def run_department_chain(
     results: list[DepartmentRunResult] = []
     current: Mapping[str, Any] = dict(payload or {})
     for spec in specs:
-        deps = DepartmentDeps(evaluator=evaluator, tool=tools[spec.department_id])
+        deps = DepartmentDeps(
+            evaluator=evaluator,
+            tool=tools[spec.department_id],
+            authority=authority,
+            launch_history=launch_history,
+        )
         if now_fn is not None:
             deps.now_fn = now_fn
         result = await run_department(
