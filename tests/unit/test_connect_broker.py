@@ -435,3 +435,194 @@ def test_extra_token_params_cannot_override_protocol_fields() -> None:
     data, _ = build_code_exchange_request(cfg, code="c", redirect_uri=REDIRECT, code_verifier=None)
     assert data["grant_type"] == "authorization_code"
     assert data["audience"] == "api"
+
+
+# ---------------------------------------------------------------------------
+# Independent-auditor findings (audit-D3 F1-F8) and pin gaps (a3, a4, g3, i2, i3)
+# ---------------------------------------------------------------------------
+
+def _no_account(body: dict) -> dict:
+    return {k: v for k, v in body.items() if k != "account_id"}
+
+
+async def test_reconnect_with_unnamed_account_fails_closed() -> None:
+    """F1: an empty name on both sides is not proof of the same upstream account."""
+    endpoint = _TokenEndpoint()
+    endpoint.body = _no_account(endpoint.body)
+    broker, _, repo, *_ = _broker(endpoint)
+    r = await broker.begin(org_id=ORG, principal_id=USER, provider=PROVIDER, redirect_uri=REDIRECT)
+    first = await broker.complete(state=r.state, code="c1", org_id=ORG, principal_id=USER)
+    assert first.provider_account_id == ""
+    endpoint.body = {**endpoint.body, "access_token": "someone-else"}
+    r2 = await broker.begin(org_id=ORG, principal_id=USER, provider=PROVIDER, redirect_uri=REDIRECT)
+    with pytest.raises(ConnectAccountMismatch):
+        await broker.complete(state=r2.state, code="c2", org_id=ORG, principal_id=USER)
+    assert await repo.get(ORG, PROVIDER, "") == first
+
+
+async def test_numeric_account_id_is_a_name() -> None:
+    endpoint = _TokenEndpoint()
+    endpoint.body = {**_no_account(endpoint.body), "workspace_id": True, "user_id": 4242}
+    broker, *_ = _broker(endpoint)
+    r = await broker.begin(org_id=ORG, principal_id=USER, provider=PROVIDER, redirect_uri=REDIRECT)
+    row = await broker.complete(state=r.state, code="c", org_id=ORG, principal_id=USER)
+    assert row.provider_account_id == "4242"
+
+
+async def test_reconnect_without_refresh_token_keeps_stored_one() -> None:
+    """F2: same rule as the refresh path; never erase the stored refresh token."""
+    endpoint = _TokenEndpoint()
+    broker, _, _, _, enc = _broker(endpoint)
+    r = await broker.begin(org_id=ORG, principal_id=USER, provider=PROVIDER, redirect_uri=REDIRECT)
+    await broker.complete(state=r.state, code="c1", org_id=ORG, principal_id=USER)
+    endpoint.body = {k: v for k, v in endpoint.body.items() if k != "refresh_token"}
+    r2 = await broker.begin(org_id=ORG, principal_id=USER, provider=PROVIDER, redirect_uri=REDIRECT)
+    row = await broker.complete(state=r2.state, code="c2", org_id=ORG, principal_id=USER)
+    assert row.encrypted_refresh_token is not None
+    assert enc.decrypt(row.encrypted_refresh_token) == "refresh-new"
+
+
+async def test_reconnect_audit_records_granted_scopes() -> None:
+    """F3: the stored scopes column is not rewritten on reconnect; the audit
+    records what this exchange granted next to the stored set."""
+    endpoint = _TokenEndpoint()
+    broker, _, _, audit, _ = _broker(endpoint)
+    r = await broker.begin(org_id=ORG, principal_id=USER, provider=PROVIDER, redirect_uri=REDIRECT)
+    await broker.complete(state=r.state, code="c1", org_id=ORG, principal_id=USER)
+    endpoint.body = {**endpoint.body, "scope": "files.read files.write"}
+    r2 = await broker.begin(org_id=ORG, principal_id=USER, provider=PROVIDER, redirect_uri=REDIRECT)
+    await broker.complete(state=r2.state, code="c2", org_id=ORG, principal_id=USER)
+    last = audit.records[-1]["inputs"]
+    assert last["scopes_granted"] == ["files.read", "files.write"]
+    assert last["scopes_stored"] == ["files.read"]
+
+
+async def test_foreign_session_with_expired_state_is_audited_under_starting_org() -> None:
+    """F4: binding is checked before expiry."""
+    endpoint = _TokenEndpoint()
+    clock = _Clock()
+    broker, _, _, audit, _ = _broker(endpoint, clock=clock)
+    r = await broker.begin(org_id=ORG, principal_id=USER, provider=PROVIDER, redirect_uri=REDIRECT)
+    clock.now += timedelta(hours=1)
+    with pytest.raises(ConnectStateInvalid):
+        await broker.complete(state=r.state, code="c", org_id=OTHER_ORG, principal_id="intruder")
+    denied = audit.records[-1]
+    assert denied["org_id"] == ORG
+    assert denied["result_reason"] == "state bound to a different session"
+    assert not any(a["org_id"] == OTHER_ORG for a in audit.records)
+
+
+@pytest.mark.parametrize(
+    "status,body,exc,kind",
+    [
+        (400, {"error": "invalid_grant"}, None, "provider_rejected"),
+        (200, None, httpx.ReadTimeout("t"), "outcome_unknown"),
+        (200, {"token_type": "bearer"}, None, "unusable_response"),
+    ],
+)
+async def test_exchange_failures_are_audited_and_state_stays_spent(
+    status: int, body: dict | None, exc: Exception | None, kind: str
+) -> None:
+    """F5 + pin gap a3."""
+    endpoint = _TokenEndpoint(status=status, body=body, raise_exc=exc)
+    broker, store, _, audit, _ = _broker(endpoint)
+    r = await broker.begin(org_id=ORG, principal_id=USER, provider=PROVIDER, redirect_uri=REDIRECT)
+    with pytest.raises(ConnectExchangeFailed) as exc_info:
+        await broker.complete(state=r.state, code="code-SECRET", org_id=ORG, principal_id=USER)
+    assert exc_info.value.kind == kind
+    assert audit.records[-1]["action_type"] == "oauth.connect_denied"
+    assert audit.records[-1]["result_reason"] == f"code exchange failed ({kind})"
+    assert len(store) == 0
+    with pytest.raises(ConnectStateInvalid):
+        await broker.complete(state=r.state, code="code-SECRET", org_id=ORG, principal_id=USER)
+
+
+async def test_missing_code_spends_state() -> None:
+    """Pin gap a4."""
+    endpoint = _TokenEndpoint()
+    broker, store, *_ = _broker(endpoint)
+    r = await broker.begin(org_id=ORG, principal_id=USER, provider=PROVIDER, redirect_uri=REDIRECT)
+    with pytest.raises(ConnectExchangeFailed) as exc_info:
+        await broker.complete(state=r.state, code="", org_id=ORG, principal_id=USER)
+    assert exc_info.value.kind == "missing_code"
+    assert len(store) == 0 and endpoint.requests == []
+
+
+@pytest.mark.parametrize("status", [500, 502, 503, 504])
+async def test_5xx_exchange_is_not_retried(status: int) -> None:
+    """Pin gap g3."""
+    endpoint = _TokenEndpoint(status=status, body={"error": "temporarily_unavailable"})
+    broker, *_ = _broker(endpoint)
+    r = await broker.begin(org_id=ORG, principal_id=USER, provider=PROVIDER, redirect_uri=REDIRECT)
+    with pytest.raises(ConnectExchangeFailed):
+        await broker.complete(state=r.state, code="c", org_id=ORG, principal_id=USER)
+    assert len(endpoint.requests) == 1
+
+
+async def test_deny_paths_never_audit_state_or_code() -> None:
+    """Pin gaps i2/i3."""
+    endpoint = _TokenEndpoint(status=400, body={"error": "invalid_grant"})
+    broker, _, _, audit, _ = _broker(endpoint)
+    r = await broker.begin(org_id=ORG, principal_id=USER, provider=PROVIDER, redirect_uri=REDIRECT)
+    attempts = (
+        {"state": "forged-STATE", "code": "code-ONE"},
+        {"state": r.state, "code": "code-TWO"},
+    )
+    for attempt in attempts:
+        with pytest.raises((ConnectStateInvalid, ConnectExchangeFailed)):
+            await broker.complete(org_id=ORG, principal_id=USER, **attempt)
+    dumped = json.dumps(audit.records, default=str)
+    for secret in ("forged-STATE", r.state, "code-ONE", "code-TWO"):
+        assert secret not in dumped
+
+
+async def test_provider_error_code_is_sanitised() -> None:
+    """F6: a provider-controlled `error` is echoed only when it is a plain token."""
+    endpoint = _TokenEndpoint(status=400, body={"error": "x\nFAKE LOG LINE level=critical"})
+    broker, *_ = _broker(endpoint)
+    r = await broker.begin(org_id=ORG, principal_id=USER, provider=PROVIDER, redirect_uri=REDIRECT)
+    with pytest.raises(ConnectExchangeFailed) as exc_info:
+        await broker.complete(state=r.state, code="c", org_id=ORG, principal_id=USER)
+    assert "FAKE LOG LINE" not in str(exc_info.value)
+    assert "error=unrecognized" in str(exc_info.value)
+
+
+def test_token_url_must_be_https() -> None:
+    """F7."""
+    from dataclasses import replace
+
+    with pytest.raises(ValueError, match="token_url"):
+        ConnectProviderSpec(
+            config=replace(_spec().config, token_url="http://auth.acme.test/token"),
+            authorize_url="https://auth.acme.test/authorize",
+        )
+
+
+async def test_concurrent_first_connect_reports_the_race() -> None:
+    """F8: the loser of two first-time connects gets a typed error, not a driver error."""
+    from dataclasses import replace
+
+    class _RacingRepo(InMemoryOAuthCredentialRepository):
+        async def insert(self, row):  # type: ignore[no-untyped-def]
+            await super().insert(replace(row, cred_id=uuid.uuid4()))  # the rival lands first
+            raise RuntimeError("duplicate key value violates unique constraint")
+
+    broker, _, _, audit, _ = _broker(_TokenEndpoint())
+    broker._repo = _RacingRepo()  # type: ignore[attr-defined]
+    r = await broker.begin(org_id=ORG, principal_id=USER, provider=PROVIDER, redirect_uri=REDIRECT)
+    with pytest.raises(ConnectExchangeFailed) as exc_info:
+        await broker.complete(state=r.state, code="c", org_id=ORG, principal_id=USER)
+    assert exc_info.value.kind == "concurrent_connect"
+    assert audit.records[-1]["result_reason"] == "concurrent connect already stored a grant"
+
+
+async def test_insert_failure_without_a_rival_row_propagates() -> None:
+    class _BrokenRepo(InMemoryOAuthCredentialRepository):
+        async def insert(self, row):  # type: ignore[no-untyped-def]
+            raise RuntimeError("db down")
+
+    broker, *_ = _broker(_TokenEndpoint())
+    broker._repo = _BrokenRepo()  # type: ignore[attr-defined]
+    r = await broker.begin(org_id=ORG, principal_id=USER, provider=PROVIDER, redirect_uri=REDIRECT)
+    with pytest.raises(RuntimeError, match="db down"):
+        await broker.complete(state=r.state, code="c", org_id=ORG, principal_id=USER)

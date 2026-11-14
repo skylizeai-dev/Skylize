@@ -45,6 +45,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import re
 import secrets
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -90,6 +91,9 @@ _RESERVED_AUTHORIZE_PARAMS = frozenset(
 
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
+#: RFC 6749 section 5.2 error codes are short ASCII tokens (invalid_grant, ...).
+_ERROR_CODE_RE = re.compile(r"[A-Za-z0-9_.-]{1,64}")
+
 
 # ---------------------------------------------------------------------------
 # Errors
@@ -110,7 +114,16 @@ class ConnectStateInvalid(ConnectError):
 
 
 class ConnectExchangeFailed(ConnectError):
-    """The provider did not return a usable grant for the authorization code."""
+    """The provider did not return a usable grant for the authorization code.
+
+    `kind` is a fixed vocabulary (outcome_unknown | provider_rejected |
+    unusable_response | missing_code | concurrent_connect | vanished) so callers
+    and the audit trail can branch on it without parsing the message.
+    """
+
+    def __init__(self, message: str, *, kind: str = "provider_rejected") -> None:
+        super().__init__(message)
+        self.kind = kind
 
 
 class ConnectAccountMismatch(ConnectError):
@@ -133,6 +146,9 @@ def _default_account_id_of(payload: dict[str, Any]) -> str:
         value = payload.get(key)
         if isinstance(value, str) and value:
             return value
+        # Numeric ids (common upstream) are names too; bool is an int subclass, not an id.
+        if isinstance(value, int) and not isinstance(value, bool):
+            return str(value)
     return ""
 
 
@@ -159,9 +175,11 @@ class ConnectProviderSpec:
             raise ValueError(
                 f"extra_authorize_params may not set broker-owned parameters: {sorted(clash)}"
             )
-        parts = urlsplit(self.authorize_url)
-        if parts.scheme != "https" or not parts.netloc:
-            raise ValueError("authorize_url must be an absolute https URL")
+        for name, url in (("authorize_url", self.authorize_url), ("token_url", self.config.token_url)):
+            parts = urlsplit(url)
+            if parts.scheme != "https" or not parts.netloc:
+                # token_url carries the client secret and the code: never plaintext.
+                raise ValueError(f"{name} must be an absolute https URL")
 
 
 # ---------------------------------------------------------------------------
@@ -414,20 +432,30 @@ class ConnectBroker:
         if pending is None:
             await self._deny(org_id, corr, None, "state unknown or already used")
             raise ConnectStateInvalid("connect state is invalid, expired or already used")
-        if self._now() >= pending.expires_at:
-            await self._deny(org_id, corr, pending, "state expired")
-            raise ConnectStateInvalid("connect state is invalid, expired or already used")
+        # Binding is checked BEFORE expiry so a foreign session presenting a
+        # stale state is still recorded as a binding failure under the org that
+        # started the flow, and never under the caller's org.
         if pending.org_id != org_id or pending.principal_id != principal_id:
             # Audited under the org that STARTED the flow: that is the tenant
             # whose connect was being hijacked.
             await self._deny(pending.org_id, corr, pending, "state bound to a different session")
             raise ConnectStateInvalid("connect state is invalid, expired or already used")
+        if self._now() >= pending.expires_at:
+            await self._deny(org_id, corr, pending, "state expired")
+            raise ConnectStateInvalid("connect state is invalid, expired or already used")
         if not code:
             await self._deny(org_id, corr, pending, "callback carried no code")
-            raise ConnectExchangeFailed("callback carried no authorization code")
+            raise ConnectExchangeFailed(
+                "callback carried no authorization code", kind="missing_code"
+            )
 
         spec = self._spec(pending.provider)
-        payload, token = await self._exchange(spec, pending, code)
+        try:
+            payload, token = await self._exchange(spec, pending, code)
+        except ConnectExchangeFailed as exc:
+            # Fixed reason text: provider-controlled strings never reach the audit row.
+            await self._deny(org_id, corr, pending, f"code exchange failed ({exc.kind})")
+            raise
         account_id = spec.account_id_of(payload)
         now = self._now()
         expires_at = (
@@ -442,12 +470,24 @@ class ConnectBroker:
 
         existing = await self._repo.get(org_id, pending.provider, pending.label)
         if existing is not None:
-            if existing.provider_account_id != account_id:
-                await self._deny(org_id, corr, pending, "reconnect names a different upstream account")
-                raise ConnectAccountMismatch(
-                    f"{pending.provider!r} connection {pending.label!r} is bound to a different "
-                    "upstream account; disconnect it before connecting another"
+            # Fail closed: an unnamed account on EITHER side cannot be proven to
+            # be the same account, so it is treated as a mismatch, never a match.
+            if (
+                not account_id
+                or not existing.provider_account_id
+                or existing.provider_account_id != account_id
+            ):
+                await self._deny(
+                    org_id, corr, pending, "reconnect cannot prove the same upstream account"
                 )
+                raise ConnectAccountMismatch(
+                    f"{pending.provider!r} connection {pending.label!r} cannot be proven to name "
+                    "the same upstream account; disconnect it before connecting again"
+                )
+            if enc_refresh is None:
+                # Same rule as the refresh path (oauth.py "KEEP the existing one"):
+                # a response without refresh_token must not erase the stored one.
+                enc_refresh = existing.encrypted_refresh_token
             async with self._repo.tenant_session(org_id) as conn:  # type: ignore[attr-defined]
                 updated = await self._repo.update_tokens(
                     conn=conn,
@@ -460,7 +500,9 @@ class ConnectBroker:
                     refreshed_at=now,
                 )
             if not updated:
-                raise ConnectExchangeFailed("stored grant vanished during reconnect")
+                raise ConnectExchangeFailed(
+                    "stored grant vanished during reconnect", kind="vanished"
+                )
             stored = await self._repo.get(org_id, pending.provider, pending.label)
             assert stored is not None
             action = "oauth.connect_reconnected"
@@ -484,7 +526,20 @@ class ConnectBroker:
                 updated_at=now,
                 refreshed_at=None,
             )
-            await self._repo.insert(stored)
+            try:
+                await self._repo.insert(stored)
+            except Exception as exc:
+                # Two first-time connects for one (org, provider, label) can race
+                # past the `get` above; the loser's insert hits the unique index.
+                # Report it as such instead of leaking a driver error.
+                if await self._repo.get(org_id, pending.provider, pending.label) is None:
+                    raise
+                await self._deny(org_id, corr, pending, "concurrent connect already stored a grant")
+                raise ConnectExchangeFailed(
+                    "a concurrent connect for this provider and label completed first; "
+                    "reconnect to replace it",
+                    kind="concurrent_connect",
+                ) from exc
             action = "oauth.connect_completed"
 
         await self._audit.record(
@@ -497,7 +552,11 @@ class ConnectBroker:
                 "label": pending.label,
                 "principal_id": principal_id,
                 "provider_account_id": account_id,
-                "scopes": list(stored.scopes),
+                # Granted by THIS exchange. On a reconnect the stored `scopes`
+                # column is not rewritten (update_tokens does not touch it), so
+                # both are recorded rather than the stale stored set alone.
+                "scopes_granted": list(token.scopes or spec.config.scopes),
+                "scopes_stored": list(stored.scopes),
             },
         )
         return stored
@@ -529,7 +588,8 @@ class ConnectBroker:
             raise ConnectExchangeFailed(
                 f"OUTCOME UNKNOWN: the code exchange with {pending.provider!r} did not "
                 "complete. Authorization codes are single-use, so it is not retried; "
-                "start the connect flow again."
+                "start the connect flow again.",
+                kind="outcome_unknown",
             ) from exc
 
         try:
@@ -541,7 +601,10 @@ class ConnectBroker:
         if resp.status_code != 200:
             # Only the RFC 6749 §5.2 error code is surfaced; the body is never echoed.
             err = payload.get("error")
-            err_code = err if isinstance(err, str) else "unknown"
+            # Provider-controlled: echoed only when it looks like an RFC 6749 code.
+            err_code = (
+                err if isinstance(err, str) and _ERROR_CODE_RE.fullmatch(err) else "unrecognized"
+            )
             raise ConnectExchangeFailed(
                 f"{pending.provider!r} rejected the code exchange "
                 f"(HTTP {resp.status_code}, error={err_code})"
@@ -549,7 +612,9 @@ class ConnectBroker:
         try:
             token = spec.config.parse_token_response(payload)
         except RefreshUnavailable as exc:
-            raise ConnectExchangeFailed(f"unusable token response: {exc}") from exc
+            raise ConnectExchangeFailed(
+                f"unusable token response: {exc}", kind="unusable_response"
+            ) from exc
         return payload, token
 
     async def _deny(
