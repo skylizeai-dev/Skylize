@@ -1,0 +1,8 @@
+{
+  "run_id": "sky-sync-20261120",
+  "files": [
+    {"path": "src/skylize/bootstrap.py", "status": "FROZEN", "owner": "sky-org-20261114-1738", "release_condition": "PR #43 merged"},
+    {"path": "src/skylize/config.py", "status": "FROZEN", "owner": "sky-org-20261114-1738", "release_condition": "PR #43 merged"}
+  ],
+  "evidence": "PR #43 (feat/commerce-stripe-testmode-wiring @6556487) is the only unmerged origin branch whose latest bootstrap.py/config.py commit is not an ancestor of main (git log + merge-base --is-ancestor, origin refs only; the stale fix/toolproxy-ledger-commit-accounting branch also differs but its PR #14 is merged)."
+}

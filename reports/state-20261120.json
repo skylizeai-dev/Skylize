@@ -1,0 +1,60 @@
+{
+  "run_id": "sky-sync-20261120",
+  "generated_at": "2026-11-20",
+  "main_sha": "490b6dd40ae99c08fe79f8b669c0d9c1652abb25",
+  "main_commit_date": "2026-11-08T10:54:57+03:00",
+  "required_checks": ["unit", "roster", "console-black", "website", "integration", "merge-guard"],
+  "required_approving_review_count": 0,
+  "prs": [
+    {"n": 42, "state": "OPEN", "merge_state": "CLEAN", "checks": "6/6", "head": "934184784844945754555575ee07e484a4bbed87", "required_approvals": 0, "labels": []},
+    {"n": 43, "state": "OPEN", "merge_state": "CLEAN", "checks": "6/6", "head": "6556487a1d6f7a0c44f7c643dda0bcfc63d8b40e", "required_approvals": 0, "labels": []},
+    {"n": 44, "state": "OPEN", "merge_state": "CLEAN", "checks": "6/6", "head": "c25d2f4e0485950b576104adbc31d338e5f0e7ab", "required_approvals": 0, "labels": []},
+    {"n": 45, "state": "OPEN", "merge_state": "CLEAN", "checks": "6/6", "head": "b8399c879450e8e13196c535822751461d11c1cb", "required_approvals": 0, "labels": []},
+    {"n": 46, "state": "OPEN", "merge_state": "CLEAN", "checks": "6/6", "head": "891cea6e4fcfc672bc04ef5f89a2910adfca2a73", "required_approvals": 0, "labels": []},
+    {"n": 47, "state": "OPEN", "merge_state": "BLOCKED", "checks": "5/6 (merge-guard FAIL: hold label)", "head": "c850d00aa24ec1a8144ae981811fc91f0a665dbf", "required_approvals": 0, "labels": ["hold"]},
+    {"n": 48, "state": "OPEN", "merge_state": "CLEAN", "checks": "6/6", "head": "67c4755b81dfdd5fa95f036ba029dead630b1262", "required_approvals": 0, "labels": []},
+    {"n": 49, "state": "OPEN", "merge_state": "CLEAN", "checks": "6/6", "head": "fae5308eed7b60e5db2d8a63fc17e23b77d008b9", "required_approvals": 0, "labels": []},
+    {"n": 50, "state": "OPEN", "merge_state": "CLEAN", "checks": "6/6", "head": "c7ab5398d359cdb99c85ea5faf7a9e7f6fb897cf", "required_approvals": 0, "labels": []}
+  ],
+  "hypotheses": {
+    "H1": "CONFIRMED", "H2": "CONFIRMED", "H3": "CONFIRMED (all four OPEN, CLEAN, 6/6)",
+    "H4": "NOT_RUN_NO_TRACES", "H5": "CONFIRMED", "H6": "PARTIAL (staging dead CONFIRMED; 'no live env' REFUTED: Vercel Production deployed 2026-11-08)",
+    "H7": "CONFIRMED (semantic conflict, not a CI/merge conflict)"
+  },
+  "conflicts": [
+    {
+      "id": "ARCH-CONFLICT-1",
+      "topic": "spend hold on outcome-unknown / ambiguous timeout",
+      "pr_43": "tests/unit/test_stripe_refund_proxy_spend.py:371-379 @6556487 strict xfail; assert world.ledger.releases == []  (desired: hold KEPT)",
+      "pr_45": "tests/unit/test_tool_outcome_unknown.py:104-110 @b8399c8; assert len(repo.releases) == 1  (pins today: hold RELEASED)",
+      "ci_effect": "none today: both green, disjoint files, both CLEAN",
+      "trigger": "owner ruling to keep the hold: #43 strict xfail turns into a failure (XPASS) and #45 test breaks",
+      "status": "RECORDED, NOT RESOLVED - owner decision"
+    }
+  ],
+  "bff_topology": {
+    "instances": "UNKNOWN",
+    "evidence": [
+      "website/railway.json has no replica/scale setting",
+      "docs say Railway (website/docs/DEPLOY_RAILWAY.md) but GitHub Deployments show Vercel envs 'Production - skylize-website' success 2026-11-08 @490b6dd",
+      "PR47 website/src/lib/skylize/myday-refresh-lock.ts:12 @c850d00 and route.refresh-race.test.ts:11: single-flight is in-process; multi-instance not tested"
+    ],
+    "blocker_for": "T1"
+  },
+  "staging_alive": false,
+  "live_environments": {
+    "vercel_production_skylize": {"last_deploy": "2026-11-08T07:56:20Z", "sha": "490b6dd40ae99c08fe79f8b669c0d9c1652abb25", "status": "success"},
+    "vercel_production_skylize_website": {"last_deploy": "2026-11-08T07:55:43Z", "sha": "490b6dd40ae99c08fe79f8b669c0d9c1652abb25", "status": "success"},
+    "backend_api": "UNKNOWN",
+    "aws_staging": "not provisioned (deploy-staging.yml:3-7); last 5 runs all failure, newest 2026-11-07"
+  },
+  "frozen_files": ["src/skylize/bootstrap.py", "src/skylize/config.py"],
+  "env_var_names_required_unset_status_unknown": ["SKYLIZE_BACKEND_URL", "SKYLIZE_SERVICE_API_KEY", "SKYLIZE_CONSOLE_PASSWORD", "SKYLIZE_CONSOLE_SESSION_SECRET"],
+  "owner_blockers": [
+    "Decide spend-hold semantics on outcome-unknown (ARCH-CONFLICT-1) before merging both #43 and #45",
+    "Remove hold label / decide on #47 (P1, merge-guard failing)",
+    "State where backend API and BFF actually run, and instance count (T1 blocker)",
+    "Decide whether to raise required_approving_review_count above 0 (ruleset 26770388)",
+    "Confirm whether the sky-autorun-20261115-owner-ruling run should be (re)run: no artifacts exist"
+  ]
+}
