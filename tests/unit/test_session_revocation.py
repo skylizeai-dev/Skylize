@@ -195,6 +195,91 @@ async def test_rotate_refuses_a_non_consumable_token_and_writes_nothing() -> Non
     assert await repo.get_refresh_token(new) is None
 
 
+# ── #47b: token families (migration 0038, design 9.1) ────────────────────────
+
+def _jti(token: str) -> UUID:
+    return UUID(decode_token(token, SECRET)["jti"])
+
+
+def _family(repo: InMemoryUserRepository, token: str) -> UUID:
+    return repo._refresh[_jti(token)].family_id
+
+
+async def test_store_refresh_token_roots_a_new_family_at_its_own_token_id() -> None:
+    repo = InMemoryUserRepository()
+    token_id, user_id = uuid4(), uuid4()
+    await repo.store_refresh_token(
+        token_id, user_id, datetime.now(timezone.utc) + timedelta(days=1)
+    )
+    row = await repo.get_refresh_token(token_id)
+    assert row is not None and row.family_id == token_id
+
+
+async def test_rotate_copies_the_consumed_rows_family_into_the_new_row() -> None:
+    repo = InMemoryUserRepository()
+    root, child, grandchild, owner = uuid4(), uuid4(), uuid4(), uuid4()
+    later = datetime.now(timezone.utc) + timedelta(days=1)
+    await repo.store_refresh_token(root, owner, later)
+
+    assert await repo.rotate_refresh_token(
+        old_token_id=root, user_id=owner, new_token_id=child, new_expires_at=later
+    )
+    assert await repo.rotate_refresh_token(
+        old_token_id=child, user_id=owner, new_token_id=grandchild, new_expires_at=later
+    )
+    for token_id in (root, child, grandchild):
+        row = await repo.get_refresh_token(token_id)
+        assert row is not None and row.family_id == root, token_id
+
+
+async def test_every_rotation_of_one_login_stays_in_its_family_and_two_logins_differ() -> None:
+    """Family propagation through the service: after N rotations every token of
+    ONE login shares that login's family (its first token's id), and a second
+    login of the same user is a different family."""
+    svc, repo = _service()
+    first = await _logged_in(svc)
+    second_login = await svc.login(email="a@example.com", password="hunter2pw")
+
+    chain = [first]
+    for _ in range(5):
+        chain.append(await svc.refresh(refresh_token=chain[-1].refresh_token))
+    root = _jti(first.refresh_token)
+    assert {_family(repo, pair.refresh_token) for pair in chain} == {root}
+    assert len({_jti(pair.refresh_token) for pair in chain}) == 6
+
+    other_root = _jti(second_login.refresh_token)
+    assert _family(repo, second_login.refresh_token) == other_root != root
+    rotated_other = await svc.refresh(refresh_token=second_login.refresh_token)
+    assert _family(repo, rotated_other.refresh_token) == other_root
+
+
+async def test_revoke_family_revokes_only_that_familys_live_rows_and_is_idempotent() -> None:
+    repo = InMemoryUserRepository()
+    owner, stranger = uuid4(), uuid4()
+    later = datetime.now(timezone.utc) + timedelta(days=1)
+    fa_root, fa_live, fb_live, other_user = uuid4(), uuid4(), uuid4(), uuid4()
+    expired = uuid4()
+    await repo.store_refresh_token(fa_root, owner, later)
+    assert await repo.rotate_refresh_token(
+        old_token_id=fa_root, user_id=owner, new_token_id=fa_live, new_expires_at=later
+    )
+    await repo.store_refresh_token(fb_live, owner, later)
+    await repo.store_refresh_token(other_user, stranger, later)
+    await repo.store_refresh_token(expired, owner, datetime.now(timezone.utc) - timedelta(seconds=1))
+    before = _rows(repo)
+
+    assert await repo.revoke_family(fa_root) == 1
+    after = _rows(repo)
+    # Exactly one row changed: family A's live token. Its consumed root, the
+    # user's other family, the other user's row and an expired row are as before.
+    assert {k for k in after if after[k] != before[k]} == {fa_live}
+    assert after[fa_live].revoked_at is not None
+    assert await repo.revoke_family(fa_root) == 0, "a second revocation found a live row"
+    assert await repo.revoke_family(uuid4()) == 0
+    assert await repo.revoke_family(expired) == 0, "an expired row counted as live"
+    assert _rows(repo) == after
+
+
 # ── Round 2: replay grace window, DETECTION ONLY (design 9.0.2) ──────────────
 
 _NOW = datetime(2026, 11, 20, 12, 0, tzinfo=timezone.utc)
@@ -205,10 +290,12 @@ def _token_row(
     owner: UUID, *, consumed_ago: timedelta | None, expires_in: timedelta
 ) -> RefreshTokenRow:
     """A row as the store would return it at `_NOW` (for the pure classifier)."""
+    token_id = uuid4()
     return RefreshTokenRow(
-        token_id=uuid4(),
+        token_id=token_id,
         user_id=owner,
         expires_at=_NOW + expires_in,
+        family_id=token_id,
         revoked_at=None if consumed_ago is None else _NOW - consumed_ago,
     )
 

@@ -234,6 +234,10 @@ class RefreshTokenRow:
     token_id: UUID
     user_id: UUID
     expires_at: datetime
+    #: The token's lineage (migration 0038): a login roots a new family at its
+    #: own `token_id`, and every rotation copies the consumed row's family into
+    #: the new row. Never NULL in the store. Scope of `revoke_family`.
+    family_id: UUID
     revoked_at: datetime | None = None
 
 
@@ -270,7 +274,11 @@ class UserRepository(Protocol):
 
     async def store_refresh_token(
         self, token_id: UUID, user_id: UUID, expires_at: datetime
-    ) -> None: ...
+    ) -> None:
+        """Store a LOGIN's refresh token. It starts a NEW family rooted at
+        itself (`family_id = token_id`); only `rotate_refresh_token` ever adds
+        a row to an existing family."""
+        ...
 
     async def get_refresh_token(self, token_id: UUID) -> RefreshTokenRow | None: ...
 
@@ -308,6 +316,26 @@ class UserRepository(Protocol):
         durable. If storing the new row fails, the consume MUST be undone too, so
         the caller's old token stays usable instead of the session being lost
         between two separately committed statements (design doc 9.0.1, Round 2 N1).
+
+        The new row joins the CONSUMED row's family: its `family_id` is the one
+        the consume itself read, in the same atomic unit, so a rotation can never
+        move a token into another family (design doc 9.1).
+        """
+        ...
+
+    async def revoke_family(self, family_id: UUID) -> int:
+        """Revoke the LIVE rows (not revoked, not expired) of ONE family; return
+        how many were revoked. Rows of any other family are never written.
+
+        Used on refresh-token reuse past the grace window (design doc 9.1). A
+        family is one login's lineage, so this ends that login's session on
+        every holder of it and nothing else. Idempotent: a family revoked once
+        has no live row left and cannot gain one (a rotation needs a live row
+        of the family, a login always starts a new family), so a repeat
+        returns 0. The one exception is a rotation of the family's live row
+        already in flight on Postgres while this runs: its new row can commit
+        unseen and stay live, still inside the same family, and the next
+        revocation of that family takes it (design doc 9.1.5).
         """
         ...
 

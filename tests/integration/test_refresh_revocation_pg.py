@@ -19,6 +19,8 @@ write. These tests fire the requests concurrently and assert exactly one wins:
     row's revoked_at is set;
   * reuse of a rotated token is 401 while the rotated-to token still refreshes;
   * a failed INSERT during rotation rolls the consume back (Round 2 N1);
+  * token families (migration 0038, design 9.1): every rotation of one login
+    stays in that login's family, and each login starts a new one;
   * logout of org A's token leaves org B's session working.
 
 Skipped unless SKYLIZE_TEST_DB_URL (+ SKYLIZE_TEST_APP_DB_URL / REDIS_URL) are set.
@@ -389,6 +391,52 @@ async def test_rotation_rolls_back_the_consume_when_the_insert_fails(
         assert row is not None and row["revoked_at"] is None, "consume was not rolled back"
         ok = await client.post("/api/v1/auth/refresh", json={"refresh_token": original})
         assert ok.status_code == 200, ok.text
+    finally:
+        await purge_tenants(admin_conn, [org_a])
+
+
+def _jti(token: str) -> uuid.UUID:
+    return uuid.UUID(decode_token(token, TEST_JWT_SECRET)["jti"])
+
+
+async def _families(admin_conn: Any, user_id: uuid.UUID) -> dict[uuid.UUID, uuid.UUID]:
+    """token_id -> family_id for every refresh row of `user_id`."""
+    rows = await admin_conn.fetch(
+        "SELECT token_id, family_id FROM user_refresh_tokens WHERE user_id = $1", user_id
+    )
+    return {r["token_id"]: r["family_id"] for r in rows}
+
+
+@requires_redis
+@requires_app_role
+async def test_pg_rotation_keeps_the_family_and_each_login_starts_a_new_one(
+    auth_client, admin_conn
+) -> None:
+    """Family propagation against Postgres, through the HTTP routes and the app
+    role: three rotations of one login all carry that login's family (its first
+    token's id, copied inside the rotation transaction); a second login of the
+    same user is a family of its own."""
+    client, _ = auth_client
+    org_a, _ = _orgs()
+    try:
+        email, _, original = await _register_and_login(client, admin_conn, org_a)
+        sub = uuid.UUID(decode_token(original, TEST_JWT_SECRET)["sub"])
+        chain = [original]
+        for _ in range(3):
+            r = await client.post("/api/v1/auth/refresh", json={"refresh_token": chain[-1]})
+            assert r.status_code == 200, r.text
+            chain.append(r.json()["refresh_token"])
+        second = await client.post(
+            "/api/v1/auth/login", json={"email": email, "password": PASSWORD}
+        )
+        assert second.status_code == 200, second.text
+        other_root = _jti(second.json()["refresh_token"])
+
+        families = await _families(admin_conn, sub)
+        root = _jti(original)
+        assert len(families) == 5, families  # 1 login + 3 rotations + 1 login
+        assert {families[_jti(t)] for t in chain} == {root}
+        assert families[other_root] == other_root != root
     finally:
         await purge_tenants(admin_conn, [org_a])
 

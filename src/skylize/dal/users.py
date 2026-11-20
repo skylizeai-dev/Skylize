@@ -97,8 +97,9 @@ class PgUserRepository:
     async def store_refresh_token(
         self, token_id: UUID, user_id: UUID, expires_at: datetime
     ) -> None:
+        """A login's token: the root of a new family, `family_id = token_id`."""
         async with self._db.admin_session() as conn:
-            await conn.execute(_INSERT_REFRESH_SQL, token_id, user_id, expires_at)
+            await conn.execute(_INSERT_REFRESH_SQL, token_id, user_id, expires_at, token_id)
 
     async def get_refresh_token(self, token_id: UUID) -> RefreshTokenRow | None:
         async with self._db.admin_session() as conn:
@@ -111,6 +112,7 @@ class PgUserRepository:
             token_id=rec["token_id"],
             user_id=rec["user_id"],
             expires_at=rec["expires_at"],
+            family_id=rec["family_id"],
             revoked_at=rec["revoked_at"],
         )
 
@@ -130,7 +132,7 @@ class PgUserRepository:
         A `user_id` that does not own the row matches nothing and revokes nothing.
         """
         async with self._db.admin_session() as conn:
-            consumed = await conn.fetchval(_CONSUME_SQL, token_id, user_id)
+            consumed = await conn.fetchrow(_CONSUME_SQL, token_id, user_id)
         return consumed is not None
 
     async def rotate_refresh_token(
@@ -151,18 +153,41 @@ class PgUserRepository:
         unchanged: a concurrent rotation's UPDATE waits on this row lock and, after
         this transaction commits, re-checks `revoked_at IS NULL` and matches
         nothing.
+
+        Family propagation (design doc 9.1): the consume's `RETURNING family_id`
+        is the family of the row it just locked and consumed, and the INSERT
+        writes exactly that value, inside the same transaction. No second read,
+        so no window in which another family could be picked up.
         """
         async with self._db.admin_session() as conn:
             async with conn.transaction():
-                consumed = await conn.fetchval(_CONSUME_SQL, old_token_id, user_id)
+                consumed = await conn.fetchrow(_CONSUME_SQL, old_token_id, user_id)
                 if consumed is None:
                     return False
-                await conn.execute(_INSERT_REFRESH_SQL, new_token_id, user_id, new_expires_at)
+                await conn.execute(
+                    _INSERT_REFRESH_SQL,
+                    new_token_id, user_id, new_expires_at, consumed["family_id"],
+                )
         return True
+
+    async def revoke_family(self, family_id: UUID) -> int:
+        """One UPDATE scoped to `family_id`; the row count is the result.
+
+        The predicate names the family and nothing wider (no `user_id`-wide
+        match), so a row of any other family is never written. `revoked_at IS
+        NULL AND expires_at > now()` is the same "live" test as the consume, so
+        an already consumed, revoked or expired row is left as it is and a
+        repeat on the same family returns 0. Served by the partial index
+        `idx_refresh_tokens_family_live` (migration 0038).
+        """
+        async with self._db.admin_session() as conn:
+            revoked = await conn.fetch(_REVOKE_FAMILY_SQL, family_id)
+        return len(revoked)
 
 
 #: The single-winner consume shared by `consume_refresh_token` and
-#: `rotate_refresh_token`, so the two can never drift apart.
+#: `rotate_refresh_token`, so the two can never drift apart. It returns the
+#: consumed row's family, which the rotation copies into the new row.
 _CONSUME_SQL = """
     UPDATE user_refresh_tokens
        SET revoked_at = now()
@@ -170,12 +195,25 @@ _CONSUME_SQL = """
        AND user_id = $2
        AND revoked_at IS NULL
        AND expires_at > now()
-    RETURNING token_id
+    RETURNING token_id, family_id
 """
 
+#: $4 is the family: the new token's own id for a login, the consumed row's
+#: family for a rotation. Always written explicitly; the column's
+#: gen_random_uuid() default (migration 0038) exists only so that app code from
+#: before 0038, which omits the column, keeps working during a rolling deploy.
 _INSERT_REFRESH_SQL = """
-    INSERT INTO user_refresh_tokens (token_id, user_id, expires_at)
-    VALUES ($1,$2,$3)
+    INSERT INTO user_refresh_tokens (token_id, user_id, expires_at, family_id)
+    VALUES ($1,$2,$3,$4)
+"""
+
+_REVOKE_FAMILY_SQL = """
+    UPDATE user_refresh_tokens
+       SET revoked_at = now()
+     WHERE family_id = $1
+       AND revoked_at IS NULL
+       AND expires_at > now()
+    RETURNING token_id
 """
 
 
