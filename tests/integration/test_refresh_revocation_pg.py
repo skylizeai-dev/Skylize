@@ -14,6 +14,7 @@ write. These tests fire the requests concurrently and assert exactly one wins:
   * POST /logout revokes the presented token -> a later refresh is 401 and the
     row's revoked_at is set;
   * reuse of a rotated token is 401 while the rotated-to token still refreshes;
+  * a failed INSERT during rotation rolls the consume back (Round 2 N1);
   * logout of org A's token leaves org B's session working.
 
 Skipped unless SKYLIZE_TEST_DB_URL (+ SKYLIZE_TEST_APP_DB_URL / REDIS_URL) are set.
@@ -24,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import AsyncIterator
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pytest
@@ -217,7 +219,8 @@ async def test_refresh_after_logout_is_rejected(auth_client, admin_conn) -> None
 async def test_reuse_of_rotated_token_is_rejected(auth_client, admin_conn) -> None:
     """A rotated (already-consumed) token is refused on reuse, and the reuse does
     NOT revoke the token family: the pair the rotation minted keeps working.
-    Family revocation on reuse is out of scope here (it needs a migration)."""
+    Per-family revocation on reuse is a separate change (#47b, design doc 7.0 /
+    9.0.4), not part of this one."""
     client, _ = auth_client
     org_a, _ = _orgs()
     try:
@@ -235,6 +238,46 @@ async def test_reuse_of_rotated_token_is_rejected(auth_client, admin_conn) -> No
             "/api/v1/auth/refresh", json={"refresh_token": rotated}
         )
         assert still_live.status_code == 200, still_live.text
+    finally:
+        await purge_tenants(admin_conn, [org_a])
+
+
+@requires_redis
+@requires_app_role
+async def test_rotation_rolls_back_the_consume_when_the_insert_fails(
+    auth_client, admin_conn
+) -> None:
+    """Round 2 N1 against Postgres: consume + insert are ONE transaction. The new
+    row's token_id is made to collide with an existing row (a primary-key
+    violation on the INSERT, i.e. a failure AFTER the consume UPDATE ran); the
+    old token must still be unconsumed afterwards and still refresh."""
+    import asyncpg
+
+    client, container = auth_client
+    org_a, _ = _orgs()
+    try:
+        email, _, original = await _register_and_login(client, admin_conn, org_a)
+        other = await client.post(
+            "/api/v1/auth/login", json={"email": email, "password": PASSWORD}
+        )
+        assert other.status_code == 200, other.text
+        claims = decode_token(original, TEST_JWT_SECRET)
+        jti, sub = uuid.UUID(claims["jti"]), uuid.UUID(claims["sub"])
+        taken_id = uuid.UUID(decode_token(other.json()["refresh_token"], TEST_JWT_SECRET)["jti"])
+        repo = container.user_auth._repo
+
+        with pytest.raises(asyncpg.UniqueViolationError):
+            await repo.rotate_refresh_token(
+                old_token_id=jti, user_id=sub, new_token_id=taken_id,
+                new_expires_at=datetime.now(timezone.utc) + timedelta(days=1),
+            )
+
+        row = await admin_conn.fetchrow(
+            "SELECT revoked_at FROM user_refresh_tokens WHERE token_id = $1", jti
+        )
+        assert row is not None and row["revoked_at"] is None, "consume was not rolled back"
+        ok = await client.post("/api/v1/auth/refresh", json={"refresh_token": original})
+        assert ok.status_code == 200, ok.text
     finally:
         await purge_tenants(admin_conn, [org_a])
 

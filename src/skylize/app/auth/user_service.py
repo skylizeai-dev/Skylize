@@ -213,20 +213,29 @@ class UserAuthService:
     async def refresh(self, *, refresh_token: str) -> LoginResult:
         jti, sub = self._refresh_claims(refresh_token)
 
-        # Rotate. `consume_refresh_token` is ONE conditional write: of two
-        # concurrent refreshes with the same token, exactly one wins and the other
-        # is refused. The former read-then-revoke let both through and minted two
-        # live token families (design doc 1.0.2). Ownership (`sub` must own the
-        # `jti` row) is inside the same condition, so a mismatched token is
-        # refused WITHOUT consuming the other user's row.
-        if not await self._repo.consume_refresh_token(jti, sub):
-            raise InvalidCredentialsError("refresh token revoked, expired, or not found")
-
+        # The user is read BEFORE the rotation (it used to be read after the
+        # consume) so that the consume and the insert of the new token can be one
+        # transaction (design doc 9.0.1, Round 2 N1). Consequence: an inactive or
+        # deleted user's token is refused without being consumed - harmless, every
+        # later attempt is refused by this same check.
         user = await self._repo.get_by_id(sub)
         if user is None or not user.is_active:
             raise InvalidCredentialsError("user not found or inactive")
 
-        return await self._mint_pair(user)
+        # Rotate. `rotate_refresh_token` consumes with ONE conditional write: of
+        # two concurrent refreshes with the same token, exactly one wins and the
+        # other is refused. The former read-then-revoke let both through and
+        # minted two live token families (design doc 1.0.2). Ownership (`sub`
+        # must own the `jti` row) is inside the same condition, so a mismatched
+        # token is refused WITHOUT consuming the other user's row. The consume
+        # and the INSERT of the new row commit together or not at all.
+        pair, token_id, expires_at = self._new_pair(user)
+        if await self._repo.rotate_refresh_token(
+            old_token_id=jti, user_id=sub, new_token_id=token_id, new_expires_at=expires_at
+        ):
+            return pair
+
+        raise InvalidCredentialsError("refresh token revoked, expired, or not found")
 
     async def logout(self, *, refresh_token: str) -> bool:
         """Revoke the refresh token's own row. Never raises for a bad token.
@@ -249,6 +258,15 @@ class UserAuthService:
     # ── internal ──────────────────────────────────────────────────────────────
 
     async def _mint_pair(self, user: UserRow) -> LoginResult:
+        pair, token_id, expires_at = self._new_pair(user)
+        await self._repo.store_refresh_token(
+            token_id=token_id, user_id=user.user_id, expires_at=expires_at
+        )
+        return pair
+
+    def _new_pair(self, user: UserRow) -> tuple[LoginResult, UUID, datetime]:
+        """Sign a fresh access/refresh pair. Persists NOTHING: the caller stores
+        the refresh row (login) or rotates onto it (refresh)."""
         secret = self._settings.jwt_secret
         access = create_access_token(
             user_id=str(user.user_id),
@@ -267,7 +285,5 @@ class UserAuthService:
         expires_at = datetime.now(timezone.utc) + timedelta(
             days=self._settings.jwt_refresh_token_ttl_days
         )
-        await self._repo.store_refresh_token(
-            token_id=token_id, user_id=user.user_id, expires_at=expires_at
-        )
-        return LoginResult(access_token=access, refresh_token=refresh, user=user)
+        pair = LoginResult(access_token=access, refresh_token=refresh, user=user)
+        return pair, token_id, expires_at

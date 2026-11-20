@@ -4,6 +4,8 @@ Design: docs/06_integrations/myday_session_revocation_design.md. What these pin:
   * of two concurrent refreshes with ONE token, exactly one succeeds (the race
     that used to mint two live token families, design 1.0.2);
   * a rotated token cannot be refreshed again;
+  * rotation is ONE atomic unit: a failed insert of the new token leaves the old
+    token unconsumed and usable (Round 2 N1, design 9.0.1);
   * logout revokes the presented refresh token, so a later refresh is 401;
   * logout is always 204 and never an oracle (garbage, wrong type, unknown,
     already revoked all answer the same);
@@ -100,6 +102,9 @@ async def test_concurrent_refreshes_of_one_token_mint_exactly_one_pair() -> None
 
 
 async def test_a_rotated_token_cannot_be_refreshed_again() -> None:
+    """Reuse of a rotated token is refused and does NOT revoke the token family:
+    the rotated-to token keeps working. Per-family revocation on reuse is a
+    separate change (#47b, design doc 7.0 / 9.0.4), not part of this one."""
     svc, _ = _service()
     first = await _logged_in(svc)
     second = await svc.refresh(refresh_token=first.refresh_token)
@@ -108,6 +113,41 @@ async def test_a_rotated_token_cannot_be_refreshed_again() -> None:
         await svc.refresh(refresh_token=first.refresh_token)
     # The new token from the rotation is live.
     assert (await svc.refresh(refresh_token=second.refresh_token)).access_token
+
+
+# ── Round 2: rotation is one atomic unit (N1) ────────────────────────────────
+
+async def test_a_failed_insert_during_rotation_leaves_the_old_token_usable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    svc, repo = _service()
+    first = await _logged_in(svc)
+    jti = UUID(decode_token(first.refresh_token, SECRET)["jti"])
+
+    def _boom(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("simulated failure storing the new refresh token")
+
+    monkeypatch.setattr(repo, "_insert_refresh", _boom)
+    with pytest.raises(RuntimeError, match="simulated failure"):
+        await svc.refresh(refresh_token=first.refresh_token)
+
+    row = await repo.get_refresh_token(jti)
+    assert row is not None and row.revoked_at is None, "old token was consumed"
+    monkeypatch.undo()
+    assert (await svc.refresh(refresh_token=first.refresh_token)).access_token
+
+
+async def test_rotate_refuses_a_non_consumable_token_and_writes_nothing() -> None:
+    repo = InMemoryUserRepository()
+    old, new, owner = uuid4(), uuid4(), uuid4()
+    later = datetime.now(timezone.utc) + timedelta(days=1)
+    await repo.store_refresh_token(old, owner, later)
+    assert await repo.consume_refresh_token(old, owner) is True
+
+    assert await repo.rotate_refresh_token(
+        old_token_id=old, user_id=owner, new_token_id=new, new_expires_at=later
+    ) is False
+    assert await repo.get_refresh_token(new) is None
 
 
 async def _mismatched_token(svc: UserAuthService, repo: InMemoryUserRepository):
