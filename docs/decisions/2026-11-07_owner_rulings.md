@@ -216,6 +216,56 @@ Status: EXECUTED (.github/workflows/deploy-staging.yml:6-7 comment changed; trig
 
 ---
 
+## 2026-11-20 (OD28-OD31)
+
+decided 2026-11-20 in owner chat; first recorded 2026-11-20 by the sky-hyg2-20261120
+hygiene run. None of these four existed in this file before today -- not backdated.
+
+**OD28** Vercel Production (the BFF) is serverless with multiple instances
+     (confirmed). The process-in-memory single-flight lock is NOT a correctness
+     mechanism there, only best-effort. The correctness boundary is backend
+     atomic rotation plus the 10s grace window. A distributed (Redis/DB) lock
+     is OUT OF SCOPE of this ruling and needs its own owner decision.
+
+Status: CLOSED (decided 2026-11-20 in owner chat; first recorded 2026-11-20)
+
+---
+
+**OD29** #47 is split: #47a = PR #52 (atomic rotation + BFF best-effort lock +
+     config-error aggregation, N2 removed), #47b = PR #53 (per-family
+     revocation, DRAFT). Rationale: P1 cascade logout.
+
+Status: CLOSED (decided 2026-11-20 in owner chat; first recorded 2026-11-20).
+PR state re-confirmed via `gh pr view` for this record: #52 OPEN
+(feat/myday-atomic-rotation, "feat(security): atomic refresh rotation +
+detection-only grace window (#47a, split of #47)"); #53 OPEN
+(feat/myday-lineage-revocation, "feat(security): per-family refresh-token
+revocation on reuse (#47b, split of #47, draft)").
+
+---
+
+**OD30** On a timeout, a spend hold is KEPT. A hold is released only on
+     reconciliation evidence, never by timeout alone. This resolves
+     ARCH-CONFLICT-1 (test_stripe_refund_proxy_spend.py:371-379 @6556487
+     vs. test_tool_outcome_unknown.py:104-110 @b8399c8) in favor of keeping
+     the hold. Implementation (making #43's xfail real and fixing #45's
+     `len(releases) == 1` assertion) is a separate run; this is the decision
+     record only.
+
+Status: CLOSED (decided 2026-11-20 in owner chat; first recorded 2026-11-20)
+
+---
+
+**OD31** DQ1 is CANCELLED: ruleset 26770388's `required_approving_review_count`
+     stays at 0. Rationale: solo developer, GitHub does not allow self-approval,
+     and the ruleset has zero bypass actors (OD15), so turning this on would
+     lock main shut with no emergency path. Replacing it: a merge-guard
+     OWNER-APPROVED allowlist rule, in a later PR.
+
+Status: CLOSED (decided 2026-11-20 in owner chat; first recorded 2026-11-20)
+
+---
+
 ## Backlog (tracked)
 
 - [ ] Railway doc wording: website/docs/CONSOLE_BFF.md, website/docs/DEPLOY_RAILWAY.md, docs/audits/tier0_status_audit.md, docs/audits/epic_user_auth_buildout.md, website/.env.local.example, scripts/anytype_sync/.env.example and the code comments in website/src/lib/skylize/config.ts, website/src/lib/skylize/myday-config.ts, website/src/app/console/page.tsx describe the INTENDED Railway setup (OD17) and stay as is; only their present-tense "it exists" phrasing is wrong (OD16). Not worth a sweep pre-pilot; revisit when T7 stands up Railway.
