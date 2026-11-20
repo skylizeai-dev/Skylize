@@ -216,6 +216,37 @@ Status: EXECUTED (.github/workflows/deploy-staging.yml:6-7 comment changed; trig
 
 ---
 
+## 2026-11-20 (OD25)
+
+original approval date UNKNOWN; recorded by the sky-hyg-20261120 hygiene run,
+2026-11-20, from evidence below (no chat log for this one was available to this run)
+
+**OD25** Drive `create_permission` (the one non-idempotent write in `drive_tools.py`)
+     is not retried on a 5xx, or on a timeout/transport failure that may occur after
+     the request was sent, because a blind retry risks a duplicate permission grant
+     (and a second share-notification email). Only a 429 and a pre-send connect
+     failure retry. An ambiguous failure surfaces as `ToolExecutionError` with an
+     "OUTCOME UNKNOWN" message telling the caller to verify before re-issuing (this
+     connector has no `permissions.list` tool, so verification happens outside it).
+
+Status: IMPLEMENTED IN PR #42 (OPEN, not merged), branch feat/security-drive-no-retry
+-- `src/skylize/tools/builtin/drive_tools.py` (`_is_retryable_share`,
+`_PRE_SEND_TRANSPORT_ERRORS`). Relation to OD4 above: VERIFIED, not by analogy alone --
+PR #42's body and its in-code comment both say "same rule as OD4"; the predicate and
+message shape mirror `hubspot_tools.py` (`_is_retryable_create`,
+`_PRE_SEND_TRANSPORT_ERRORS`, the "OUTCOME UNKNOWN" message), which is OD4's own
+implementation. `asana_tools.py:142-155,709` carries the same outcome-unknown-on-
+ambiguous-failure pattern but is not tagged to an OD number in its code.
+
+Recording note, stated plainly: OD25 was never in this file before today. It was only
+asserted in PR #42's body ("Ruling: OD25 (asserted in the run brief; not recorded in
+docs/decisions) - same rule as OD4") when #42 was opened, 2026-11-14T17:37:38Z. The
+true original decision date is UNKNOWN to this run; this entry is NOT backdated to
+2026-11-14 or earlier, and is filed after OD27 (numeric order is out of sequence with
+file order) because that is the truth of when it was written down.
+
+---
+
 ## Backlog (tracked)
 
 - [ ] Railway doc wording: website/docs/CONSOLE_BFF.md, website/docs/DEPLOY_RAILWAY.md, docs/audits/tier0_status_audit.md, docs/audits/epic_user_auth_buildout.md, website/.env.local.example, scripts/anytype_sync/.env.example and the code comments in website/src/lib/skylize/config.ts, website/src/lib/skylize/myday-config.ts, website/src/app/console/page.tsx describe the INTENDED Railway setup (OD17) and stay as is; only their present-tense "it exists" phrasing is wrong (OD16). Not worth a sweep pre-pilot; revisit when T7 stands up Railway.
