@@ -17,7 +17,14 @@ write. These tests fire the requests concurrently and assert exactly one wins:
     the presented token's has revoked_at set (no BFF lock is involved);
   * POST /logout revokes the presented token -> a later refresh is 401 and the
     row's revoked_at is set;
-  * reuse of a rotated token is 401 while the rotated-to token still refreshes;
+  * reuse of a rotated token inside the grace window is 401 while the
+    rotated-to token still refreshes;
+  * gate G1.5 (#47b, design 9.1): reuse PAST the grace window revokes the live
+    row of the presented token's own family only - another device of the same
+    user (another login = another family) keeps refreshing, repeated replays
+    and a re-trigger by a token the revocation itself revoked revoke nothing
+    more, a new login afterwards is untouched, and another user's rows are
+    never written;
   * a failed INSERT during rotation rolls the consume back (Round 2 N1);
   * token families (migration 0038, design 9.1): every rotation of one login
     stays in that login's family, and each login starts a new one;
@@ -30,6 +37,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import uuid
 from collections.abc import AsyncIterator
 from datetime import datetime, timedelta, timezone
@@ -42,7 +50,12 @@ from httpx import ASGITransport, AsyncClient
 
 from skylize.app.auth import user_service
 from skylize.app.auth.tokens import create_refresh_token, decode_token
-from skylize.app.auth.user_service import InvalidCredentialsError, LoginResult, RefreshReplay
+from skylize.app.auth.user_service import (
+    REFRESH_REUSE_GRACE_SECONDS,
+    InvalidCredentialsError,
+    LoginResult,
+    RefreshReplay,
+)
 from skylize.bootstrap import build_container
 from skylize.config import Settings
 from skylize.edge.deps import get_container
@@ -276,8 +289,9 @@ async def test_pg_two_concurrent_refreshes_of_one_token_never_revoke_anything(
         assert sorted(rotations) == [False, True], rotations
         assert len(verdicts) == 1, verdicts
         assert verdicts[0] is not None and verdicts[0].within_grace, verdicts
+        # Within grace: no family revocation, so no reuse WARNING.
         assert not [
-            r for r in caplog.records if "auth_refresh_replay_after_grace" in r.getMessage()
+            r for r in caplog.records if "auth_refresh_reuse_family_revoked" in r.getMessage()
         ]
 
         consumed = await admin_conn.fetch(
@@ -330,10 +344,11 @@ async def test_refresh_after_logout_is_rejected(auth_client, admin_conn) -> None
 @requires_redis
 @requires_app_role
 async def test_reuse_of_rotated_token_is_rejected(auth_client, admin_conn) -> None:
-    """A rotated (already-consumed) token is refused on reuse, and the reuse does
-    NOT revoke the token family: the pair the rotation minted keeps working.
-    Per-family revocation on reuse is a separate change (#47b, design doc 7.0 /
-    9.0.4), not part of this one."""
+    """A rotated (already-consumed) token is refused on reuse. The reuse here is
+    immediate, i.e. INSIDE the grace window (the benign concurrent refresh), so
+    it revokes nothing and the pair the rotation minted keeps working. Past the
+    window the family IS revoked:
+    `test_pg_reuse_revokes_only_its_own_family_other_devices_unaffected`."""
     client, _ = auth_client
     org_a, _ = _orgs()
     try:
@@ -439,6 +454,167 @@ async def test_pg_rotation_keeps_the_family_and_each_login_starts_a_new_one(
         assert families[other_root] == other_root != root
     finally:
         await purge_tenants(admin_conn, [org_a])
+
+
+async def _age_consume_past_grace(admin_conn: Any, token: str) -> None:
+    """Move the token's consume time (`revoked_at`) back past the grace window
+    instead of sleeping. Relative to its own value, so ageing twice ages twice;
+    the service compares it against its own (real) clock."""
+    await admin_conn.execute(
+        "UPDATE user_refresh_tokens SET revoked_at = revoked_at - make_interval(secs => $2) "
+        "WHERE token_id = $1 AND revoked_at IS NOT NULL",
+        _jti(token), float(REFRESH_REUSE_GRACE_SECONDS + 50),
+    )
+
+
+async def _refresh_ok(client: AsyncClient, token: str) -> str:
+    r = await client.post("/api/v1/auth/refresh", json={"refresh_token": token})
+    assert r.status_code == 200, r.text
+    rotated: str = r.json()["refresh_token"]
+    return rotated
+
+
+async def _refresh_refused(client: AsyncClient, token: str) -> None:
+    r = await client.post("/api/v1/auth/refresh", json={"refresh_token": token})
+    assert r.status_code == 401, r.text
+
+
+async def _login_refresh(client: AsyncClient, email: str) -> str:
+    r = await client.post("/api/v1/auth/login", json={"email": email, "password": PASSWORD})
+    assert r.status_code == 200, r.text
+    token: str = r.json()["refresh_token"]
+    return token
+
+
+def _reuse_log(caplog: pytest.LogCaptureFixture) -> list[tuple[str, int]]:
+    """(family_id, revoked_count) of every `auth_refresh_reuse_family_revoked`
+    WARNING, in order."""
+    out = []
+    for record in caplog.records:
+        m = re.search(
+            r"auth_refresh_reuse_family_revoked .*family_id=(\S+) .*revoked_count=(\d+)$",
+            record.getMessage(),
+        )
+        if m:
+            out.append((m.group(1), int(m.group(2))))
+    return out
+
+
+async def _family_counts(admin_conn: Any, family_id: uuid.UUID) -> tuple[int, int]:
+    """(live rows, all rows) of one family."""
+    rec = await admin_conn.fetchrow(
+        "SELECT count(*) FILTER (WHERE revoked_at IS NULL) AS live, count(*) AS total "
+        "FROM user_refresh_tokens WHERE family_id = $1",
+        family_id,
+    )
+    return rec["live"], rec["total"]
+
+
+@requires_redis
+@requires_app_role
+async def test_pg_reuse_revokes_only_its_own_family_other_devices_unaffected(
+    auth_client, admin_conn, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Gate G1.5 against Postgres, through the HTTP routes and the app role. One
+    user, device A (family FA) and device B (family FB). The stolen OLD token
+    of FA, replayed past the grace window: FA's live token is revoked, B keeps
+    refreshing. The same old token replayed again (repeatedly) and device A's
+    own token that the revocation itself revoked - the exact trigger that made
+    PR #47's user-wide variant cascade (P1) - revoke nothing more
+    (`revoked_count=0`), and B keeps refreshing. A NEW login (family FC) after
+    the replays is untouched by further replays. Unit twin:
+    `test_reuse_revokes_only_its_own_family_other_devices_unaffected`."""
+    client, _ = auth_client
+    org_a, _ = _orgs()
+    caplog.set_level(logging.WARNING, logger="skylize.app.auth.user_service")
+    try:
+        email, _, a0 = await _register_and_login(client, admin_conn, org_a)
+        sub = uuid.UUID(decode_token(a0, TEST_JWT_SECRET)["sub"])
+        b = await _login_refresh(client, email)
+        fa, fb = _jti(a0), _jti(b)  # a login roots its family at its own token id
+        a1 = await _refresh_ok(client, a0)  # a0: the stolen OLD token
+        b = await _refresh_ok(client, b)
+
+        # 1. The stolen old token, past grace: FA's live token is revoked.
+        await _age_consume_past_grace(admin_conn, a0)
+        await _refresh_refused(client, a0)
+        assert _reuse_log(caplog) == [(str(fa), 1)]
+        assert await _family_counts(admin_conn, fa) == (0, 2)
+        await _refresh_refused(client, a1)  # within grace of its revocation: silent
+        b = await _refresh_ok(client, b)
+
+        # 2. The same old token, again and again: nothing more is revoked.
+        for _ in range(3):
+            await _age_consume_past_grace(admin_conn, a0)
+            await _refresh_refused(client, a0)
+            b = await _refresh_ok(client, b)
+
+        # 3. Device A's own token a1, revoked BY the family revocation, comes
+        #    back past grace: it lands in the same dead family.
+        await _age_consume_past_grace(admin_conn, a1)
+        await _refresh_refused(client, a1)
+        b = await _refresh_ok(client, b)
+
+        # 4. A new login after the replays: a new family, untouched by more.
+        c = await _login_refresh(client, email)
+        fc = _jti(c)
+        assert fc not in (fa, fb)
+        for stale in (a0, a1, a0):
+            await _age_consume_past_grace(admin_conn, stale)
+            await _refresh_refused(client, stale)
+            b = await _refresh_ok(client, b)
+            c = await _refresh_ok(client, c)
+
+        # One WARNING per after-grace replay (1 + 3 + 1 + 3), all naming FA;
+        # only the first revoked anything.
+        assert _reuse_log(caplog) == [(str(fa), 1)] + [(str(fa), 0)] * 7
+        # Exactly the current tokens of FB and FC are live; FA has none. Every
+        # other row of FB/FC was consumed by its own rotation (rows = rotations
+        # + 1), so nothing else ever wrote to them.
+        live = await admin_conn.fetch(
+            "SELECT family_id, token_id FROM user_refresh_tokens "
+            "WHERE user_id = $1 AND revoked_at IS NULL",
+            sub,
+        )
+        assert {(r["family_id"], r["token_id"]) for r in live} == {(fb, _jti(b)), (fc, _jti(c))}
+        assert await _family_counts(admin_conn, fa) == (0, 2)
+        assert await _family_counts(admin_conn, fb) == (1, 1 + 1 + 1 + 3 + 1 + 3)
+        assert await _family_counts(admin_conn, fc) == (1, 1 + 3)
+    finally:
+        await purge_tenants(admin_conn, [org_a])
+
+
+@requires_redis
+@requires_app_role
+async def test_pg_reuse_after_grace_never_touches_another_users_family(
+    auth_client, admin_conn, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """User A's token replayed past grace revokes A's family; user B (another
+    org) has every refresh row exactly as before and still refreshes."""
+    client, _ = auth_client
+    org_a, org_b = _orgs()
+    caplog.set_level(logging.WARNING, logger="skylize.app.auth.user_service")
+    try:
+        _, _, a0 = await _register_and_login(client, admin_conn, org_a)
+        _, _, b0 = await _register_and_login(client, admin_conn, org_b)
+        sub_b = uuid.UUID(decode_token(b0, TEST_JWT_SECRET)["sub"])
+        await _refresh_ok(client, a0)
+        b_rows_sql = (
+            "SELECT token_id, family_id, expires_at, revoked_at FROM user_refresh_tokens "
+            "WHERE user_id = $1 ORDER BY token_id"
+        )
+        b_before = [tuple(r) for r in await admin_conn.fetch(b_rows_sql, sub_b)]
+
+        await _age_consume_past_grace(admin_conn, a0)
+        await _refresh_refused(client, a0)
+
+        # The revocation happened (so this is not vacuous) - in A's family only.
+        assert _reuse_log(caplog) == [(str(_jti(a0)), 1)]
+        assert await _family_counts(admin_conn, _jti(a0)) == (0, 2)
+        assert [tuple(r) for r in await admin_conn.fetch(b_rows_sql, sub_b)] == b_before
+        await _refresh_ok(client, b0)
+    finally:
+        await purge_tenants(admin_conn, [org_a, org_b])
 
 
 @requires_redis

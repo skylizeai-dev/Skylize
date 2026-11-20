@@ -18,17 +18,19 @@ from .tokens import InvalidTokenError, create_access_token, create_refresh_token
 
 VALID_ROLES = frozenset({"owner", "admin", "operator", "viewer"})
 
-#: Refresh-token replay grace window, in seconds (design doc 9.0.2). When a
-#: refresh is refused because its token was ALREADY CONSUMED by its owner, the
-#: time since that consume decides what the refusal means:
+#: Refresh-token replay grace window, in seconds (design doc 9.0.2, 9.1). When
+#: a refresh is refused because its token was ALREADY CONSUMED by its owner,
+#: the time since that consume decides what the refusal means:
 #:   * less than this: the benign concurrent refresh - two tabs, or two BFF
 #:     instances, presenting one cookie at once, and the other request won the
 #:     rotation. Plain refusal, no log, no write.
-#:   * this long or longer: a replay worth noticing (a stolen token, a lost
-#:     rotation response, a logged-out token). ONE detection-only WARNING
-#:     `auth_refresh_replay_after_grace`, still a plain refusal, and NOTHING is
-#:     revoked (owner ruling R-B, the PR #47 split: its user-wide revocation
-#:     was removed; per-family revocation is a separate change, design doc 7.0).
+#:   * this long or longer: reuse (a stolen token, a lost rotation response, a
+#:     logged-out token). Still a plain refusal, plus the live rows of the
+#:     presented token's FAMILY - its own login's lineage, and nothing else -
+#:     are revoked and ONE WARNING `auth_refresh_reuse_family_revoked` is
+#:     logged. Never a user-wide revocation (owner ruling R-B: PR #47's
+#:     user-wide variant re-triggered on rows it had itself revoked and
+#:     cascaded logouts across every device of the user).
 REFRESH_REUSE_GRACE_SECONDS: Final = 10
 
 _log = logging.getLogger(__name__)
@@ -37,7 +39,8 @@ _log = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class RefreshReplay:
     """A refused refresh whose token its owner had ALREADY consumed - by a
-    rotation or by logout; `revoked_at` does not say which."""
+    rotation, by logout, or by a family revocation; `revoked_at` does not say
+    which."""
 
     #: `now - revoked_at`: how long ago the presented token was consumed.
     consumed_age: timedelta
@@ -291,25 +294,34 @@ class UserAuthService:
         raise InvalidCredentialsError("refresh token revoked, expired, or not found")
 
     async def _on_refused_refresh(self, jti: UUID, sub: UUID) -> None:
-        """Replay detection for a refused refresh - DETECTION ONLY (design doc 9.0.2).
+        """Reuse handling for a refused refresh (design doc 9.0.2, 9.1).
 
         Not a replay, or a replay inside the grace window (the benign
-        concurrent refresh): nothing at all. A replay past the grace window: one
-        structured WARNING. Either way the caller raises the same
-        `InvalidCredentialsError`, and nothing is written here: no refresh
-        token of this or any other user is revoked.
+        concurrent refresh): nothing at all - no log, no write. A replay past
+        the grace window: the live rows of the presented token's family are
+        revoked (`revoke_family`) and one structured WARNING is logged. Either
+        way the caller raises the same `InvalidCredentialsError`.
+
+        The revocation is scoped to ONE family, the presented row's own, which
+        is one login's lineage of one user. It can never reach another device's
+        session (another login = another family) or another user. A later
+        replay of a token this revoked lands back in the same, now dead, family
+        and revokes nothing more (`revoked_count=0`): the cascade of PR #47's
+        user-wide variant (owner ruling R-B) has no path here.
         """
-        replay = classify_refused_refresh(
-            await self._repo.get_refresh_token(jti), sub, self._clock()
-        )
-        if replay is None or replay.within_grace:
+        row = await self._repo.get_refresh_token(jti)
+        replay = classify_refused_refresh(row, sub, self._clock())
+        # `row is None` already makes `replay` None; it is repeated only so the
+        # type checker knows `row` below is a row.
+        if row is None or replay is None or replay.within_grace:
             return
-        # The after-grace action: detection only. Ids, the age and the window,
-        # never the token or any part of it.
+        revoked_count = await self._repo.revoke_family(row.family_id)
+        # Ids, counts, the age and the window - never the token or any part of it.
         _log.warning(
-            "auth_refresh_replay_after_grace user_id=%s token_id=%s "
-            "consumed_age_seconds=%d grace_seconds=%d action=none",
-            sub, jti, int(replay.consumed_age.total_seconds()), REFRESH_REUSE_GRACE_SECONDS,
+            "auth_refresh_reuse_family_revoked user_id=%s token_id=%s family_id=%s "
+            "consumed_age_seconds=%d grace_seconds=%d revoked_count=%d",
+            sub, jti, row.family_id, int(replay.consumed_age.total_seconds()),
+            REFRESH_REUSE_GRACE_SECONDS, revoked_count,
         )
 
     async def logout(self, *, refresh_token: str) -> bool:
