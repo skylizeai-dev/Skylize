@@ -11,6 +11,10 @@ write. These tests fire the requests concurrently and assert exactly one wins:
   * the store primitive: 10 concurrent `consume_refresh_token` calls on one token
     -> exactly one returns the owner;
   * the HTTP route: 2 concurrent POST /refresh with one token -> one 200, one 401;
+  * gate G1.6: 2 concurrent service refreshes with one token, both inside the
+    rotation at once on their own pooled connections -> one valid pair, one
+    plain refusal classified INSIDE the grace window, no WARNING, and no row but
+    the presented token's has revoked_at set (no BFF lock is involved);
   * POST /logout revokes the presented token -> a later refresh is 401 and the
     row's revoked_at is set;
   * reuse of a rotated token is 401 while the rotated-to token still refreshes;
@@ -23,6 +27,7 @@ Skipped unless SKYLIZE_TEST_DB_URL (+ SKYLIZE_TEST_APP_DB_URL / REDIS_URL) are s
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from collections.abc import AsyncIterator
 from datetime import datetime, timedelta, timezone
@@ -33,7 +38,9 @@ import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
+from skylize.app.auth import user_service
 from skylize.app.auth.tokens import create_refresh_token, decode_token
+from skylize.app.auth.user_service import InvalidCredentialsError, LoginResult, RefreshReplay
 from skylize.bootstrap import build_container
 from skylize.config import Settings
 from skylize.edge.deps import get_container
@@ -187,6 +194,110 @@ async def test_concurrent_refreshes_mint_exactly_one_pair(auth_client, admin_con
             "SELECT revoked_at FROM user_refresh_tokens WHERE token_id = $1", jti
         )
         assert row is not None and row["revoked_at"] is not None
+    finally:
+        await purge_tenants(admin_conn, [org_a])
+
+
+def _race_rotations(monkeypatch: pytest.MonkeyPatch, repo: Any) -> list[bool]:
+    """Hold each `rotate_refresh_token` call until TWO are in flight, then run
+    both: each opens its own pooled connection and transaction, and Postgres's
+    row lock on the presented token picks the single winner. Returns the real
+    rotation outcomes, in completion order."""
+    barrier = asyncio.Barrier(2)
+    real = repo.rotate_refresh_token
+    outcomes: list[bool] = []
+
+    async def racing(**kwargs: Any) -> bool:
+        await asyncio.wait_for(barrier.wait(), timeout=10)
+        won: bool = await real(**kwargs)
+        outcomes.append(won)
+        return won
+
+    monkeypatch.setattr(repo, "rotate_refresh_token", racing)
+    return outcomes
+
+
+def _record_verdicts(monkeypatch: pytest.MonkeyPatch) -> list[RefreshReplay | None]:
+    """Record every classification the service makes of a refused refresh."""
+    real = user_service.classify_refused_refresh
+    seen: list[RefreshReplay | None] = []
+
+    def spy(*args: Any, **kwargs: Any) -> RefreshReplay | None:
+        verdict = real(*args, **kwargs)
+        seen.append(verdict)
+        return verdict
+
+    monkeypatch.setattr(user_service, "classify_refused_refresh", spy)
+    return seen
+
+
+@requires_redis
+@requires_app_role
+async def test_pg_two_concurrent_refreshes_of_one_token_never_revoke_anything(
+    auth_client, admin_conn, monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Gate G1.6 against Postgres. Two service refreshes of the SAME token race
+    inside `rotate_refresh_token` on two pooled connections. Correctness comes
+    from the BACKEND alone (single-winner atomic rotation + the grace window);
+    no BFF and no BFF lock is involved. Exactly one valid pair; the loser is the
+    deterministic `InvalidCredentialsError`, classified INSIDE the grace window
+    (no WARNING); no row but the presented token's has `revoked_at` set; the
+    winner's new token still refreshes. Unit twin:
+    `test_two_concurrent_refreshes_of_one_token_never_revoke_anything`."""
+    client, container = auth_client
+    svc = container.user_auth
+    org_a, _ = _orgs()
+    try:
+        email, _, original = await _register_and_login(client, admin_conn, org_a)
+        sibling = await client.post(
+            "/api/v1/auth/login", json={"email": email, "password": PASSWORD}
+        )
+        assert sibling.status_code == 200, sibling.text
+        claims = decode_token(original, TEST_JWT_SECRET)
+        jti, sub = uuid.UUID(claims["jti"]), uuid.UUID(claims["sub"])
+
+        rotations = _race_rotations(monkeypatch, svc._repo)
+        verdicts = _record_verdicts(monkeypatch)
+        with caplog.at_level(logging.WARNING, logger="skylize.app.auth.user_service"):
+            results = await asyncio.gather(
+                svc.refresh(refresh_token=original),
+                svc.refresh(refresh_token=original),
+                return_exceptions=True,
+            )
+        monkeypatch.undo()
+
+        winners = [r for r in results if isinstance(r, LoginResult)]
+        losers = [r for r in results if isinstance(r, InvalidCredentialsError)]
+        assert len(winners) == 1 and len(losers) == 1, results
+        assert str(losers[0]) == "refresh token revoked, expired, or not found", losers
+        assert sorted(rotations) == [False, True], rotations
+        assert len(verdicts) == 1, verdicts
+        assert verdicts[0] is not None and verdicts[0].within_grace, verdicts
+        assert not [
+            r for r in caplog.records if "auth_refresh_replay_after_grace" in r.getMessage()
+        ]
+
+        consumed = await admin_conn.fetch(
+            "SELECT token_id FROM user_refresh_tokens "
+            "WHERE user_id = $1 AND revoked_at IS NOT NULL",
+            sub,
+        )
+        assert [r["token_id"] for r in consumed] == [jti], consumed
+        live = await admin_conn.fetchval(
+            "SELECT count(*) FROM user_refresh_tokens WHERE user_id = $1 AND revoked_at IS NULL",
+            sub,
+        )
+        assert live == 2, live  # the sibling login + the winner's new token
+
+        again = await client.post(
+            "/api/v1/auth/refresh", json={"refresh_token": winners[0].refresh_token}
+        )
+        assert again.status_code == 200, again.text
+        sib = await client.post(
+            "/api/v1/auth/refresh", json={"refresh_token": sibling.json()["refresh_token"]}
+        )
+        assert sib.status_code == 200, sib.text
     finally:
         await purge_tenants(admin_conn, [org_a])
 
