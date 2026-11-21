@@ -170,12 +170,15 @@ class _StripeFake:
 
     def __init__(
         self, events: list[str], *, refunded_minor: int, post_raises: Exception | None = None,
-        post_status: int | None = None,
+        post_status: int | None = None, post_text: str | None = None,
+        post_json: dict[str, Any] | None = None,
     ) -> None:
         self.events = events
         self.refunded_minor = refunded_minor
         self.post_raises = post_raises
         self.post_status = post_status
+        self.post_text = post_text
+        self.post_json = post_json
         self.gets: list[dict[str, Any]] = []
         self.posts: list[dict[str, Any]] = []
 
@@ -200,6 +203,10 @@ class _StripeFake:
             raise self.post_raises
         if self.post_status is not None:
             return httpx.Response(self.post_status, text="stripe is unavailable")
+        if self.post_text is not None:  # a 2xx whose body is not JSON at all
+            return httpx.Response(200, text=self.post_text)
+        if self.post_json is not None:  # a 2xx whose JSON lacks a field
+            return httpx.Response(200, json=self.post_json)
         return httpx.Response(
             200, json={"id": "re_fixture", "status": "succeeded",
                        "amount": self.refunded_minor, "currency": "usd"},
@@ -262,12 +269,14 @@ async def _accounts(*, livemode: bool | None) -> InMemoryStripeAccountRepository
 
 class _World:
     def __init__(self, *, livemode_row: bool | None = False, refunded_minor: int = 400,
-                 post_raises: Exception | None = None, post_status: int | None = None) -> None:
+                 post_raises: Exception | None = None, post_status: int | None = None,
+                 post_text: str | None = None,
+                 post_json: dict[str, Any] | None = None) -> None:
         self.events: list[str] = []
         self.ledger = FakeSpendRepo(self.events)
         self.stripe = _StripeFake(
             self.events, refunded_minor=refunded_minor, post_raises=post_raises,
-            post_status=post_status,
+            post_status=post_status, post_text=post_text, post_json=post_json,
         )
         self._livemode_row = livemode_row
 
@@ -450,3 +459,61 @@ async def test_a_4xx_refusal_is_not_outcome_unknown_and_releases() -> None:
     assert type(exc_info.value) is ToolExecutionError
     assert len(world.ledger.releases) == 1
     assert world.ledger.held() == []
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        httpx.ProxyError("CONNECT refused"),
+        httpx.UnsupportedProtocol("unknown scheme"),
+        httpx.LocalProtocolError("illegal header value"),
+    ],
+    ids=["proxy_error", "unsupported_protocol", "local_protocol_error"],
+)
+async def test_every_pre_send_transport_error_releases_the_hold(exc: Exception) -> None:
+    """The boundary, enumerated. These three are `httpx.TransportError` too, so
+    without `_PRE_SEND_TRANSPORT_ERRORS` listing them they would read as
+    OUTCOME UNKNOWN and hold a customer's budget for a call that never left the
+    process - fail-closed in direction, but wrong, and contradicting what
+    `ToolOutcomeUnknownError` says about itself (tools/base.py).
+    """
+    world = await _World(post_raises=exc).build()
+
+    with pytest.raises(ToolExecutionError) as exc_info:
+        await world.refund(hitl_id=uuid4())
+
+    assert type(exc_info.value) is ToolExecutionError
+    assert len(world.ledger.releases) == 1
+    assert world.ledger.held() == []
+
+
+async def test_accepted_refund_with_an_unreadable_body_keeps_the_spend_hold() -> None:
+    """Worse than a timeout: the money is KNOWN to have moved.
+
+    Stripe answered 200, so the refund happened; the body cannot be read, so
+    the settled amount is unknown. `response.json()` used to sit outside every
+    try, so the ValueError reached tools/proxy.py as an untyped exception and
+    the hold was released for a refund that certainly occurred.
+    """
+    world = await _World(post_text="<html>not json</html>").build()
+
+    with pytest.raises(ToolOutcomeUnknownError) as exc_info:
+        await world.refund(hitl_id=uuid4())
+
+    releases = world.ledger.releases
+    assert releases == [], _OD30
+    assert len(world.ledger.held()) == 1
+    assert world.ledger.commits == []
+    assert "ACCEPTED" in str(exc_info.value)
+
+
+async def test_accepted_refund_missing_a_field_keeps_the_spend_hold() -> None:
+    """Same case through a KeyError rather than a ValueError."""
+    world = await _World(post_json={"status": "succeeded", "currency": "usd"}).build()
+
+    with pytest.raises(ToolOutcomeUnknownError):
+        await world.refund(hitl_id=uuid4())
+
+    releases = world.ledger.releases
+    assert releases == [], _OD30
+    assert len(world.ledger.held()) == 1
