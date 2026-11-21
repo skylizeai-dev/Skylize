@@ -712,6 +712,31 @@ class ToolExecutionError(ToolError):
     """The tool's handler raised while executing."""
 
 
+class ToolOutcomeUnknownError(ToolExecutionError):
+    """The side effect MAY have happened; the tool cannot tell (owner ruling OD4).
+
+    Raised when a non-idempotent write was possibly delivered but no definitive
+    answer came back (a 5xx, or a transport error after the request may have
+    been sent). The caller must VERIFY the outcome before any retry, never
+    blindly re-run. Subclasses `ToolExecutionError` so every existing
+    `except ToolExecutionError` keeps catching it; `ToolProxy.invoke` preserves
+    the subclass so a caller can branch on the TYPE instead of the message.
+
+    SPEND CONSEQUENCE - owner ruling OD30, recorded at
+    docs/decisions/2026-11-07_owner_rulings.md:247 (branch
+    feat/decision-records-20261120; not on main yet). This type is also what
+    decides the spend hold: `ToolProxy.invoke` RETAINS the hold for an
+    outcome-unknown failure instead of releasing it, because the money may
+    already have moved. Only reconciliation EVIDENCE releases such a hold,
+    never the passage of time
+    (docs/architecture/idempotency_reconciliation_design.md). So raise this
+    type ONLY when the write may genuinely have been delivered: a pre-send
+    connect failure stays a plain `ToolExecutionError`, and calling it
+    outcome-unknown would hold a customer's budget for a call that never left
+    this process.
+    """
+
+
 class ToolWifDenied(ToolPermissionDenied):
     """A WIF-dependent tool call was refused at the federation gate.
 
