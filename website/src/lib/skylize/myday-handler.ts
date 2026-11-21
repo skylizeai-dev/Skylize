@@ -25,6 +25,7 @@ import type { ZodType } from "zod";
 import { MyDayApiError, mydayRefresh } from "./myday-client";
 import { MYDAY_CONFIG_ERROR_TAG, MyDayConfigError, getMyDayConfig } from "./myday-config";
 import { isStateChangingMethod, verifySameOrigin } from "./myday-csrf";
+import { refreshOnce } from "./myday-refresh-lock";
 import {
   MYDAY_SESSION_COOKIE_NAME,
   clearedMydaySessionCookie,
@@ -198,13 +199,22 @@ function mapMyDayError(error: MyDayApiError): NextResponse {
 // Only 401 triggers a refresh. A 403 (valid token, not permitted) and every
 // other status go straight to `mapMyDayError` unchanged.
 //
-// KNOWN RACE (documented, deliberately NOT solved): two tabs whose access token
-// expired at the same moment both get a 401 and both refresh with the SAME old
-// refresh token. The backend rotates it for the first (the winner, whose
-// response sets the new cookie); the second (the loser) gets a refresh 401 and
-// its response CLEARS the cookie — possibly after the winner's response set it.
-// The user is then forced to re-login. This fails CLOSED (no token is reused,
-// no session is extended), so it is accepted rather than papered over.
+// TWO-TAB RACE. Two tabs whose access token expired at the same moment both get
+// a 401 and both refresh with the SAME old refresh token. The BACKEND is the
+// correctness boundary (design doc section 9.0.3): its rotation is
+// single-winner and atomic, so exactly one refresh gets the new pair, and the
+// other gets a plain refresh 401 that writes and revokes nothing (the backend's
+// grace window, user_service.py `REFRESH_REUSE_GRACE_SECONDS`). That loser
+// follows step 4: 401 + cleared cookie, possibly after the winner's response
+// set the new one, so the user may have to log in again. This fails CLOSED (no
+// token is reused, no session is extended), so it is accepted.
+//
+// `refreshOnce` (myday-refresh-lock.ts) is a best-effort optimisation on top,
+// not a correctness boundary: when both requests land in the SAME instance
+// while the first refresh is in flight, they share ONE upstream refresh and
+// neither clears the cookie. The BFF runs multi-instance on Vercel, where the
+// two requests may land on different instances and it does nothing; no
+// behaviour above depends on it.
 
 /** Thrown inside a handler when the session must end (refresh failed/rejected). */
 class MyDaySessionEndedError extends Error {
@@ -261,7 +271,9 @@ function createAccessTokenRunner(
     refreshAttempted = true;
     let pair;
     try {
-      pair = await mydayRefresh(session.refresh_token);
+      // Best-effort in-process coalescing per refresh token (see the note
+      // above); a refresh it does not coalesce behaves exactly the same.
+      pair = await refreshOnce(session.refresh_token, mydayRefresh);
     } catch (error) {
       const rejected = error instanceof MyDayApiError && error.status === 401;
       outcome.ended = rejected ? 401 : 502;

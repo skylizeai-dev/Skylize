@@ -10,6 +10,10 @@
 > **[Corrected 2026-11-08, see section 8.0:** the access-token TTL, refresh-on-401
 > and logout semantics have changed since approval. Stale passages below keep
 > their original wording and carry an inline bracketed correction.**]**
+> **[Round 2 appended 2026-11-20, see section 9.0:** refresh rotation is one
+> transaction, a refused refresh is classified against a 10 s grace window for
+> DETECTION only (nothing is revoked), and the BFF single-flight is a best-effort
+> optimisation, not a correctness boundary. No migration.**]**
 >
 > **How to read this file.** Every claim is marked:
 > - `[CODE-VERIFIED]` - read from `origin/main` @ `7604fa8`, cites `file:line`.
@@ -96,6 +100,9 @@ RETURNING token_id
   single event loop.
 - `refresh()` keeps its signature decode and `type == "refresh"` check, then calls
   `consume_refresh_token(jti, sub)` instead of `get_refresh_token` + `revoke_refresh_token`.
+  [Corrected 2026-11-20, see section 9.0.1: `refresh()` now consumes through
+  `rotate_refresh_token`, the same conditional write plus the new token's insert in
+  ONE transaction. Logout still calls `consume_refresh_token`.]
 - **Ownership is inside the same condition (`user_id = $2`).** A token whose `sub`
   does not own the row its `jti` names is refused and revokes nothing. An earlier
   draft checked ownership AFTER consuming, which would have revoked the other user's
@@ -350,6 +357,9 @@ All of it lives in one place, `createAccessTokenRunner`
   failure gives `502` plus a cleared cookie (`:267`).
 - Known two-tab race: the loser's refresh `401` clears the cookie the winner just set,
   forcing a re-login. This fails closed and is documented at `myday-handler.ts:201`.
+  [Refined 2026-11-20, see section 9.0.3: within ONE BFF instance a best-effort
+  single-flight now coalesces the two refreshes. Across instances the race is as
+  described here, and the backend keeps the loser a plain `401` that revokes nothing.]
 
 ### 8.0.4 BFF logout semantics (OD20) `[CODE-VERIFIED]`
 
@@ -391,3 +401,177 @@ rationale comment at `:162`). The **cookie is ALWAYS cleared**, which restores t
 - An absent, tampered or expired cookie under a valid config is still `401` plus a
   cleared cookie, and is not logged with the config tag.
 - Boot-time validation of the My Day config is out of scope here (tracked as T5).
+
+
+---
+
+## 9.0 - Round 2: atomic rotation and a detection-only replay grace window (2026-11-20)
+
+`[CODE-VERIFIED]` against branch `feat/myday-atomic-rotation`, the first half
+(#47a) of the split of PR #47. Appended, not rewritten (OD22): the sections above
+keep their wording; the two passages this makes stale (2.0.1, 8.0.3) carry an
+inline bracketed note. Line numbers are those of this branch. No migration, no new
+column.
+
+**Scope.**
+1. N1: the refresh rotation is ONE transaction (9.0.1).
+2. A replay grace window that only DETECTS; it revokes nothing (9.0.2).
+3. The BFF refresh single-flight is a best-effort optimisation; the backend is the
+   correctness boundary (9.0.3, owner ruling R-A).
+4. The My Day config check reports every problem at once (9.0.6).
+
+**What this does not supersede.** Section 7.0 stays true as written: reuse
+detection that REVOKES, per token family, is still deferred and still needs the
+`family_id` migration. It is a separate change (#47b, built on this branch).
+
+### 9.0.1 N1 - rotation is one transaction `[CODE-VERIFIED]`
+
+- Before: `refresh` ran the consume `UPDATE`, the `users` read and the new token's
+  `INSERT` as separate statements, each on its own `admin_session()` and so each
+  autocommitted (`admin_session` is a bare pool acquire,
+  `src/skylize/dal/connection.py:83`). A failure after the consume lost the
+  session: old token consumed, no new token stored.
+- After: one port method `UserRepository.rotate_refresh_token(*, old_token_id,
+  user_id, new_token_id, new_expires_at) -> bool` (`src/skylize/dal/ports.py:295`).
+  `False` means the old token was not consumable and nothing was written.
+- Postgres (`src/skylize/dal/users.py:136`): the consume (`_CONSUME_SQL`, `:166`,
+  the same statement `consume_refresh_token` runs at `:124`) and the `INSERT`
+  (`_INSERT_REFRESH_SQL`, `:176`) run on ONE connection inside
+  `conn.transaction()` (`:156`). Any exception rolls the consume back, so the old
+  token stays live. The single winner is decided as in 2.0.1: a concurrent
+  rotation's `UPDATE` waits on the row lock and, once the first transaction
+  commits, re-checks `revoked_at IS NULL` under READ COMMITTED and matches nothing.
+- In-memory (`src/skylize/dal/memory.py:418`): inserts first (`_insert_refresh`,
+  `:387`, which refuses a duplicate `token_id` like the Pg primary key) and marks
+  the old row consumed only after that, with no `await` in between. `_consumable`
+  (`:442`) mirrors `_CONSUME_SQL`.
+- Service (`src/skylize/app/auth/user_service.py:265`): the user is now read
+  BEFORE the rotation (`:273`); the new pair is signed without being persisted
+  (`_new_pair`, `:342`) and rotated onto atomically (`:284-288`). An inactive or
+  deleted user's token is refused without being consumed, and every later attempt
+  is refused by the same check. Login still stores through `_mint_pair` (`:335`).
+
+### 9.0.2 Replay grace window - DETECTION ONLY `[CODE-VERIFIED]`
+
+When the rotation refuses a refresh, `_on_refused_refresh`
+(`src/skylize/app/auth/user_service.py:293`, called at `:290`) reads the presented
+token's row and classifies it with the pure function `classify_refused_refresh`
+(`:50`) against `REFRESH_REUSE_GRACE_SECONDS = 10` (`:32`):
+
+| Presented token's row | Classification | What happens |
+|---|---|---|
+| missing, owned by another user, never consumed, or past its own `expires_at` (`:61-64`) | not a replay | plain refusal, nothing else |
+| consumed by its owner LESS than 10 s ago (`RefreshReplay.within_grace`, `:46`) | replay within grace | plain refusal; no log line, no write |
+| consumed by its owner 10 s ago or more | replay after grace | plain refusal plus ONE structured WARNING (`:309`); no write, nothing revoked |
+
+The WARNING reads `auth_refresh_replay_after_grace user_id=<sub> token_id=<jti>
+consumed_age_seconds=<n> grace_seconds=10 action=none`. It carries ids only, never
+the token or any part of it (`token_id` is the row id, useless without the signed
+JWT).
+
+In every case the caller gets the same `InvalidCredentialsError` (`:291`), and the
+route the same fixed `401` (`REFRESH_REFUSED_DETAIL`,
+`src/skylize/edge/routes/auth.py:40`, raised at `:192` after the INFO line
+`auth_refresh_refused` at `:191`). The route contract of 8.0.2 is unchanged.
+
+**Why a window.** Two requests presenting one refresh token at the same time (two
+tabs, or two BFF instances, see 9.0.3) are normal traffic: one wins the rotation
+and the other is refused milliseconds later. The window keeps that refusal silent,
+so the WARNING only fires when a token comes back long after it was used.
+
+**Why detection only.** Owner ruling R-B: the user-wide reuse revocation proposed
+in PR #47 is not built, because it re-triggered on rows it had itself revoked (the
+P1 cascade logout). A log line writes nothing and cannot cascade, and it measures
+how often the after-grace case fires on legitimate traffic (see 9.0.4) before any
+revocation is switched on. The classification is kept separate from the action:
+per-family revocation (#47b) is meant to replace only the after-grace branch of
+`_on_refused_refresh`.
+
+### 9.0.3 Deployment topology: the backend is the correctness boundary (owner ruling R-A) `[CODE-VERIFIED]`
+
+- Owner ruling R-A: the My Day BFF runs on Vercel Production, i.e. multi-instance
+  and serverless. Module memory is per instance.
+- The BFF refresh single-flight (`website/src/lib/skylize/myday-refresh-lock.ts`,
+  `singleFlight` `:45`, `refreshOnce` `:69`, used at
+  `website/src/lib/skylize/myday-handler.ts:276`) is therefore a BEST-EFFORT
+  OPTIMISATION and not a correctness boundary (its header, `myday-refresh-lock.ts:4`).
+  It coalesces only refreshes that land in the same instance while one is in
+  flight; those share one upstream call, both get the new pair and neither clears
+  the cookie. Across instances, or for a request that arrives after the shared
+  refresh settled, it does nothing.
+- The correctness boundary is the backend: the single-winner atomic rotation
+  (9.0.1) plus the grace window (9.0.2). Whatever the BFF does, two concurrent
+  refreshes of one token yield exactly one new pair and one plain `401` that writes
+  and revokes nothing. That loser follows 8.0.3: `401` plus a cleared cookie,
+  possibly after the winner's response set the new one, so the user may have to
+  log in again. This fails closed and is accepted (`myday-handler.ts:202`).
+- A distributed lock in the BFF (Redis, or a database advisory lock) is explicitly
+  not pursued; adopting one would be a separate owner decision.
+
+### 9.0.4 Known limits
+
+- **Two clocks.** The grace comparison uses the API host's clock
+  (`self._clock`, `src/skylize/app/auth/user_service.py:111`, default UTC now)
+  against `revoked_at`, which Postgres stamps with its own `now()` (transaction
+  start, `src/skylize/dal/users.py:168`). A skew of S seconds moves the effective
+  window to about 10 - S (or 10 + S) seconds. The production skew between the API
+  host and Postgres is UNVERIFIED.
+- **Lost rotation response.** If the winner's response never reaches the client
+  (timeout, dropped connection) and the client retries the old token 10 s or more
+  later, the retry is classified after grace and logged although nothing was
+  stolen. Detection only, so the cost is a false-positive WARNING; the retry is
+  refused as before and that session ends.
+- **Logout replay.** `revoked_at` is set by rotation and by logout alike (logout
+  consumes through `consume_refresh_token`, `user_service.py:328`). A logged-out
+  token presented 10 s or more after logout is therefore also logged as an
+  after-grace replay. Telling the two apart needs a column, i.e. a migration and an
+  owner decision.
+- **No revocation on reuse yet.** A thief who rotates a stolen refresh token first
+  keeps a live session until it expires (up to 14 days,
+  `src/skylize/config.py:119`) while the victim is refused and logs in again: the
+  7.0 problem, unchanged. Per-family revocation is deferred to #47b, which carries
+  the `family_id` migration of 7.0.
+
+### 9.0.5 Tests
+
+`tests/unit/test_session_revocation.py` (memory backend, CI `unit` job):
+- N1: `test_a_failed_insert_during_rotation_leaves_the_old_token_usable` (`:165`),
+  `test_rotate_refuses_a_non_consumable_token_and_writes_nothing` (`:185`).
+  `test_a_rotated_token_cannot_be_refreshed_again` (`:149`) keeps its body.
+- Grace window: `test_the_classifier_says_not_a_replay_for_every_early_return`
+  (`:216`, including consumed-and-expired),
+  `test_the_classifier_grace_boundary_is_exactly_the_window` (`:230`),
+  `test_a_replay_within_grace_logs_nothing_and_writes_nothing` (`:245`),
+  `test_a_replay_after_grace_logs_one_warning_and_revokes_nothing` (`:266`),
+  `test_a_consumed_and_expired_token_is_refused_without_a_warning` (`:303`),
+  `test_a_logged_out_token_replayed_after_grace_is_logged_but_revokes_nothing`
+  (`:325`, pins the logout-replay limit of 9.0.4).
+- Concurrency, gate G1.6: `test_two_concurrent_refreshes_of_one_token_never_revoke_anything`
+  (`:382`).
+
+`tests/integration/test_refresh_revocation_pg.py` (real Postgres; runs only in CI's
+`integration` job and skips without the database env vars):
+- G1.6: `test_pg_two_concurrent_refreshes_of_one_token_never_revoke_anything`
+  (`:236`). Both service calls are held until both are inside
+  `rotate_refresh_token`, each on its own pooled connection. One valid pair, one
+  `InvalidCredentialsError` classified within grace, no WARNING, and the only row of
+  the user with `revoked_at` set is the presented token's.
+- N1: `test_rotation_rolls_back_the_consume_when_the_insert_fails` (`:358`), a
+  primary-key collision on the `INSERT` after the consume ran; the old token is
+  unconsumed afterwards and still refreshes.
+- `test_reuse_of_rotated_token_is_rejected` (`:330`) keeps its body.
+
+Website (CI `website` job): `website/src/app/api/my-day/me/route.refresh-race.test.ts`
+keeps CORRECTNESS tests that hold with no coalescing at all (describe "correctness
+without coalescing (the backend is the boundary)") apart from OPTIMISATION tests of
+the in-process coalescing (describe "best-effort in-process coalescing
+(optimisation, not correctness)"). `website/src/lib/skylize/myday-refresh-lock.test.ts`
+holds mechanism tests of the map only.
+
+### 9.0.6 Config errors list every problem `[CODE-VERIFIED]`
+
+`getMyDayConfig` now runs every check before throwing and collects the failures
+into one `MyDayConfigError` (`website/src/lib/skylize/myday-config.ts:117-118`,
+thrown at `:180`). `MyDayConfigError.problems` (`:42`) lists one entry per failed
+check, naming variables only, never a value. A single problem keeps its original
+message. This extends 8.0.5; boot-time validation is still out of scope (T5).
