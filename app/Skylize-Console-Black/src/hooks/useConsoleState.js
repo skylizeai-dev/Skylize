@@ -31,21 +31,22 @@ import {
   revokeApiKey,
   sendCoworkTurn,
 } from '../lib/consoleClient.js';
+import { ROSTER_CONTRACT_BACKED_LABEL } from '../lib/rosterVocabulary.js';
 
 const byId = {};
 AGENTS.forEach((a) => { byId[a.id] = a; });
 const deptById = {};
 DEPARTMENTS.forEach((d) => { deptById[d.id] = d; });
 
-// ── roster lifecycle (owner ruling OD6, proposal) ─────────────────────────
+// ── roster lifecycle (owner ruling OD6) ───────────────────────────────────
 // `lifecycle` is emitted by scripts/gen_agent_network_data.js: "governed" when
-// the agent has a registered AgentContract, "planned" when it is spec-only.
-// The agent views show governed agents by default; `showPlanned` reveals the
-// rest. Every count below is DERIVED from the generated roster -- never typed.
+// the fixture node matches a registered AgentContract's budget, "planned"
+// when it is spec-only. This fixture-side tag is scoped to the Starmap's
+// illustrative roster (151 roles) and is NOT the live registry count -- see
+// OD6 note on `agentsLive` below. It is deliberately not surfaced on screen
+// as "governed" (reserved for the live fact); see lib/rosterVocabulary.js.
 const isGoverned = (a) => a.lifecycle === 'governed';
-const ROSTER_GOVERNED_N = AGENTS.filter(isGoverned).length;
-const ROSTER_PLANNED_N = AGENTS.length - ROSTER_GOVERNED_N;
-const ROSTER_GOVERNED_DEPT_N = new Set(AGENTS.filter(isGoverned).map((a) => a.department)).size;
+const ROSTER_CONTRACT_BACKED_N = AGENTS.filter(isGoverned).length;
 
 const CONNECTORS = [
   { name: 'Slack', mono: 'SL', color: '#7A9BFF' },
@@ -274,10 +275,12 @@ function initialState() {
     permMatrixError: null,
 
     // ── live agent registry ─────────────────────────────────────────────
-    // GET /api/v1/agents. The generated 151-agent fixture is still imported
-    // for the Starmap geometry and the Dashboard roster headline (counts
-    // derived from it, labelled as roster counts); the GOVERNED AGENTS tile
-    // and the command blurb read the live registry from here.
+    // GET /api/v1/agents. OD6 single-source: every on-screen GOVERNED count
+    // (Dashboard headline, GOVERNED AGENTS tile, command blurb) derives from
+    // this live list. The generated 151-agent fixture is still imported, but
+    // only for the Starmap's illustrative geometry and its own
+    // CONTRACT-BACKED/PLACEHOLDER roster toggle (lib/rosterVocabulary.js) --
+    // never for a number labelled "governed".
     agentsLive: [],
     agentsLoading: true,
     agentsError: null,
@@ -1767,9 +1770,10 @@ function buildViewModel(ctx) {
     dirKey: (e) => { if (e.key === 'Enter') { e.preventDefault(); const tx = s.dirInput; set({ screen: 'chat' }); doSend(tx); } },
     sendDir: () => { const tx = s.dirInput; set({ screen: 'chat' }); doSend(tx); },
     heroStackDisp: 'block',
-    heroHeadline: ROSTER_GOVERNED_N + ' governed agents across ' + ROSTER_GOVERNED_DEPT_N
-      + ' departments · ' + AGENTS.length + ' on the roster (' + ROSTER_PLANNED_N
-      + ' planned) in ' + DEPARTMENTS.length + ' departments.',
+    // OD6 single source: same live registry as the GOVERNED AGENTS KPI tile
+    // below (s.agentsLive, GET /api/v1/agents) -- never the roster fixture.
+    heroHeadline: s.agentsLive.length + ' governed agents across '
+      + new Set(s.agentsLive.map((a) => a.department)).size + ' departments.',
     tierLayers, kpis, tiltMove, tiltLeave,
     deptBars, apPrevN: String(s.approvals.length), apPrev, pulseLogs,
     // chat
@@ -1844,11 +1848,11 @@ function buildViewModel(ctx) {
     toggleShowPlanned: () => setState((st) => ({ showPlanned: !st.showPlanned, selId: null })),
     rosterToggleLabel: s.showPlanned
       ? 'ALL AGENTS · ' + AGENTS.length
-      : 'GOVERNED ONLY · ' + ROSTER_GOVERNED_N,
+      : ROSTER_CONTRACT_BACKED_LABEL + ' · ' + ROSTER_CONTRACT_BACKED_N,
     starEmptyText: s.showPlanned
       ? 'No agents stationed in this department yet.'
       : (deptPlannedN
-        ? 'No governed agents in this department. ' + deptPlannedN + ' planned (no contract yet) — use SHOW PLANNED to see them.'
+        ? 'No contract-backed agents in this department. ' + deptPlannedN + ' placeholder (no contract yet) — use SHOW PLANNED to see them.'
         : 'No agents stationed in this department yet.'),
     starPrev: () => starStep(-1), starNext: () => starStep(1),
     starTilt, starTiltReset, starTiltRef: starTiltElRef, starPlaneRef: starPlaneElRef,

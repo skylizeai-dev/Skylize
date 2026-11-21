@@ -5,20 +5,26 @@ Dark "Precision Altitude" ops console — ported from the Claude Design prototyp
 Command, Starmap, Workflows, Approvals, Analytics, Models, Knowledge,
 Integrations, Developers, Audit Log, Security, Team, Billing, Settings.
 
-NOTE ON AGENT COUNTS. The bundled `agentNetworkData.js` fixture describes 151
-agents across 18 departments and is now used ONLY for the Starmap's geometry
-and the Dashboard headline. The governed registry holds **33 agents across 9
-departments** at 490b6dd4 (`len(ALL_MVP_CONTRACTS)` in
-`src/skylize/contracts/mvp/__init__.py`), and the GOVERNED AGENTS tile reads
-`GET /api/v1/agents` at runtime.
+NOTE ON AGENT COUNTS (OD6 single source, docs/decisions/2026-11-07_owner_rulings.md).
+There is exactly one source for any on-screen "governed" count: `GET
+/api/v1/agents`, backed by `ALL_MVP_CONTRACTS`
+(`src/skylize/contracts/mvp/__init__.py`) -- 33 agents across 9 departments as
+of this writing. The Dashboard headline and the GOVERNED AGENTS KPI tile both
+read it live, from the same `agentsLive` state (`hooks/useConsoleState.js`).
 
-ROSTER LIFECYCLE (owner ruling OD6, proposal). Each fixture node carries a
-roster-level `lifecycle`: `"governed"` when the agent has a registered
-AgentContract, `"planned"` when it is spec-only. This is NOT the contracts'
-`LifecycleStatus` (sandbox/active/retired). At 490b6dd4 the fixture holds 25
-governed and 126 planned (8 registered agents are code-only and absent from the
-fixture). The Starmap shows governed agents by default; the SHOW PLANNED toggle
-reveals the rest. The Dashboard headline derives every number from the fixture.
+The bundled `agentNetworkData.js` fixture (151 roles across 18 departments) is
+a separate, illustrative org chart used ONLY for the Starmap. Each fixture
+node carries a roster-level `lifecycle` (`"governed"`/`"planned"` in the data
+shape, `RosterLifecycle` in `agent-network.types.ts`): `"governed"` when the
+node happens to match a registered AgentContract's budget, `"planned"`
+otherwise -- 25 and 126 respectively as of this writing (8 registered agents
+have no corresponding fixture node at all). This tag is NEVER labelled
+"governed" on screen -- see `lib/rosterVocabulary.js` -- precisely so it
+cannot be read as a second, competing governed count next to the live one.
+It is also not the contracts' `LifecycleStatus` (sandbox/active/retired,
+`src/skylize/contracts/base.py:98`; TS mirror:
+`website/src/lib/skylize/types.ts`). The Starmap shows CONTRACT-BACKED nodes
+by default; the SHOW PLANNED toggle reveals the rest.
 
 ## Run locally
 
