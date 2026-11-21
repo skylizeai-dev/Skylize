@@ -1,0 +1,42 @@
+# Demo-kit backing services: Postgres + Redis ONLY, under their own compose
+# project (`skylize-demokit`) on high loopback-only host ports, so the demo never
+# collides with -- or tears down -- the regular `infra/docker-compose.yml` stack.
+#
+# Driven by scripts/demo/cfo_test_local.py (`up` on every run, `down -v` on
+# `--teardown`). Credentials below are the PUBLIC local defaults that
+# infra/docker-compose.yml already ships (postgres `localdev`); nothing here is a
+# secret and nothing here is reachable off this machine (127.0.0.1 binds).
+name: skylize-demokit
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: skylize
+      POSTGRES_USER: skylize
+      POSTGRES_PASSWORD: localdev
+    ports: ["127.0.0.1:55432:5432"]
+    volumes:
+      - demokit_postgres_data:/var/lib/postgresql/data
+      # pgcrypto / pg_trgm / btree_gin, required before `alembic upgrade head`.
+      - ../../infra/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U skylize"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    ports: ["127.0.0.1:56379:6379"]
+    volumes:
+      - demokit_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  demokit_postgres_data:
+  demokit_redis_data:
