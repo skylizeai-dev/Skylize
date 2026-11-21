@@ -48,6 +48,8 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+import httpx
+
 log = logging.getLogger("skylize.stripe.actions")
 
 STRIPE_API_BASE = "https://api.stripe.com/v1"
@@ -59,6 +61,31 @@ STRIPE_API_BASE = "https://api.stripe.com/v1"
 _IDEMPOTENCY_KEY_NS = uuid5(NAMESPACE_URL, "skylize.stripe.refund_idempotency_key")
 
 _TIMEOUT_SECONDS = 30.0
+
+# Transport failures that happen BEFORE a byte leaves this process, so their
+# outcome is NOT ambiguous: nothing reached Stripe, nothing needs reconciling,
+# and the spend hold is free to go. EVERY OTHER transport error (ReadTimeout,
+# WriteError, RemoteProtocolError, ...) may happen after the request was sent,
+# so its outcome is unknown and it keeps the hold below.
+#
+# A SUPERSET of tools/builtin/hubspot_tools.py:84-88, which lists only the
+# first three. The other three are pre-send just as definitively (httpx
+# 0.28.1): ProxyError is a refused CONNECT to the proxy, UnsupportedProtocol
+# is an unusable URL scheme, and LocalProtocolError is OUR OWN request being
+# malformed - an illegal character in an interpolated `Stripe-Account` or
+# `Idempotency-Key` header would raise it. Without them, a call that never
+# left the process would hold a customer's budget for a refund that cannot
+# exist, which is exactly what `ToolOutcomeUnknownError` forbids
+# (tools/base.py). hubspot_tools.py's narrower tuple is a separate department's
+# file and is left alone; the two should be reconciled in one place later.
+_PRE_SEND_TRANSPORT_ERRORS = (
+    httpx.ConnectError,
+    httpx.ConnectTimeout,
+    httpx.PoolTimeout,
+    httpx.ProxyError,
+    httpx.UnsupportedProtocol,
+    httpx.LocalProtocolError,
+)
 
 
 class StripeActionError(RuntimeError):
@@ -119,6 +146,33 @@ class ChargeCurrencyMismatch(StripeActionError):
             f"refund tool is registered for {declared!r}; refusing rather "
             f"than silently refunding in the wrong currency or converting"
         )
+
+
+class StripeRefundOutcomeUnknown(StripeActionError):
+    """The refund POST may have been delivered, and no answer came back.
+
+    A transport error AFTER the request may have left this process, or a 5xx
+    from Stripe: either way the refund may or may not exist on the connected
+    account, and this module cannot tell. The tool handler surfaces it as
+    `ToolOutcomeUnknownError` (tools/builtin/stripe_tools.py), which under
+    owner ruling OD30 makes `ToolProxy.invoke` RETAIN the spend hold instead of
+    releasing it - the money may already be gone, so the ceiling must keep
+    binding until a reconciliation proves otherwise
+    (docs/architecture/idempotency_reconciliation_design.md).
+
+    NOT raised for a pre-send failure (`_PRE_SEND_TRANSPORT_ERRORS`): nothing
+    was sent, so there is nothing to reconcile and the hold is free to go. The
+    `Idempotency-Key` the request carries (`idempotency_key_for`) is what makes
+    the ambiguity resolvable at all - the same key identifies this attempt both
+    to Stripe's own deduplication and to the reconciliation job.
+
+    ALSO raised when Stripe ACCEPTED the refund (a 2xx) and its body cannot be
+    read. The refund then almost certainly DID happen and only its amount is
+    unknown here, which carries the same ledger consequence: the hold stays
+    until a reconciliation establishes the real settled amount. Releasing it in
+    that case would be worse than releasing on a timeout, because the money is
+    known to have moved rather than merely suspected to have.
+    """
 
 
 def idempotency_key_for(hitl_id: UUID, charge_id: str, amount_minor: int) -> UUID:
@@ -235,27 +289,71 @@ class StripeRefundExecutor:
 
         key = idempotency_key_for(hitl_id, charge_id, amount_minor)
 
-        async with self._client_factory() as client:
-            response = await client.post(
-                f"{self._api_base}/refunds",
-                headers={
-                    "Authorization": f"Bearer {self._secret_key}",
-                    "Stripe-Account": stripe_account_id,
-                    "Idempotency-Key": str(key),
-                },
-                data={"charge": charge_id, "amount": amount_minor},
-                timeout=_TIMEOUT_SECONDS,
-            )
+        # OWNER RULING OD30. The POST is the moment money may move, so its
+        # failures are split by WHETHER THE REQUEST COULD HAVE BEEN SENT, not
+        # by how they look: a pre-send connect failure is an ordinary failure,
+        # everything else is an OUTCOME UNKNOWN that must keep the spend hold.
+        # Before this, `client.post` had no try/except at all, so a transport
+        # timeout propagated raw and tools/proxy.py released the hold for a
+        # refund Stripe may well have made.
+        try:
+            async with self._client_factory() as client:
+                response = await client.post(
+                    f"{self._api_base}/refunds",
+                    headers={
+                        "Authorization": f"Bearer {self._secret_key}",
+                        "Stripe-Account": stripe_account_id,
+                        "Idempotency-Key": str(key),
+                    },
+                    data={"charge": charge_id, "amount": amount_minor},
+                    timeout=_TIMEOUT_SECONDS,
+                )
+        except _PRE_SEND_TRANSPORT_ERRORS as exc:
+            raise StripeActionError(
+                f"could not connect to Stripe to refund charge {charge_id!r}: "
+                f"{type(exc).__name__}. The request was NOT sent, so no refund "
+                "was created and the attempt is safe to make again."
+            ) from exc
+        except httpx.TransportError as exc:
+            raise StripeRefundOutcomeUnknown(
+                f"Stripe refund OUTCOME UNKNOWN for charge {charge_id!r}: "
+                f"{type(exc).__name__} after the request may have been sent. "
+                "The refund may or may not exist. Do NOT re-run this tool; "
+                f"reconcile on Idempotency-Key {key} first."
+            ) from exc
 
+        if response.status_code >= 500:
+            raise StripeRefundOutcomeUnknown(
+                f"Stripe refund OUTCOME UNKNOWN for charge {charge_id!r}: "
+                f"Stripe returned {response.status_code}; the refund may or may "
+                "not have been created. Do NOT re-run this tool; reconcile on "
+                f"Idempotency-Key {key} first."
+            )
         if response.status_code >= 400:
             raise StripeActionError(
                 f"Stripe refund failed ({response.status_code}): {response.text}"
             )
 
-        body = response.json()
-        return RefundOutcome(
-            refund_id=body["id"],
-            status=body["status"],
-            amount_minor=body["amount"],
-            currency=body["currency"],
-        )
+        # Parsing is inside the try for the same OD30 reason as the POST
+        # itself: at this point Stripe has ACCEPTED the refund, so an
+        # unreadable body is not a failed call, it is a successful call whose
+        # amount we cannot read. Letting ValueError/KeyError escape here would
+        # reach tools/proxy.py as an untyped exception and release the hold for
+        # money that certainly moved.
+        try:
+            body = response.json()
+            return RefundOutcome(
+                refund_id=body["id"],
+                status=body["status"],
+                amount_minor=body["amount"],
+                currency=body["currency"],
+            )
+        except (ValueError, KeyError, TypeError) as exc:
+            raise StripeRefundOutcomeUnknown(
+                f"Stripe ACCEPTED the refund of charge {charge_id!r} "
+                f"(HTTP {response.status_code}) but its body cannot be read: "
+                f"{type(exc).__name__}. The refund almost certainly happened "
+                "and its amount is unknown here, so the spend hold must stay. "
+                "Do NOT re-run this tool; reconcile on Idempotency-Key "
+                f"{key} first."
+            ) from exc
