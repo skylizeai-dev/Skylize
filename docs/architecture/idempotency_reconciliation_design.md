@@ -7,11 +7,13 @@ section 11).
 Owner ruling this document implements -- **OD30**: *a spend hold is released ONLY
 on reconciliation evidence, NEVER by the passage of time.*
 
-> OD30 itself is UNVERIFIED in the repository record. `docs/decisions/2026-11-07_owner_rulings.md`
-> is titled "Owner rulings OD1-OD15 (+ OD3-AMEND)" (line 1) and has been appended
-> to as far as OD26-OD27 (`docs/decisions/2026-11-07_owner_rulings.md:191`). OD30
-> appears nowhere in `docs/`. It reached this document through the run brief only.
-> Recording it is the first open item in section 11.
+> OD30 is recorded, at `docs/decisions/2026-11-07_owner_rulings.md:247`, but on
+> the branch `feat/decision-records-20261120` only -- not on `main`, where that
+> file is titled "Owner rulings OD1-OD15 (+ OD3-AMEND)" (line 1) and stops at
+> OD26-OD27 (`docs/decisions/2026-11-07_owner_rulings.md:191`). The recorded text
+> matches the ruling implemented here and adds that the implementation "is a
+> separate run; this is the decision record only". Landing that branch is the
+> first open item in section 11.
 
 Section map (the brief's ten required sections, plus section 2, which is the gap
 the whole document exists to answer): 1 problem statement, 2 the sweeper gap,
@@ -106,11 +108,16 @@ the hold and names reconciliation in the audit reason. The first is visible:
 `origin/feat/integrity-typed-outcome` adds a re-raise that preserves the subclass
 (diff at `src/skylize/tools/proxy.py:503-510` on that branch) while leaving the
 `_release_spend` call untouched -- so on that branch the hold is still released.
-**UNVERIFIED:** the second PR, the one that actually retains the hold, is not
-present on any branch readable from this worktree at `490b6dd`. Everything below
-assumes its contract rather than its code: on `ToolOutcomeUnknownError` the hold is
-NOT released, and the audit row carries `result="failed"` with a `result_reason`
-beginning with a stable prefix naming OUTCOME UNKNOWN, the retained hold and OD30.
+The second half, the one that actually retains the hold, now exists as two
+stacked branches from this run: `feat/timeout-hold-contract-45` (commit `9c4019c`,
+stacked on #45) and `feat/timeout-hold-contract-43` (commit `1e0d1e7`, stacked on
+#43), which carry byte-identical `src/skylize/tools/proxy.py` and
+`src/skylize/tools/base.py`. On `ToolOutcomeUnknownError` the hold is NOT released,
+and the audit row carries `result="failed"` with a `result_reason` beginning with
+the module constant `OUTCOME_UNKNOWN_HOLD_RETAINED` ("OUTCOME UNKNOWN, spend hold
+retained pending reconciliation (OD30);") followed by `reservation=<uuid>`.
+Everything below is written against that contract, which is now also the code on
+those two branches -- neither is merged.
 
 ---
 
@@ -766,17 +773,21 @@ sequenceDiagram
 
 **Nothing in this document is live.** There is no reconciliation job, no case
 store, no retention marker, no sweeper change, and no vendor read capability. The
-code cited is the code that exists today, which still releases the hold on every
-failure (`src/skylize/tools/proxy.py:494-505`). Going live requires owner approval
+code cited is `main`'s code, which still releases the hold on every failure
+(`src/skylize/tools/proxy.py:494-505`); the two stacked branches of this run change
+that one branch of behaviour and are not merged. Going live requires owner approval
 of the design and of each item below.
 
 ### Required follow-up work, in dependency order
 
-1. **Record OD30** in `docs/decisions/` alongside OD1-OD27. It is the premise of
-   this document and it is currently nowhere in the repository.
-2. **Land the retention change** in the proxy's handler-error branch (the second
-   stacked PR of this run), so an outcome-unknown failure keeps the hold and writes
-   the stable `result_reason` prefix.
+1. **Land the OD30 record on `main`.** It is recorded at
+   `docs/decisions/2026-11-07_owner_rulings.md:247`, but only on the branch
+   `feat/decision-records-20261120`; `main` still stops at OD26-OD27.
+2. **Land the retention change** in the proxy's handler-error branch, so an
+   outcome-unknown failure keeps the hold and writes the stable `result_reason`
+   prefix. Written and committed on `feat/timeout-hold-contract-45` (stacked on
+   #45) and `feat/timeout-hold-contract-43` (stacked on #43); both still need
+   review and merge, each after its own base PR.
 3. **Migration (NOT written here):** `spend_reservation.reconcile_required_at
    TIMESTAMPTZ NULL` with a column comment, plus the re-created
    `spend_reservation_sweep` partial index carrying `AND reconcile_required_at IS
@@ -788,14 +799,19 @@ of the design and of each item below.
    on `StripeRefundExecutor`, same auth shape as
    `get_charge_currency` (`src/skylize/app/stripe/actions.py:166-191`). No new
    credential, no new scope.
-6. **Classify Stripe failures as outcome-unknown.** Today every Stripe HTTP failure
-   becomes a flat `ToolExecutionError`
+6. **Classify Stripe failures as outcome-unknown.** On `main` every Stripe HTTP
+   failure becomes a flat `ToolExecutionError`
    (`src/skylize/tools/builtin/stripe_tools.py:192-193`, raised from
    `src/skylize/app/stripe/actions.py:250-253`), and
    `origin/feat/integrity-typed-outcome` wires the new type for HubSpot only (its
    diff touches `src/skylize/tools/builtin/hubspot_tools.py`, not
-   `stripe_tools.py`). Without this step the refund path never raises the error
-   this design triggers on, so the job would have nothing to reconcile.
+   `stripe_tools.py`). `feat/timeout-hold-contract-43` adds the missing
+   classification for the refund path: a new `StripeRefundOutcomeUnknown` on a
+   post-send transport error or a status >= 500, mapped to
+   `ToolOutcomeUnknownError` in the handler, with pre-send connect failures
+   deliberately left as ordinary failures. Until it merges the refund path never
+   raises the error this design triggers on, so the job would have nothing to
+   reconcile.
 7. **Reviewer surface for reconciliation verdicts** (8.3). The existing
    `HitlQueueService.approve` must not be reused.
 8. **The job itself**, plus its operator on-switch following
