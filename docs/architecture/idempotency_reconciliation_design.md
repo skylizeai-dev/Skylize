@@ -217,6 +217,29 @@ with vendor evidence, or a named human reviewer -- writes `commit` or `release`
 with a reason. Thresholds in the table are recommendations for owner review, not
 findings.
 
+### 2.3 Second-order consequence: the sweep frees the replay key too
+
+The sweeper does not only hand the budget back. `find_by_replay_key` returns a row
+only in `state IN ('held','committed')`, and its contract says so in words: a
+`released` or `expired` predecessor is "deliberately NOT returned -- those states
+free the key, and a replay that finds nothing here must place a real hold and
+spend for real" (`src/skylize/app/principal/spend.py:88-96`, implemented at
+`src/skylize/dal/spend_reservation.py:287-290`).
+
+So once a retained hold is swept to `expired`, the replay guard in
+`ToolProxy.invoke` no longer blocks a re-run of the very call whose outcome is
+unknown -- the re-run that `StripeRefundOutcomeUnknown`'s own message forbids
+("Do NOT re-run this tool"). The budget and the replay block are released by the
+same clock, in the same statement.
+
+One mitigation, and only one: the refund carries an `Idempotency-Key` derived from
+`hitl_id` (section 5), so Stripe itself would treat a re-run as a duplicate --
+inside its own idempotency window, which the module documents as 24 hours
+(`src/skylize/app/stripe/actions.py:37-41`). Past that window the key is honoured
+by nobody, and a swept retained hold would permit a genuine second refund. This is
+the sharpest argument for the marker column in 2.1: it keeps the row in `held`, so
+the replay index keeps blocking exactly while the outcome is unknown.
+
 ---
 
 ## 3. Trigger
@@ -794,7 +817,11 @@ of the design and of each item below.
    NULL`, plus the reconciliation case table of 4.3.
 4. **Sweeper predicate change:** add `AND reconcile_required_at IS NULL` to
    `src/skylize/dal/spend_reservation.py:415`. Until this lands, a retained hold is
-   still released by the clock and OD30 is still violated.
+   still released by the clock and OD30 is still violated -- and, per 2.3, the
+   replay key is freed with it, so the forbidden re-run becomes possible once
+   Stripe's own 24h idempotency window has passed. Nothing currently guards this:
+   `sweep_expired` has no production caller, so the defect is latent, and no test
+   or CI check would fail the day someone wires a scheduler.
 5. **Read-only vendor capability:** `list_refunds_for_charge` and `retrieve_refund`
    on `StripeRefundExecutor`, same auth shape as
    `get_charge_currency` (`src/skylize/app/stripe/actions.py:166-191`). No new
@@ -806,12 +833,29 @@ of the design and of each item below.
    `origin/feat/integrity-typed-outcome` wires the new type for HubSpot only (its
    diff touches `src/skylize/tools/builtin/hubspot_tools.py`, not
    `stripe_tools.py`). `feat/timeout-hold-contract-43` adds the missing
-   classification for the refund path: a new `StripeRefundOutcomeUnknown` on a
-   post-send transport error or a status >= 500, mapped to
-   `ToolOutcomeUnknownError` in the handler, with pre-send connect failures
-   deliberately left as ordinary failures. Until it merges the refund path never
-   raises the error this design triggers on, so the job would have nothing to
-   reconcile.
+   classification for the refund path, and the cases it now distinguishes are the
+   input vocabulary of this job:
+   - a post-send transport error, or a status >= 500: outcome unknown, hold kept;
+   - a 2xx whose body cannot be read: the refund DID happen and only its amount is
+     unknown, hold kept -- the job's task there is to establish the settled amount,
+     not whether it happened;
+   - a pre-send failure (`_PRE_SEND_TRANSPORT_ERRORS`, a documented superset of
+     HubSpot's narrower tuple): ordinary failure, hold released, no case opened;
+   - a 4xx other than those: a definitive refusal, hold released.
+   Until that branch merges, the refund path never raises the error this design
+   triggers on, so the job would have nothing to reconcile.
+10. **Decide the 429 case.** Stripe answers `429` with a `lock_timeout` error when
+   a concurrent request holds the SAME `Idempotency-Key`, which is genuinely
+   ambiguous, but `429 < 500` so today it releases the hold like any other 4xx.
+   Separating it from an ordinary rate-limit `429` needs the error body parsed;
+   treating every `429` as outcome-unknown would hold budget on plain throttling.
+   Left as an owner decision rather than guessed at.
+11. **One place for the pre-send error list.** `_PRE_SEND_TRANSPORT_ERRORS` now
+   exists twice with different contents -- six entries in
+   `src/skylize/app/stripe/actions.py`, three in
+   `src/skylize/tools/builtin/hubspot_tools.py:84-88`. The HubSpot copy is another
+   department's file and was deliberately not edited; the two should become one
+   shared definition, since both encode the same money-safety rule.
 7. **Reviewer surface for reconciliation verdicts** (8.3). The existing
    `HitlQueueService.approve` must not be reused.
 8. **The job itself**, plus its operator on-switch following
@@ -822,6 +866,23 @@ of the design and of each item below.
    "may NOT be higher" (`src/skylize/app/principal/spend.py:179-183`). Not required
    for this design -- the job routes that case to a human either way -- but the gap
    is real and belongs on the record.
+
+### Merge order, because the code already cites this file
+
+`docs/architecture/idempotency_reconciliation_design.md` is referenced from four
+code comments on the two companion branches (`src/skylize/app/stripe/actions.py`,
+`src/skylize/tools/base.py`, and twice in `src/skylize/tools/proxy.py`, including
+on `OUTCOME_UNKNOWN_HOLD_RETAINED`). If those branches land before this one,
+`main` ships four pointers to a file that does not exist. Land this PR first; it
+is documentation only, based on `main`, and depends on nothing.
+
+Separately, the two code branches must land in an order that respects what they
+share. `feat/integrity-typed-outcome` (#45) is the only base PR that touches
+`src/skylize/tools/base.py` and `src/skylize/tools/proxy.py`, so it has to land
+BEFORE either stacked PR normalizes those files on `main`; merging #45 on its own
+after `feat/timeout-hold-contract-43` has landed conflicts in both files, in the
+one region each adds. Verified by real merges in a throwaway clone: #45, then its
+stacked PR, then #43, then its stacked PR, is clean throughout.
 
 ### Owner decisions this document does not make
 
