@@ -6,6 +6,12 @@
 
 export type AuthorityLevel = "executive" | "vp" | "director" | "manager" | "worker";
 export type NodeStatus = "executing" | "idle" | "queued" | "error";
+/**
+ * Roster-level lifecycle (owner ruling OD6, proposal). NOT the contracts'
+ * `LifecycleStatus` ("sandbox" | "active" | "retired"): a "planned" agent has no
+ * AgentContract to carry one. "governed" = a registered AgentContract exists.
+ */
+export type RosterLifecycle = "governed" | "planned";
 
 export interface ToolNode {
   id: string;
@@ -30,6 +36,8 @@ export interface AgentNode {
    * as governance facts.
    */
   budgetSource: "contract" | "level_default_unimplemented";
+  /** Derived from `budgetSource`: "contract" -> "governed", else "planned". */
+  lifecycle: RosterLifecycle;
   tokensUsed: number;
   tasksCompleted: number;
   /** Org reporting line. `null` only for the single root (CEO). */

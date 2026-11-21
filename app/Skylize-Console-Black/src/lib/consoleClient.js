@@ -118,7 +118,7 @@ function orNull(value) {
 //
 // The LIVE registry, which is the whole point: the console shipped a generated
 // fixture of 151 agents across 18 departments, and the governed registry holds
-// 23 across 9 (src/skylize/contracts/mvp/__init__.py, ALL_MVP_CONTRACTS).
+// 33 across 9 at 490b6dd4 (len(ALL_MVP_CONTRACTS), src/skylize/contracts/mvp/__init__.py).
 // `authority_level` is contracts/base.py `AuthorityLevel`
 // (executive|vp|director|manager|worker) -- the same five the UI already
 // renders, so no remapping is needed or wanted.
