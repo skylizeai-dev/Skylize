@@ -6,10 +6,19 @@ Command, Starmap, Workflows, Approvals, Analytics, Models, Knowledge,
 Integrations, Developers, Audit Log, Security, Team, Billing, Settings.
 
 NOTE ON AGENT COUNTS. The bundled `agentNetworkData.js` fixture describes 151
-agents across 18 departments and is now used ONLY for the Starmap's geometry.
-The governed registry holds **23 agents across 9 departments**
-(`src/skylize/contracts/mvp/__init__.py`, `ALL_MVP_CONTRACTS`), and every count
-an operator reads comes from `GET /api/v1/agents` at runtime.
+agents across 18 departments and is now used ONLY for the Starmap's geometry
+and the Dashboard headline. The governed registry holds **33 agents across 9
+departments** at 490b6dd4 (`len(ALL_MVP_CONTRACTS)` in
+`src/skylize/contracts/mvp/__init__.py`), and the GOVERNED AGENTS tile reads
+`GET /api/v1/agents` at runtime.
+
+ROSTER LIFECYCLE (owner ruling OD6, proposal). Each fixture node carries a
+roster-level `lifecycle`: `"governed"` when the agent has a registered
+AgentContract, `"planned"` when it is spec-only. This is NOT the contracts'
+`LifecycleStatus` (sandbox/active/retired). At 490b6dd4 the fixture holds 25
+governed and 126 planned (8 registered agents are code-only and absent from the
+fixture). The Starmap shows governed agents by default; the SHOW PLANNED toggle
+reveals the rest. The Dashboard headline derives every number from the fixture.
 
 ## Run locally
 
@@ -92,8 +101,8 @@ They need product/backend decisions first, not wiring.
 ## Structure
 
 - `src/data/agentNetworkData.js` — the generated 151-agent / 18-department
-  fixture. STARMAP GEOMETRY ONLY; it is not the governed roster (see the note
-  at the top).
+  fixture (regenerate with `node scripts/gen_agent_network_data.js`; never
+  hand-edit). It is not the governed registry (see the note at the top).
 - `src/lib/consoleClient.js` — every backend call except autonomy, aimed at the
   BFF. Returns only fields the backend actually sends.
 - `src/hooks/useConsoleState.js` — all app state + the view-model every screen reads from (`vm`).

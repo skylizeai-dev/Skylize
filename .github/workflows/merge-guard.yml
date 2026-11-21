@@ -8,15 +8,28 @@ name: merge-guard
 # opened/synchronize/reopened) so the check is re-evaluated whenever the title
 # is changed or `hold` is added/removed; otherwise a stale result would stick.
 #
-# Least privilege: everything needed is in the event payload. No checkout, no
-# secrets, no third-party actions. Title and labels reach the script via env:
-# only (never interpolated into run:), because the title is attacker-controlled.
+# Least privilege: everything needed for the check above is in the event
+# payload. No checkout, no secrets, no third-party actions. Title and labels
+# reach the script via env: only (never interpolated into run:), because the
+# title is attacker-controlled.
+#
+# Added (2026-11-20, sky-hyg-20261120): a PR whose body contains a
+# `BLOCKED-BY: OD-<n>` or `BLOCKED-BY: DQ-<id>` marker fails unless that
+# decision's own block under docs/decisions/ says `Status: ... CLOSED`.
+# Additive: when no marker is present this adds nothing, so every existing
+# merge-guard scenario is unchanged. This needs read-only repo content, so it
+# checks out ONLY the PR's BASE commit, never the PR's own head -- a PR
+# cannot edit docs/decisions on its own branch to mark its own blocker closed
+# and talk its way past this. That is the one added permission: `contents:
+# read`. The PR body still never reaches `run:` by interpolation, only by
+# `env:`, same rule as the title.
 
 on:
   pull_request:
     types: [opened, edited, synchronize, reopened, labeled, unlabeled]
 
-permissions: {}
+permissions:
+  contents: read
 
 jobs:
   merge-guard:
@@ -26,6 +39,7 @@ jobs:
     env:
       PR_TITLE: ${{ github.event.pull_request.title }}
       HAS_HOLD: ${{ contains(github.event.pull_request.labels.*.name, 'hold') }}
+      PR_BODY: ${{ github.event.pull_request.body }}
     steps:
       - name: Block do-not-merge titles and hold label
         run: |
@@ -43,3 +57,65 @@ jobs:
             exit 1
           fi
           echo "OK: no do-not-merge title and no hold label"
+
+      - name: Extract BLOCKED-BY markers from the PR body
+        id: markers
+        run: |
+          printf '%s' "$PR_BODY" > /tmp/pr_body.txt
+          grep -ioE 'BLOCKED-BY:[[:space:]]*(OD-?[0-9]+|DQ-?[0-9A-Za-z]+)' /tmp/pr_body.txt \
+            | sed -E 's/^BLOCKED-BY:[[:space:]]*//I' \
+            | sort -u > /tmp/markers.txt || true
+          if [[ -s /tmp/markers.txt ]]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout base commit (read-only, never the PR's own head)
+        if: steps.markers.outputs.found == 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+
+      - name: Block PRs that reference a decision not recorded CLOSED
+        if: steps.markers.outputs.found == 'true'
+        run: |
+          failed=0
+          while IFS= read -r id; do
+            [[ -z "$id" ]] && continue
+            norm=$(echo "$id" | tr '[:lower:]' '[:upper:]' | tr -d '-')
+            bold="**${norm}**"
+            hit=$(grep -rlF -- "$bold" docs/decisions/ 2>/dev/null || true)
+            if [[ -z "$hit" ]]; then
+              echo "::error::merge-guard: $id referenced via BLOCKED-BY but not found under docs/decisions/ (not recorded, treated as open)"
+              failed=1
+              continue
+            fi
+            closed=0
+            for f in $hit; do
+              if python3 - "$f" "$bold" <<'PYEOF'
+          import re
+          import sys
+
+          path, marker = sys.argv[1], sys.argv[2]
+          text = open(path, encoding="utf-8").read().replace("\r\n", "\n")
+          for block in text.split("\n---\n"):
+              if marker in block and re.search(r"(?i)status:.*closed", block):
+                  sys.exit(0)
+          sys.exit(1)
+          PYEOF
+              then
+                closed=1
+              fi
+            done
+            if [[ "$closed" -ne 1 ]]; then
+              echo "::error::merge-guard: $id referenced via BLOCKED-BY is recorded under docs/decisions/ but not CLOSED"
+              failed=1
+            else
+              echo "OK: $id is recorded CLOSED, not blocking"
+            fi
+          done < /tmp/markers.txt
+          if [[ "$failed" -ne 0 ]]; then
+            exit 1
+          fi
