@@ -34,9 +34,17 @@ export const MYDAY_SESSION_SECRET_MIN_LENGTH = 32;
  * so a message is safe to log verbatim.
  */
 export class MyDayConfigError extends Error {
-  constructor(message: string) {
+  /**
+   * EVERY problem found, one entry per failed check, each naming variables
+   * only. `getMyDayConfig` checks all variables before throwing, so an operator
+   * sees the whole list at once instead of fixing one variable per redeploy.
+   */
+  readonly problems: readonly string[];
+
+  constructor(message: string, problems?: readonly string[]) {
     super(message);
     this.name = "MyDayConfigError";
+    this.problems = problems ?? [message];
   }
 }
 
@@ -101,21 +109,39 @@ export function getMyDayConfig(): MyDayConfig {
   assertServerOnly();
   if (myDayConfig) return myDayConfig;
 
-  const rawUrl = readServerEnv("SKYLIZE_BACKEND_URL");
-  let parsed: URL;
-  try {
-    parsed = new URL(rawUrl);
-  } catch {
-    // OD21: name the variable, never echo its value into a log line.
-    throw new MyDayConfigError("SKYLIZE_BACKEND_URL is not a valid URL.");
-  }
-  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
-    throw new MyDayConfigError("SKYLIZE_BACKEND_URL must be an http(s) URL.");
+  // Every check runs; failures are COLLECTED and thrown together at the end as
+  // one MyDayConfigError (single problem: its message unchanged; several: one
+  // numbered message plus `problems`). A boot-time hook that would surface this
+  // before the first request needs a site-wide instrumentation.ts, which is
+  // out of scope here (it would also run for the Console).
+  const problems: string[] = [];
+  const read = (name: string): string | null => {
+    try {
+      return readServerEnv(name);
+    } catch (error) {
+      if (!(error instanceof MyDayConfigError)) throw error;
+      problems.push(error.message);
+      return null;
+    }
+  };
+
+  const rawUrl = read("SKYLIZE_BACKEND_URL");
+  if (rawUrl !== null) {
+    let parsed: URL | null = null;
+    try {
+      parsed = new URL(rawUrl);
+    } catch {
+      // OD21: name the variable, never echo its value into a log line.
+      problems.push("SKYLIZE_BACKEND_URL is not a valid URL.");
+    }
+    if (parsed !== null && parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+      problems.push("SKYLIZE_BACKEND_URL must be an http(s) URL.");
+    }
   }
 
-  const cookieSecret = readServerEnv("SKYLIZE_MYDAY_SESSION_SECRET");
-  if (cookieSecret.length < MYDAY_SESSION_SECRET_MIN_LENGTH) {
-    throw new MyDayConfigError(
+  const cookieSecret = read("SKYLIZE_MYDAY_SESSION_SECRET");
+  if (cookieSecret !== null && cookieSecret.length < MYDAY_SESSION_SECRET_MIN_LENGTH) {
+    problems.push(
       `SKYLIZE_MYDAY_SESSION_SECRET must be at least ${MYDAY_SESSION_SECRET_MIN_LENGTH} ` +
         "characters of high-entropy random data. It is SHA-256-derived into the " +
         "32-byte AES-256-GCM key that encrypts My Day session cookies, and must " +
@@ -132,13 +158,26 @@ export function getMyDayConfig(): MyDayConfig {
   // enforces its presence. The message names the variables, NEVER a value.
   const consoleSecretName = "SKYLIZE_CONSOLE_SESSION_SECRET";
   const consoleSecret = process.env[consoleSecretName]; // computed: no inlining
-  if (consoleSecret !== undefined && consoleSecret.trim() === cookieSecret) {
-    throw new MyDayConfigError(
+  if (
+    cookieSecret !== null &&
+    consoleSecret !== undefined &&
+    consoleSecret.trim() === cookieSecret
+  ) {
+    problems.push(
       "SKYLIZE_MYDAY_SESSION_SECRET must not equal SKYLIZE_CONSOLE_SESSION_SECRET. " +
         "The My Day cookie carries a real bearer token pair; sharing the Console " +
         "cookie secret would defeat the cryptographic isolation between the two " +
         "sessions. Generate a distinct high-entropy secret for each.",
     );
+  }
+
+  if (problems.length > 0 || rawUrl === null || cookieSecret === null) {
+    const message =
+      problems.length === 1
+        ? problems[0]
+        : `My Day configuration has ${problems.length} problems: ` +
+          problems.map((p, i) => `(${i + 1}) ${p}`).join(" ");
+    throw new MyDayConfigError(message, problems);
   }
 
   myDayConfig = {

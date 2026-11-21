@@ -2,19 +2,67 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from typing import Final
 from uuid import UUID, uuid4
 
 import logging
 
 from ...config import Settings
-from ...dal.ports import UserRepository, UserRow
+from ...dal.ports import RefreshTokenRow, UserRepository, UserRow
 from ..principal.provider import PrincipalProvisioner
 from .passwords import hash_password, verify_password
 from .tokens import InvalidTokenError, create_access_token, create_refresh_token, decode_token
 
 VALID_ROLES = frozenset({"owner", "admin", "operator", "viewer"})
+
+#: Refresh-token replay grace window, in seconds (design doc 9.0.2). When a
+#: refresh is refused because its token was ALREADY CONSUMED by its owner, the
+#: time since that consume decides what the refusal means:
+#:   * less than this: the benign concurrent refresh - two tabs, or two BFF
+#:     instances, presenting one cookie at once, and the other request won the
+#:     rotation. Plain refusal, no log, no write.
+#:   * this long or longer: a replay worth noticing (a stolen token, a lost
+#:     rotation response, a logged-out token). ONE detection-only WARNING
+#:     `auth_refresh_replay_after_grace`, still a plain refusal, and NOTHING is
+#:     revoked (owner ruling R-B, the PR #47 split: its user-wide revocation
+#:     was removed; per-family revocation is a separate change, design doc 7.0).
+REFRESH_REUSE_GRACE_SECONDS: Final = 10
+
+_log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class RefreshReplay:
+    """A refused refresh whose token its owner had ALREADY consumed - by a
+    rotation or by logout; `revoked_at` does not say which."""
+
+    #: `now - revoked_at`: how long ago the presented token was consumed.
+    consumed_age: timedelta
+
+    @property
+    def within_grace(self) -> bool:
+        return self.consumed_age < timedelta(seconds=REFRESH_REUSE_GRACE_SECONDS)
+
+
+def classify_refused_refresh(
+    row: RefreshTokenRow | None, sub: UUID, now: datetime
+) -> RefreshReplay | None:
+    """Classify a refresh the store refused. Pure: no I/O, no side effect.
+
+    None means "not a replay": the token is unknown, its row belongs to a user
+    other than `sub`, it was never consumed, or it is past its own expiry. The
+    plain refusal is all there is to it. Otherwise the token's owner consumed
+    it earlier, and the `RefreshReplay` says how long ago, inside or past the
+    grace window.
+    """
+    if row is None or row.user_id != sub or row.revoked_at is None:
+        return None
+    if row.expires_at <= now:
+        return None
+    return RefreshReplay(consumed_age=now - row.revoked_at)
 
 
 class DuplicateEmailError(Exception):
@@ -53,10 +101,14 @@ class UserAuthService:
         repo: UserRepository,
         settings: Settings,
         provisioner: PrincipalProvisioner | None = None,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._repo = repo
         self._settings = settings
         self._provisioner = provisioner
+        # Used only to age a consumed refresh token against the replay grace
+        # window (`classify_refused_refresh`); injectable so tests need not sleep.
+        self._clock: Callable[[], datetime] = clock or (lambda: datetime.now(timezone.utc))
 
     async def register(
         self,
@@ -213,20 +265,52 @@ class UserAuthService:
     async def refresh(self, *, refresh_token: str) -> LoginResult:
         jti, sub = self._refresh_claims(refresh_token)
 
-        # Rotate. `consume_refresh_token` is ONE conditional write: of two
-        # concurrent refreshes with the same token, exactly one wins and the other
-        # is refused. The former read-then-revoke let both through and minted two
-        # live token families (design doc 1.0.2). Ownership (`sub` must own the
-        # `jti` row) is inside the same condition, so a mismatched token is
-        # refused WITHOUT consuming the other user's row.
-        if not await self._repo.consume_refresh_token(jti, sub):
-            raise InvalidCredentialsError("refresh token revoked, expired, or not found")
-
+        # The user is read BEFORE the rotation (it used to be read after the
+        # consume) so that the consume and the insert of the new token can be one
+        # transaction (design doc 9.0.1, Round 2 N1). Consequence: an inactive or
+        # deleted user's token is refused without being consumed - harmless, every
+        # later attempt is refused by this same check.
         user = await self._repo.get_by_id(sub)
         if user is None or not user.is_active:
             raise InvalidCredentialsError("user not found or inactive")
 
-        return await self._mint_pair(user)
+        # Rotate. `rotate_refresh_token` consumes with ONE conditional write: of
+        # two concurrent refreshes with the same token, exactly one wins and the
+        # other is refused. The former read-then-revoke let both through and
+        # minted two live token families (design doc 1.0.2). Ownership (`sub`
+        # must own the `jti` row) is inside the same condition, so a mismatched
+        # token is refused WITHOUT consuming the other user's row. The consume
+        # and the INSERT of the new row commit together or not at all.
+        pair, token_id, expires_at = self._new_pair(user)
+        if await self._repo.rotate_refresh_token(
+            old_token_id=jti, user_id=sub, new_token_id=token_id, new_expires_at=expires_at
+        ):
+            return pair
+
+        await self._on_refused_refresh(jti, sub)
+        raise InvalidCredentialsError("refresh token revoked, expired, or not found")
+
+    async def _on_refused_refresh(self, jti: UUID, sub: UUID) -> None:
+        """Replay detection for a refused refresh - DETECTION ONLY (design doc 9.0.2).
+
+        Not a replay, or a replay inside the grace window (the benign
+        concurrent refresh): nothing at all. A replay past the grace window: one
+        structured WARNING. Either way the caller raises the same
+        `InvalidCredentialsError`, and nothing is written here: no refresh
+        token of this or any other user is revoked.
+        """
+        replay = classify_refused_refresh(
+            await self._repo.get_refresh_token(jti), sub, self._clock()
+        )
+        if replay is None or replay.within_grace:
+            return
+        # The after-grace action: detection only. Ids, the age and the window,
+        # never the token or any part of it.
+        _log.warning(
+            "auth_refresh_replay_after_grace user_id=%s token_id=%s "
+            "consumed_age_seconds=%d grace_seconds=%d action=none",
+            sub, jti, int(replay.consumed_age.total_seconds()), REFRESH_REUSE_GRACE_SECONDS,
+        )
 
     async def logout(self, *, refresh_token: str) -> bool:
         """Revoke the refresh token's own row. Never raises for a bad token.
@@ -249,6 +333,15 @@ class UserAuthService:
     # ── internal ──────────────────────────────────────────────────────────────
 
     async def _mint_pair(self, user: UserRow) -> LoginResult:
+        pair, token_id, expires_at = self._new_pair(user)
+        await self._repo.store_refresh_token(
+            token_id=token_id, user_id=user.user_id, expires_at=expires_at
+        )
+        return pair
+
+    def _new_pair(self, user: UserRow) -> tuple[LoginResult, UUID, datetime]:
+        """Sign a fresh access/refresh pair. Persists NOTHING: the caller stores
+        the refresh row (login) or rotates onto it (refresh)."""
         secret = self._settings.jwt_secret
         access = create_access_token(
             user_id=str(user.user_id),
@@ -267,7 +360,5 @@ class UserAuthService:
         expires_at = datetime.now(timezone.utc) + timedelta(
             days=self._settings.jwt_refresh_token_ttl_days
         )
-        await self._repo.store_refresh_token(
-            token_id=token_id, user_id=user.user_id, expires_at=expires_at
-        )
-        return LoginResult(access_token=access, refresh_token=refresh, user=user)
+        pair = LoginResult(access_token=access, refresh_token=refresh, user=user)
+        return pair, token_id, expires_at
