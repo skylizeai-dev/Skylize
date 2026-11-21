@@ -86,3 +86,55 @@ describe("getMyDayConfig secret validation", () => {
     expect(getMyDayConfig().cookieSecret).toBe(MYDAY_SECRET);
   });
 });
+
+describe("getMyDayConfig reports EVERY problem at once", () => {
+  function thrownError(fn: () => unknown): InstanceType<typeof Error> & { problems?: string[] } {
+    try {
+      fn();
+    } catch (error) {
+      return error as Error & { problems?: string[] };
+    }
+    throw new Error("expected getMyDayConfig to throw");
+  }
+
+  it("a bad URL AND a short secret are both reported in one error, naming no value", async () => {
+    const short = "too-short-secret";
+    vi.stubEnv("SKYLIZE_BACKEND_URL", "not a url at all");
+    vi.stubEnv("SKYLIZE_MYDAY_SESSION_SECRET", short);
+    vi.stubEnv("SKYLIZE_CONSOLE_SESSION_SECRET", CONSOLE_SECRET);
+    vi.resetModules();
+    const { getMyDayConfig, MyDayConfigError } = await import("./myday-config");
+
+    const error = thrownError(getMyDayConfig);
+    expect(error).toBeInstanceOf(MyDayConfigError);
+    expect(error.problems).toHaveLength(2);
+    expect(error.message).toMatch(/2 problems/);
+    expect(error.message).toMatch(/SKYLIZE_BACKEND_URL is not a valid URL/);
+    expect(error.message).toMatch(/at least 32/);
+    expect(error.message).not.toContain(short);
+    expect(error.message).not.toContain("not a url at all");
+  });
+
+  it("both variables missing: both named in one error", async () => {
+    vi.stubEnv("SKYLIZE_BACKEND_URL", "");
+    vi.stubEnv("SKYLIZE_MYDAY_SESSION_SECRET", "");
+    vi.resetModules();
+    const { getMyDayConfig } = await import("./myday-config");
+
+    const error = thrownError(getMyDayConfig);
+    expect(error.problems).toHaveLength(2);
+    expect(error.message).toMatch(/SKYLIZE_BACKEND_URL/);
+    expect(error.message).toMatch(/SKYLIZE_MYDAY_SESSION_SECRET/);
+  });
+
+  it("a single problem keeps its original message and is the only entry", async () => {
+    vi.stubEnv("SKYLIZE_BACKEND_URL", "ftp://backend.test");
+    vi.stubEnv("SKYLIZE_MYDAY_SESSION_SECRET", MYDAY_SECRET);
+    vi.resetModules();
+    const { getMyDayConfig } = await import("./myday-config");
+
+    const error = thrownError(getMyDayConfig);
+    expect(error.message).toBe("SKYLIZE_BACKEND_URL must be an http(s) URL.");
+    expect(error.problems).toEqual(["SKYLIZE_BACKEND_URL must be an http(s) URL."]);
+  });
+});
