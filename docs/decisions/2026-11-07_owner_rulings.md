@@ -245,6 +245,10 @@ true original decision date is UNKNOWN to this run; this entry is NOT backdated 
 2026-11-14 or earlier, and is filed after OD27 (numeric order is out of sequence with
 file order) because that is the truth of when it was written down.
 
+Status: CLOSED. Implemented in #42 (merged e1d4978b327e925bc07aa8c8a6bbc695981e2e0e, 2026-11-21).
+
+---
+
 ## 2026-11-20 (OD28-OD31)
 
 decided 2026-11-20 in owner chat; first recorded 2026-11-20 by the sky-hyg2-20261120
