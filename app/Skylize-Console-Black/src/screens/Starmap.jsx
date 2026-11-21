@@ -11,11 +11,20 @@ export default function Starmap({ vm }) {
           <div style={sx('display:flex;align-items:center;gap:8px;min-width:188px;justify-content:center')}>
             <span style={sx(`width:8px;height:8px;border-radius:2px;background: ${vm.starColor};box-shadow:0 0 8px ${vm.starColor}`)}></span>
             <span style={sx('font-size:12.5px;font-weight:600;color:#E9EBF2;white-space:nowrap')}>{vm.starDeptName}</span>
-            <span style={sx("font-family:'Geist Mono',ui-monospace,monospace;font-size:10px;color:#77809A;font-variant-numeric:tabular-nums")}>{vm.starIdxLabel}/15</span>
+            <span style={sx("font-family:'Geist Mono',ui-monospace,monospace;font-size:10px;color:#77809A;font-variant-numeric:tabular-nums")}>{vm.starIdxLabel}/{vm.starDeptTotal}</span>
           </div>
           <Interactive as="button" onClick={vm.starNext} aria-label="Next department" style={sx('display:flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:6px;border:none;background:transparent;color:#8B93A7;cursor:pointer;transition:color .15s,background-color .15s')} hoverStyle={sx('color:#E9EBF2;background-color:rgba(255,255,255,0.06)')}><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M6 3.5L10.5 8L6 12.5"></path></svg></Interactive>
         </div>
         <span style={sx("font-family:'Geist Mono',ui-monospace,monospace;font-size:10px;letter-spacing:0.06em;color:#77809A;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:260px")}>{vm.starTagline}</span>
+        {/* OD6: governed agents by default; planned (no contract) on request. */}
+        <Interactive
+          as="button"
+          onClick={vm.toggleShowPlanned}
+          aria-pressed={vm.showPlanned}
+          title={vm.showPlanned ? 'Showing every roster agent, including planned ones with no contract' : 'Showing governed agents only (registered AgentContract)'}
+          style={sx("display:flex;align-items:center;gap:6px;height:26px;padding:0 10px;border:1px solid #262D40;border-radius:6px;background:transparent;color:#9AA1B2;font-family:'Geist Mono',ui-monospace,monospace;font-size:9.5px;letter-spacing:0.08em;cursor:pointer;white-space:nowrap;transition:border-color .15s,color .15s")}
+          hoverStyle={sx('border-color:var(--accent,#3D6BFF);color:#E9EBF2')}
+        >{vm.rosterToggleLabel}<span style={sx('color:#616A82')}>{vm.showPlanned ? '· HIDE PLANNED' : '· SHOW PLANNED'}</span></Interactive>
         <div style={sx("margin-left:auto;display:flex;align-items:center;gap:14px;font-family:'Geist Mono',ui-monospace,monospace;font-size:9px;letter-spacing:0.1em;color:#8B93A7")}>
           <span style={sx('display:flex;align-items:center;gap:5px')}><span style={sx(`width:9px;height:9px;border-radius:50%;background: ${vm.starColor};box-shadow:0 0 7px ${vm.starColor}`)}></span>CORE</span>
           <span style={sx('display:flex;align-items:center;gap:5px')}><span style={sx(`width:7px;height:7px;border-radius:50%;background: ${vm.starColor}`)}></span>DIRECTORS</span>
@@ -45,7 +54,7 @@ export default function Starmap({ vm }) {
             </div>
             <div style={sx('flex:1;overflow-y:auto')}>
               {vm.starEmpty && (
-                <div style={sx("padding:20px 14px;font-family:'Geist Mono',ui-monospace,monospace;font-size:10px;line-height:1.7;color:#616A82")}>No agents stationed in this department yet.</div>
+                <div style={sx("padding:20px 14px;font-family:'Geist Mono',ui-monospace,monospace;font-size:10px;line-height:1.7;color:#616A82")}>{vm.starEmptyText}</div>
               )}
               {vm.starList.map((a, i) => (
                 <Interactive key={i} onClick={a.click} style={sx(`display:flex;align-items:center;gap:9px;padding:7px 12px;border-bottom:1px solid #12151F;cursor:pointer;background: ${a.bg};transition:background-color .12s`)} hoverStyle={sx('background-color:rgba(255,255,255,0.03)')}>

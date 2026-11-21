@@ -9,7 +9,7 @@ export default function Dashboard({ vm }) {
         <div style={sx('position:absolute;inset:0;background:radial-gradient(600px 260px at 78% 30%, color-mix(in oklab, var(--accent,#3D6BFF) 12%, transparent), transparent 70%);pointer-events:none')}></div>
         <div style={sx('position:relative;flex:1;min-width:0;display:flex;flex-direction:column;justify-content:center;gap:12px;max-width:520px')}>
           <div style={sx("font-family:'Geist Mono',ui-monospace,monospace;font-size:9.5px;letter-spacing:0.18em;color:color-mix(in oklab,var(--accent,#3D6BFF) 80%,#FFFFFF)")}>AUTONOMOUS ORGANIZATION · ONLINE</div>
-          <h1 style={sx('margin:0;font-size:24px;font-weight:600;letter-spacing:-0.02em;line-height:1.25')}>Good evening, Operator.<br /><span style={sx('color:#8B93A7;font-weight:500')}>151 agents are on station across 15 departments.</span></h1>
+          <h1 style={sx('margin:0;font-size:24px;font-weight:600;letter-spacing:-0.02em;line-height:1.25')}>Good evening, Operator.<br /><span style={sx('color:#8B93A7;font-weight:500')}>{vm.heroHeadline}</span></h1>
           <div style={sx('display:flex;align-items:center;gap:8px;margin-top:6px;height:42px;padding:0 6px 0 14px;border:1px solid #262D40;border-radius:8px;background:rgba(7,8,12,0.7);transition:border-color .15s')}>
             <span style={sx('font-family:\'Geist Mono\',ui-monospace,monospace;font-size:12px;color:var(--accent,#3D6BFF)')}>❯</span>
             <input

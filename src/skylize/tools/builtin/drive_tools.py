@@ -90,26 +90,51 @@ _FILES_URL = "https://www.googleapis.com/drive/v3/files"
 #:   * `create_file` now carries a PRE-GENERATED file id, so DRIVE itself rejects a
 #:     duplicate with 409 — see `_PREGENERATED_ID_DOC` and `create_file`. This verb
 #:     is fixed.
-#:   * `create_permission` retries UNCHANGED, and its residual risk is stated rather
-#:     than papered over. `[UNVERIFIED]` 2026-09-09: Google does NOT document what a
-#:     repeated identical `permissions.create` does — whether it adds a second
-#:     permission entry or updates the one that exists. The reference page documents
-#:     only that "Concurrent permissions operations on the same file aren't
-#:     supported; only the last update is applied", which is a statement about
-#:     concurrency, not about duplicate-grant semantics, and it must not be read as
-#:     an idempotency guarantee it does not make.
+#:   * `create_permission` is NO LONGER retried on a 5xx or on a timeout / transport
+#:     failure that can occur after the request was sent. It has its own predicate
+#:     (`_is_retryable_share`, below) and does not use `_RETRYABLE_STATUS` at all.
+#:     Ruling: OD25 (asserted in the run brief; not recorded in docs/decisions) -
+#:     same rule as OD4 (docs/decisions/2026-11-07_owner_rulings.md:31). The shape
+#:     is the HubSpot one (`hubspot_tools.py`, `_is_retryable_create` and the
+#:     create-contact handler): the ambiguous failure is SURFACED as a
+#:     `ToolExecutionError` whose message says "OUTCOME UNKNOWN" and tells the
+#:     caller to verify before re-issuing, instead of being retried blind.
 #:
-#:     WHY THAT IS TOLERATED HERE, deliberately and narrowly: the worst case is a
-#:     SECOND permission row granting THE SAME principal THE SAME role that the
-#:     governance gate already authorized. It cannot widen access beyond the grant —
-#:     `_share_handler` sends `grant.grantee`/`grant.role`, never the raw input — so
-#:     a duplicate is untidy, not a confidentiality event. Contrast `create_file`,
-#:     where a duplicate is a second real document delivered to a client. Closing
-#:     this would need a `permissions.list` read-before-write, which `drive.file`
-#:     can perform but which costs a round trip on every share to remove an effect
-#:     with no security consequence. Left open ON PURPOSE, and recorded so a future
-#:     author decides it with the same facts rather than rediscovering them.
+#:     An earlier revision of this comment left the retry in place ON PURPOSE,
+#:     arguing that a duplicate grant gives the same principal the same role and is
+#:     therefore "untidy, not a confidentiality event". That reasoning is
+#:     superseded. The facts it rested on are unchanged and still worth carrying:
+#:     `[UNVERIFIED]` 2026-09-09, Google does NOT document what a repeated identical
+#:     `permissions.create` does — whether it adds a second permission entry or
+#:     updates the one that exists. The reference page documents only that
+#:     "Concurrent permissions operations on the same file aren't supported; only
+#:     the last update is applied", which is a statement about concurrency, not
+#:     about duplicate-grant semantics, and must not be read as an idempotency
+#:     guarantee it does not make. What the earlier reasoning did not weigh is that
+#:     each accepted `permissions.create` for a user may also send that user a share
+#:     notification email (`[UNVERIFIED]`: not re-checked against Google's reference
+#:     in this pass), so a blind retry is visible outside the customer's Drive.
+#:
+#:     WHAT THIS IS NOT, stated so nobody reads more into it: it is MESSAGE-LEVEL
+#:     only, exactly like HubSpot today. There is no `permissions.list`
+#:     read-before-write, no idempotency key (Drive offers none for this endpoint),
+#:     and no structured "outcome unknown" error type — the signal is the message
+#:     text. This connector also exposes no tool that lists a file's permissions,
+#:     so the verification the message asks for happens outside this module. A
+#:     caller that ignores the message and re-runs the tool can still duplicate.
 _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+
+#: Transport errors raised strictly BEFORE any request byte is written, so the
+#: share provably did not reach Drive and retrying cannot duplicate it. Same tuple,
+#: same evidence, as `hubspot_tools.py` `_PRE_SEND_TRANSPORT_ERRORS` (httpcore
+#: 1.0.9: connect / TLS setup, and the pool wait that precedes the send). Every
+#: OTHER transport error (`ReadTimeout`, `WriteTimeout`, `RemoteProtocolError`, ...)
+#: can happen after the request was sent, so its outcome is ambiguous.
+_PRE_SEND_TRANSPORT_ERRORS = (
+    httpx.ConnectError,
+    httpx.ConnectTimeout,
+    httpx.PoolTimeout,
+)
 
 #: Google's own statement of the guarantee `create_file` relies on
 #: (`https://developers.google.com/workspace/drive/api/guides/manage-uploads`,
@@ -144,6 +169,21 @@ def _is_retryable(exc: BaseException) -> bool:
     if isinstance(exc, httpx.HTTPStatusError):
         return exc.response.status_code in _RETRYABLE_STATUS
     return isinstance(exc, (httpx.ConnectError, httpx.TimeoutException))
+
+
+def _is_retryable_share(exc: BaseException) -> bool:
+    """Retry predicate for `create_permission`, the one non-idempotent POST here.
+
+    Retries ONLY where the share provably was not applied: a 429 (Drive refused
+    the request) and a pre-send connect failure. A 5xx, or a timeout after the
+    request may have been sent, says nothing about whether Drive applied the
+    share, so it is surfaced, never retried — the rule `hubspot_tools.py`
+    `_is_retryable_create` implements for OD4, applied here under OD25 (see the
+    comment above `_RETRYABLE_STATUS`).
+    """
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code == 429
+    return isinstance(exc, _PRE_SEND_TRANSPORT_ERRORS)
 
 
 # ---------------------------------------------------------------------------
@@ -311,7 +351,7 @@ class DriveClient:
         return response
 
     @retry(
-        retry=retry_if_exception(_is_retryable),
+        retry=retry_if_exception(_is_retryable_share),
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=10),
         reraise=True,
@@ -319,6 +359,14 @@ class DriveClient:
     async def create_permission(
         self, *, file_id: str, grantee: str, role: str, is_link_grant: bool
     ) -> httpx.Response:
+        """Share a file. NON-IDEMPOTENT, so it is not retried on an ambiguous failure.
+
+        Unlike `create_file` there is no pre-generated id to make a repeat safe, so
+        the `@retry` above uses `_is_retryable_share`: only a 429 and a pre-send
+        connect failure are retried. A 5xx is RETURNED unraised and a post-send
+        transport error propagates on the first attempt; the share handler turns
+        both into an explicit "OUTCOME UNKNOWN" tool error.
+        """
         payload: dict[str, Any] = {"role": role}
         if is_link_grant:
             payload["type"] = "anyone"
@@ -331,7 +379,10 @@ class DriveClient:
             params={"fields": "id"},
             json=payload,
         )
-        if response.status_code in _RETRYABLE_STATUS:
+        # Only 429 is raised (and retried). Other 4xx are normalized by the
+        # handler as before; 5xx is returned unraised so the handler can report an
+        # ambiguous outcome instead of retrying a non-idempotent share.
+        if response.status_code == 429:
             response.raise_for_status()
         return response
 
@@ -372,6 +423,25 @@ def _drive_error(response: httpx.Response, action: str) -> ToolExecutionError:
         message = response.text[:200]
     return ToolExecutionError(
         f"Google Drive {action} failed ({response.status_code}): {message}"
+    )
+
+
+def _share_outcome_unknown(
+    *, file_id: str, grantee: str, role: str, cause: str
+) -> ToolExecutionError:
+    """The error for a share whose result cannot be known (5xx / post-send timeout).
+
+    The wording is the contract: "OUTCOME UNKNOWN" plus an instruction not to
+    re-run blindly, mirroring the HubSpot create-contact message. It is the ONLY
+    signal a caller gets — there is no dedicated exception type.
+    """
+    return ToolExecutionError(
+        f"Google Drive sharing OUTCOME UNKNOWN for file {file_id!r} -> {grantee!r} "
+        f"({role}): {cause}. The permission may or may not have been created, and "
+        "a share notification may or may not have been sent. Do NOT re-run this "
+        "tool; first verify by listing the file's permissions (Drive API "
+        f"permissions.list on file {file_id!r}) and re-issue the share only if "
+        f"{grantee!r} is not already listed."
     )
 
 
@@ -495,9 +565,36 @@ def build_drive_share_file_tool(oauth: OAuthCredentialService) -> ToolDefinition
                 file_id=inp.file_id, grantee=grant.grantee,
                 role=grant.role, is_link_grant=is_link_grant,
             )
+        except _PRE_SEND_TRANSPORT_ERRORS as exc:
+            # Retried by `_is_retryable_share` and still failing. The request never
+            # left this process, so this one is unambiguous.
+            raise ToolExecutionError(
+                "Could not connect to Google Drive after retries; the request was "
+                "NOT sent, so no permission was created. Safe to retry later."
+            ) from exc
+        except httpx.TransportError as exc:
+            # NOT retried: a read/write timeout or a dropped connection after the
+            # request may have been sent. Drive may have applied the share.
+            raise _share_outcome_unknown(
+                file_id=inp.file_id, grantee=grant.grantee, role=grant.role,
+                cause=f"{type(exc).__name__} after the request may have been sent",
+            ) from exc
+        except httpx.HTTPStatusError as exc:
+            # `create_permission` raises only on 429, so this is a rate limit that
+            # outlasted the retries — a refusal, not an ambiguous outcome.
+            raise _drive_error(
+                exc.response, "sharing (rate limited, retries exhausted)"
+            ) from exc
         finally:
             await client.aclose()
 
+        if response.status_code >= 500:
+            # NOT retried, for the same reason: a 5xx does not say whether the
+            # share was applied before the error was produced.
+            raise _share_outcome_unknown(
+                file_id=inp.file_id, grantee=grant.grantee, role=grant.role,
+                cause=f"Drive returned {response.status_code}",
+            )
         if response.status_code not in (200, 201):
             raise _drive_error(response, "sharing")
         body = response.json()
