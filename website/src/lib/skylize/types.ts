@@ -304,6 +304,14 @@ export interface ConsoleModelsResponse {
 //                                              (DeliverableDetailResponse)
 // ---------------------------------------------------------------------------
 
+/** Mirrors `LifecycleStatus` (src/skylize/contracts/base.py:98), a contract's
+ *  own lifecycle on the AgentContract model itself. NOT `RosterLifecycle`
+ *  ("governed" | "planned", agent-network.types.ts) -- that is a roster/
+ *  fixture-display concept. AgentInfo (below) does not expose this field
+ *  today, so it does not yet appear on `BackendAgentInfo`; kept here as the
+ *  contracts-layer mirror until a consumer needs it over the wire. */
+export type LifecycleStatus = "sandbox" | "active" | "retired";
+
 /** One entry of GET /api/v1/agents — AgentInfo. `input_schema` is the agent's
  *  Pydantic input model as JSON Schema (model_json_schema()). */
 export interface BackendAgentInfo {
