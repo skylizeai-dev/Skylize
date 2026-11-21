@@ -57,12 +57,14 @@ from ...app.stripe.actions import (
     MissingIdempotencyAnchor,
     StripeActionError,
     StripeRefundExecutor,
+    StripeRefundOutcomeUnknown,
 )
 from ...dal.stripe_accounts import StripeAccountRepository
 from ..base import (
     ToolContext,
     ToolDefinition,
     ToolExecutionError,
+    ToolOutcomeUnknownError,
     ToolSpendDeferredToHuman,
     ToolSpendProfile,
     ToolStripeNotConnected,
@@ -189,6 +191,14 @@ def build_stripe_refund_tool(
             raise ToolExecutionError(str(exc)) from exc
         except DestinationChargeRefused as exc:  # pragma: no cover - gate refuses this first
             raise ToolExecutionError(str(exc)) from exc
+        except StripeRefundOutcomeUnknown as exc:
+            # OWNER RULING OD30. Ordered BEFORE the `StripeActionError` branch
+            # it subclasses, so an ambiguous POST keeps its own type: the typed
+            # error is what makes `ToolProxy.invoke` RETAIN the spend hold
+            # rather than release budget for a refund Stripe may have made.
+            # Flattening it into `ToolExecutionError` here would silently put
+            # the money back on the ceiling.
+            raise ToolOutcomeUnknownError(str(exc)) from exc
         except StripeActionError as exc:
             raise ToolExecutionError(f"Stripe refund failed: {exc}") from exc
 

@@ -62,6 +62,7 @@ from .base import (
     ToolExecutionError,
     ToolInputError,
     ToolNotRegistered,
+    ToolOutcomeUnknownError,
     ToolPermissionDenied,
     ToolPermissionTierDenied,
     ToolPermissionUnavailable,
@@ -90,6 +91,16 @@ LiveStateFor = Callable[[str], LiveStateChecker]
 # workflow). Injected as a callback so the proxy stays decoupled from the full
 # Authority — it only needs this one hot-path hook.
 RecordAction = Callable[..., Awaitable[bool]]
+
+#: Stable prefix of the audit `result_reason` written when a tool failed with an
+#: OUTCOME UNKNOWN and its spend hold was therefore RETAINED rather than
+#: released (owner ruling OD30). The reconciliation job finds its open cases by
+#: this prefix, so the string is part of that job's contract: change it and the
+#: query silently stops matching
+#: (docs/architecture/idempotency_reconciliation_design.md).
+OUTCOME_UNKNOWN_HOLD_RETAINED = (
+    "OUTCOME UNKNOWN, spend hold retained pending reconciliation (OD30);"
+)
 
 
 def _scope_covers(*, granted: str, required: str) -> bool:
@@ -492,16 +503,57 @@ class ToolProxy:
             )
             raise
         except Exception as exc:  # noqa: BLE001 — normalized into one tool error type
-            # The hold MUST NOT outlive the call it was placed for. Without this
-            # a failing tool leaks budget until `sweep_expired` reclaims it at
-            # expires_at, and the customer sees spend capacity vanish for 15
-            # minutes with nothing to show for it.
-            await self._release_spend(reservation, org_id=org_id)
+            # OWNER RULING OD30 (docs/decisions/2026-11-07_owner_rulings.md
+            # :247, branch feat/decision-records-20261120): an OUTCOME
+            # UNKNOWN failure KEEPS the spend hold. Every other failure
+            # releases it.
+            #
+            # Releasing is the default because a hold MUST NOT outlive the call
+            # it was placed for: a failing tool would leak budget until
+            # `sweep_expired` reclaims it at expires_at, and the customer sees
+            # spend capacity vanish for 15 minutes with nothing to show for it.
+            #
+            # An OUTCOME UNKNOWN inverts that reasoning. `ToolOutcomeUnknownError`
+            # means the side effect MAY already have happened, so the money may
+            # already be gone; handing the ceiling back for spend that possibly
+            # occurred is a ceiling bypass, the exact opposite of fail-closed.
+            # The hold therefore stays, the audit row below names the
+            # reconciliation this case owes, and only reconciliation EVIDENCE
+            # may release it - never the passage of time
+            # (docs/architecture/idempotency_reconciliation_design.md).
+            #
+            # KNOWN GAP, deliberately NOT fixed on this branch: `sweep_expired`
+            # (dal/spend_reservation.py:391-430) still expires any `held` row at
+            # `expires_at`, so a retained hold is freed after DEFAULT_HOLD_TTL
+            # (app/principal/spend.py:50) anyway. Closing that needs a
+            # reservation state the sweeper skips - a migration, and the
+            # reconciliation design's job, not this one's.
+            outcome_unknown = isinstance(exc, ToolOutcomeUnknownError)
+            retained = reservation if outcome_unknown else None
+            if retained is not None:
+                logger.error(
+                    "OUTCOME UNKNOWN in %s: KEEPING spend hold %s (%s minor) for "
+                    "reconciliation instead of releasing it: %s",
+                    tool_id, retained.reservation_id, retained.amount_minor, exc,
+                )
+            else:
+                await self._release_spend(reservation, org_id=org_id)
             await self._audit_call(
                 tool_id=tool_id, contract=contract, org_id=org_id,
                 correlation_id=correlation_id, governance_token=governance_token,
-                result="failed", reason=f"handler error: {exc}",
+                result="failed",
+                reason=(
+                    f"{OUTCOME_UNKNOWN_HOLD_RETAINED} "
+                    f"reservation={retained.reservation_id}: {exc}"
+                    if retained is not None
+                    else f"handler error: {exc}"
+                ),
             )
+            # An OUTCOME UNKNOWN (OD4) keeps its type: the caller must verify
+            # before retrying, and normalizing it to the base class would make
+            # that signal recoverable only by string-matching the message.
+            if outcome_unknown:
+                raise ToolOutcomeUnknownError(str(exc)) from exc
             raise ToolExecutionError(str(exc)) from exc
 
         # What the hold should settle for. Computed BEFORE the audit call so an

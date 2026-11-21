@@ -43,7 +43,11 @@ from skylize.contracts.registry import MVP_REGISTRY
 from skylize.dal.memory import InMemoryAuditRepository, InMemoryGovernanceRepository
 from skylize.dal.stripe_accounts import InMemoryStripeAccountRepository, StripeAccountRow
 from skylize.events.memory_bus import InMemoryEventBus
-from skylize.tools.base import ToolExecutionError, ToolStripeNotConnected
+from skylize.tools.base import (
+    ToolExecutionError,
+    ToolOutcomeUnknownError,
+    ToolStripeNotConnected,
+)
 from skylize.tools.builtin.stripe_tools import (
     STRIPE_CREATE_REFUND_TOOL_ID,
     build_stripe_refund_tool,
@@ -57,6 +61,19 @@ AGENT = "stripe_refund_spend_test_agent"
 ACCT = "acct_fixture"
 CHARGE_ID = "ch_fixture"
 TEST_KEY = "sk_test_dummy"
+
+#: The ONE contract this file and tests/unit/test_tool_outcome_unknown.py
+#: both pin, from the same owner ruling: OD30
+#: (docs/decisions/2026-11-07_owner_rulings.md:247, on branch
+#: feat/decision-records-20261120; not on main yet). Asserted with the SAME
+#: statement in both files
+#: so they can never drift back into the opposite expectations they held before
+#: this change (test_stripe_refund_proxy_spend.py:379 wanted the hold KEPT,
+#: test_tool_outcome_unknown.py:110 pinned it RELEASED).
+_OD30 = (
+    "OD30: an OUTCOME UNKNOWN keeps the spend hold. Only reconciliation "
+    "evidence releases it, never the passage of time."
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -152,11 +169,13 @@ class _StripeFake:
     tests/unit/test_stripe_tools_handler.py)."""
 
     def __init__(
-        self, events: list[str], *, refunded_minor: int, post_raises: Exception | None = None
+        self, events: list[str], *, refunded_minor: int, post_raises: Exception | None = None,
+        post_status: int | None = None,
     ) -> None:
         self.events = events
         self.refunded_minor = refunded_minor
         self.post_raises = post_raises
+        self.post_status = post_status
         self.gets: list[dict[str, Any]] = []
         self.posts: list[dict[str, Any]] = []
 
@@ -179,6 +198,8 @@ class _StripeFake:
         self.posts.append({"url": url, **kw})
         if self.post_raises is not None:
             raise self.post_raises
+        if self.post_status is not None:
+            return httpx.Response(self.post_status, text="stripe is unavailable")
         return httpx.Response(
             200, json={"id": "re_fixture", "status": "succeeded",
                        "amount": self.refunded_minor, "currency": "usd"},
@@ -241,11 +262,12 @@ async def _accounts(*, livemode: bool | None) -> InMemoryStripeAccountRepository
 
 class _World:
     def __init__(self, *, livemode_row: bool | None = False, refunded_minor: int = 400,
-                 post_raises: Exception | None = None) -> None:
+                 post_raises: Exception | None = None, post_status: int | None = None) -> None:
         self.events: list[str] = []
         self.ledger = FakeSpendRepo(self.events)
         self.stripe = _StripeFake(
             self.events, refunded_minor=refunded_minor, post_raises=post_raises,
+            post_status=post_status,
         )
         self._livemode_row = livemode_row
 
@@ -353,27 +375,78 @@ async def test_live_only_account_is_invisible_to_a_test_mode_process() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# (e) OPEN RISK, characterised - not fixed here
+# (e) OD30: an ambiguous POST keeps the spend hold
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "OPEN RISK for owner decision, not fixed here (outside this department's "
-        "allow-list): app/stripe/actions.py:238-248 has no try/except around "
-        "client.post; tools/builtin/stripe_tools.py:192 catches only "
-        "StripeActionError; tools/proxy.py:494-499 releases the hold on any "
-        "handler exception - so a transport timeout AFTER the POST was sent "
-        "frees the spend hold although Stripe may have refunded."
-    ),
-)
 async def test_ambiguous_post_timeout_keeps_the_spend_hold() -> None:
+    """OD30: outcome unknown keeps the hold; reconciliation, never time, frees it.
+
+    Was a strict xfail recording an OPEN RISK: app/stripe/actions.py had no
+    try/except around `client.post`, tools/builtin/stripe_tools.py caught only
+    `StripeActionError`, and tools/proxy.py released the hold on any handler
+    exception - so a ReadTimeout AFTER the POST was sent freed the ceiling for a
+    refund Stripe may well have made. All three sites now carry the contract
+    tests/unit/test_tool_outcome_unknown.py pins on the generic proxy path.
+    """
     world = await _World(post_raises=httpx.ReadTimeout("timed out")).build()
 
-    with pytest.raises(ToolExecutionError):
+    with pytest.raises(ToolOutcomeUnknownError) as exc_info:
         await world.refund(hitl_id=uuid4())
 
     assert world.stripe.posts, "the POST was attempted"
-    # The SAFE behaviour: an ambiguous outcome must not free the hold.
-    assert world.ledger.releases == []
+    releases = world.ledger.releases
+    assert releases == [], _OD30
+    # Still HELD, not committed: nothing is known to have been spent, so the
+    # ceiling keeps binding until reconciliation says otherwise.
+    assert len(world.ledger.held()) == 1
+    assert world.ledger.commits == [] and world.ledger.spent_minor == 0
+    assert world.events == ["reserve:500", "http:get_charge", "http:post_refund"]
+    assert "OUTCOME UNKNOWN" in str(exc_info.value)
+
+
+async def test_stripe_5xx_on_the_refund_post_keeps_the_spend_hold() -> None:
+    """A 5xx is the same ambiguity as a timeout: Stripe may have refunded.
+
+    Mirrors the HubSpot classification this contract shares
+    (tools/builtin/hubspot_tools.py, `response.status_code >= 500`).
+    """
+    world = await _World(post_status=503).build()
+
+    with pytest.raises(ToolOutcomeUnknownError):
+        await world.refund(hitl_id=uuid4())
+
+    releases = world.ledger.releases
+    assert releases == [], _OD30
+    assert len(world.ledger.held()) == 1
+
+
+async def test_pre_send_connect_failure_still_releases_the_hold() -> None:
+    """The other side of the contract, and why it is not just "never release".
+
+    A connect-phase failure happens BEFORE the request is sent
+    (`_PRE_SEND_TRANSPORT_ERRORS`, app/stripe/actions.py), so no money can have
+    moved, there is nothing to reconcile, and holding the customer's budget
+    would be the wrong answer. It stays a plain `ToolExecutionError`.
+    """
+    world = await _World(post_raises=httpx.ConnectError("no route to host")).build()
+
+    with pytest.raises(ToolExecutionError) as exc_info:
+        await world.refund(hitl_id=uuid4())
+
+    assert type(exc_info.value) is ToolExecutionError
+    assert len(world.ledger.releases) == 1
+    assert world.ledger.held() == []
+    assert "NOT sent" in str(exc_info.value)
+
+
+async def test_a_4xx_refusal_is_not_outcome_unknown_and_releases() -> None:
+    """A 402 is a definitive NO from Stripe: no refund, so no hold to keep."""
+    world = await _World(post_status=402).build()
+
+    with pytest.raises(ToolExecutionError) as exc_info:
+        await world.refund(hitl_id=uuid4())
+
+    assert type(exc_info.value) is ToolExecutionError
+    assert len(world.ledger.releases) == 1
+    assert world.ledger.held() == []
