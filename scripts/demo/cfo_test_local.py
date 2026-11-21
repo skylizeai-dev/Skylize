@@ -53,9 +53,12 @@ PROJECT = "skylize-demokit"
 STATE_DIR = Path(tempfile.gettempdir()) / "skylize-demokit-state"  # OUTSIDE the repo
 PID_FILE = STATE_DIR / "uvicorn.pid"
 LOG_FILE = STATE_DIR / "uvicorn.log"
+CONSOLE_PID_FILE = STATE_DIR / "console.pid"
+CONSOLE_LOG_FILE = STATE_DIR / "console.log"
 
-PG_PORT, REDIS_PORT, API_PORT = 55432, 56379, 58000
+PG_PORT, REDIS_PORT, API_PORT, CONSOLE_PORT = 55432, 56379, 58000, 53000
 API = f"http://127.0.0.1:{API_PORT}"
+CONSOLE = f"http://127.0.0.1:{CONSOLE_PORT}"
 # PUBLIC local defaults (same as infra/docker-compose.yml). Not secrets.
 ADMIN_DSN = f"postgresql://skylize:localdev@127.0.0.1:{PG_PORT}/skylize"
 APP_DSN = f"postgresql://skylize_app:appdev@127.0.0.1:{PG_PORT}/skylize"
@@ -63,8 +66,9 @@ REDIS_URL = f"redis://127.0.0.1:{REDIS_PORT}"
 
 ORG = "demo-cfo"
 EMAIL = "cfo.demo@acme.com"
-# Public demo login (local DB only, destroyed by --teardown). Overridable.
+# Public demo logins (local only, destroyed by --teardown). Overridable.
 DEMO_PASSWORD = os.environ.get("SKYLIZE_DEMOKIT_PASSWORD", "DemoKit-Local-2026")
+CONSOLE_PASSWORD = os.environ.get("SKYLIZE_DEMOKIT_CONSOLE_PASSWORD", "DemoKit-Console-2026")
 
 AGENT = "cfo_agent"
 CFO_INPUT = {
@@ -118,10 +122,10 @@ def scrubbed_env() -> dict[str, str]:
     return env
 
 
-def http(method: str, path: str, *, body: dict | None = None, headers: dict | None = None,
-         timeout: int = 60) -> tuple[int, object]:
+def http_full(method: str, path: str, *, body: dict | None = None, headers: dict | None = None,
+              timeout: int = 60, base: str = API) -> tuple[int, dict[str, str], object]:
     data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(API + path, data=data, method=method)
+    req = urllib.request.Request(base + path, data=data, method=method)
     req.add_header("Accept", "application/json")
     if data is not None:
         req.add_header("Content-Type", "application/json")
@@ -129,14 +133,20 @@ def http(method: str, path: str, *, body: dict | None = None, headers: dict | No
         req.add_header(k, v)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            status, raw = resp.status, resp.read()
+            status, raw, hdrs = resp.status, resp.read(), {k.lower(): v for k, v in resp.headers.items()}
     except urllib.error.HTTPError as exc:
-        status, raw = exc.code, exc.read()
+        status, raw, hdrs = exc.code, exc.read(), {k.lower(): v for k, v in exc.headers.items()}
     text = raw.decode("utf-8", errors="replace")
     try:
-        return status, json.loads(text) if text else None
+        return status, hdrs, (json.loads(text) if text else None)
     except json.JSONDecodeError:
-        return status, text
+        return status, hdrs, text
+
+
+def http(method: str, path: str, *, body: dict | None = None, headers: dict | None = None,
+         timeout: int = 60, base: str = API) -> tuple[int, object]:
+    status, _hdrs, parsed = http_full(method, path, body=body, headers=headers, timeout=timeout, base=base)
+    return status, parsed
 
 
 # ------------------------------------------------------------------- step ledger
@@ -164,12 +174,14 @@ def cut(text: object, n: int = 160) -> str:
 
 # ------------------------------------------------------------------- teardown
 def uvicorn_stop() -> None:
-    if PID_FILE.exists():
-        pid = PID_FILE.read_text().strip()
-        if pid.isdigit():
-            # /T kills the whole tree (uvicorn may be launched through the py launcher).
-            subprocess.run(["taskkill", "/PID", pid, "/T", "/F"], capture_output=True)
-        PID_FILE.unlink(missing_ok=True)
+    """Stop the backend AND the console dev server, if either was started by this kit."""
+    for pid_file in (CONSOLE_PID_FILE, PID_FILE):
+        if pid_file.exists():
+            pid = pid_file.read_text().strip()
+            if pid.isdigit():
+                # /T kills the whole tree (uvicorn / npm may sit behind launcher processes).
+                subprocess.run(["taskkill", "/PID", pid, "/T", "/F"], capture_output=True)
+            pid_file.unlink(missing_ok=True)
 
 
 def teardown(quiet: bool = False) -> bool:
@@ -191,8 +203,9 @@ def teardown(quiet: bool = False) -> bool:
     leftovers += [f"network:{n}" for n in nets]
     if STATE_DIR.exists():
         leftovers.append(f"state-dir:{STATE_DIR}")
-    if port_open(API_PORT):
-        leftovers.append(f"listener:{API_PORT}")
+    for port in (API_PORT, CONSOLE_PORT):
+        if port_open(port):
+            leftovers.append(f"listener:{port}")
     if not quiet:
         say("teardown verification:")
         say(f"  containers (project={PROJECT}): {len(ps)}")
@@ -200,6 +213,7 @@ def teardown(quiet: bool = False) -> bool:
         say(f"  networks   (project={PROJECT}): {len(nets)}")
         say(f"  temp state dir exists          : {STATE_DIR.exists()}")
         say(f"  API port {API_PORT} listening        : {port_open(API_PORT)}")
+        say(f"  console port {CONSOLE_PORT} listening    : {port_open(CONSOLE_PORT)}")
         say("  RESULT: " + ("CLEAN" if not leftovers else "LEFTOVERS " + ", ".join(leftovers)))
     return not leftovers
 
@@ -413,6 +427,14 @@ def demo() -> None:
         return
     keyh = {"X-API-Key": api_key}
 
+    # S9b baseline: a SYNCHRONOUS agent (no HITL trigger) runs straight through the gate.
+    seo = {"agent_id": "seo_keyword_agent", "input": {"topic": "ai bookkeeping"}}
+    st, body = http("POST", "/api/v1/agents/execute", headers=bearer, body=seo)
+    if not check("S9b synchronous agent baseline (seo_keyword_agent, switch OFF)",
+                 "201 + deliverable_id", f"{st} {cut(body, 110)}",
+                 st == 201 and isinstance(body, dict) and bool(body.get("deliverable_id"))):
+        return
+
     # S10 engage -----------------------------------------------------------------------
     ks = {"scope_type": "tenant", "scope_id": ORG, "reason": "demo-kit kill switch drill"}
     st, body = http("POST", "/api/v1/kill-switch/engage", headers=keyh, body=ks)
@@ -426,11 +448,19 @@ def demo() -> None:
     blocked = check("S11 approve while engaged is blocked", "502 and detail mentions 'kill switch engaged'",
                     f"{st} detail={cut(detail, 150)}", st == 502 and "kill switch engaged" in str(detail))
 
-    # S12 disengage ALWAYS runs, even if S11 failed, so the demo org is never left killed.
+    # S11b the same synchronous agent is now refused by the governance gate (403, coded).
+    st, body = http("POST", "/api/v1/agents/execute", headers=bearer, body=seo)
+    blocked_sync = check("S11b synchronous agent while engaged is denied",
+                         "403 code=governance_denied, 'kill switch engaged'",
+                         f"{st} {cut(body, 130)}",
+                         st == 403 and isinstance(body, dict) and body.get("code") == "governance_denied"
+                         and "kill switch engaged" in str(body.get("detail")))
+
+    # S12 disengage ALWAYS runs, even if S11/S11b failed, so the demo org is never left killed.
     st2, body2 = http("POST", "/api/v1/kill-switch/disengage", headers=keyh, body=ks)
     ok12 = st2 == 200 and isinstance(body2, dict) and body2.get("status") == "disengaged"
     check("S12 kill switch DISENGAGE", "200 status=disengaged", f"{st2} {cut(body2, 120)}", ok12)
-    if not (blocked and ok12):
+    if not (blocked and blocked_sync and ok12):
         return
 
     # S13 recovery: the blocked row was released back to pending (K12), so approve now works --
@@ -438,6 +468,102 @@ def demo() -> None:
     check("S13 approve after disengage succeeds (row was not lost)", "200 status=approved + deliverable_id",
           f"{st} {cut(body, 120)}",
           st == 200 and isinstance(body, dict) and body.get("status") == "approved")
+
+
+# ------------------------------------------------------------------ console UI
+def console_phase() -> None:
+    """Point the website's dev server at THIS backend and probe the BFF routes the
+    console screens call. Needs `npm ci` to have been run in website/.
+
+    The BFF authenticates to the backend with a SERVICE API KEY (website/src/lib/
+    skylize/client.ts attaches it as X-API-Key). We mint one through the API, hand it
+    to `next dev` through its environment only, and never print or persist it.
+    """
+    st, body = http("POST", "/api/v1/auth/login", body={"email": EMAIL, "password": DEMO_PASSWORD})
+    tok = body.get("access_token") if isinstance(body, dict) else None
+    if not check("C0 re-login for console bring-up", "200 + access_token", f"{st}", st == 200 and bool(tok)):
+        return
+    bearer = {"Authorization": f"Bearer {tok}"}
+
+    # A pending HITL row, so the Approvals panel has something real to show.
+    st, body = http("POST", "/api/v1/agents/execute", headers=bearer,
+                    body={"agent_id": AGENT, "input": {**CFO_INPUT, "period": "2026-Q1"}})
+    pending_id = body.get("hitl_id") if isinstance(body, dict) else None
+    if not check("C1 pending HITL item seeded for the Approvals panel", "202 deferred_to_human",
+                 f"{st} hitl_id={pending_id}", st == 202 and bool(pending_id)):
+        return
+
+    st, body = http("POST", "/api/v1/api-keys", headers=bearer,
+                    body={"name": "demokit-console-bff", "scopes": ["owner"], "expires_in_days": 1})
+    api_key = body.get("api_key") if isinstance(body, dict) else None
+    if not check("C2 mint BFF service API key", "201 + api_key",
+                 f"{st} api_key={'<present, not printed>' if api_key else 'MISSING'}",
+                 st == 201 and bool(api_key)):
+        return
+
+    site = REPO / "website"
+    if not (site / "node_modules").is_dir():
+        check("C3 website dependencies installed", "website/node_modules exists",
+              "missing -- run `npm ci` in website/ first", False)
+        return
+    npm = shutil.which("npm.cmd") or shutil.which("npm")
+    cenv = {
+        **scrubbed_env(),
+        "SKYLIZE_BACKEND_URL": API,
+        "SKYLIZE_SERVICE_API_KEY": api_key or "",
+        "SKYLIZE_CONSOLE_PASSWORD": CONSOLE_PASSWORD,
+        "SKYLIZE_CONSOLE_SESSION_SECRET": secrets.token_urlsafe(48),
+        "NEXT_TELEMETRY_DISABLED": "1",
+    }
+    cenv.pop("PYTHONPATH", None)
+    log = open(CONSOLE_LOG_FILE, "wb")
+    proc = subprocess.Popen(
+        [npm, "run", "dev", "--", "--port", str(CONSOLE_PORT), "--hostname", "127.0.0.1"],
+        cwd=str(site), env=cenv, stdout=log, stderr=subprocess.STDOUT,
+        creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+    )
+    CONSOLE_PID_FILE.write_text(str(proc.pid))
+    deadline, status = time.time() + 240, None
+    while time.time() < deadline and proc.poll() is None:
+        try:
+            status, _ = http("GET", "/console/login", base=CONSOLE, timeout=30)
+            if status == 200:
+                break
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(2)
+    if not check("C3 next dev up with SKYLIZE_BACKEND_URL -> local backend", "GET /console/login 200",
+                 f"{status} ({CONSOLE}, backend={API})", status == 200):
+        return
+
+    # BFF session: the same call the login page makes.
+    st, hdrs, _ = http_full("POST", "/api/console/session", body={"password": CONSOLE_PASSWORD}, base=CONSOLE)
+    cookie_hdr = hdrs.get("set-cookie", "")
+    cookie = cookie_hdr.split(";", 1)[0] if cookie_hdr else ""
+    if not check("C4 POST /api/console/session (console login)", "204 + skylize_console cookie",
+                 f"{st} cookie={'skylize_console=<set>' if cookie.startswith('skylize_console=') else 'MISSING'}",
+                 st == 204 and cookie.startswith("skylize_console=")):
+        return
+    ch = {"Cookie": cookie}
+
+    st, body = http("GET", "/api/console/health", headers=ch, base=CONSOLE)
+    check("C5 BFF /health -> backend", "200 status ok", f"{st} {cut(body, 100)}", st == 200)
+    st, body = http("GET", "/api/console/tenant", headers=ch, base=CONSOLE)
+    check("C6 BFF /tenant -> backend", "200 org_id=demo org", f"{st} {cut(body, 100)}",
+          st == 200 and isinstance(body, dict) and body.get("org_id") == ORG)
+    st, body = http("GET", "/api/console/hitl?limit=50", headers=ch, base=CONSOLE)
+    rows = body.get("data", []) if isinstance(body, dict) else []
+    seen = any(r.get("hitl_id") == pending_id for r in rows)
+    check("C7 BFF /hitl shows the pending item", "200, seeded hitl_id listed",
+          f"{st} total={len(rows)} ids_match={seen}", st == 200 and seen)
+    st, body = http("GET", "/api/console/audit?limit=50", headers=ch, base=CONSOLE)
+    entries = body.get("entries", []) if isinstance(body, dict) else []
+    with_token = sum(1 for e in entries if e.get("governance_token_id"))
+    check("C8 BFF /audit returns the governed-action feed", "200, entries with governance_token_id",
+          f"{st} entries={len(entries)} with_token={with_token}", st == 200 and with_token > 0)
+    st, _h, html = http_full("GET", "/console", headers=ch, base=CONSOLE, timeout=120)
+    check("C9 GET /console page renders", "200 'Operator console'",
+          f"{st} has_text={'Operator console' in str(html)}", st == 200 and "Operator console" in str(html))
 
 
 # ------------------------------------------------------------------------ main
@@ -459,8 +585,13 @@ def main() -> int:
     ap.add_argument("--teardown", action="store_true",
                     help="stop uvicorn, remove compose project + volumes + temp state, then verify")
     ap.add_argument("--keep-running", action="store_true",
-                    help="leave uvicorn (and DB/Redis) running after the steps, e.g. for the console UI")
+                    help="leave uvicorn (and DB/Redis) running after the steps")
+    ap.add_argument("--console", action="store_true",
+                    help="after the steps, also start the website dev server against this backend "
+                         "(needs `npm ci` in website/), probe the BFF routes; implies --keep-running")
     args = ap.parse_args()
+    if args.console:
+        args.keep_running = True
 
     if args.teardown:
         return 0 if teardown() else 1
@@ -475,6 +606,8 @@ def main() -> int:
     try:
         if bring_up() and not _ABORTED:
             demo()
+            if args.console and not _ABORTED:
+                console_phase()
     except Exception as exc:  # noqa: BLE001
         check("UNEXPECTED ERROR", "no exception", cut(f"{type(exc).__name__}: {exc}", 300), False)
     finally:
@@ -482,8 +615,11 @@ def main() -> int:
             uvicorn_stop()
     rc = summary()
     if args.keep_running and rc == 0:
-        say(f"\nbackend left RUNNING at {API} (org={ORG}, login={EMAIL}). "
-            "Stop everything with: py -3.12 scripts/demo/cfo_test_local.py --teardown")
+        say(f"\nbackend left RUNNING at {API} (org={ORG}, backend login={EMAIL}).")
+        if args.console:
+            say(f"console left RUNNING at {CONSOLE}/console/login "
+                "(password = SKYLIZE_DEMOKIT_CONSOLE_PASSWORD default in this script).")
+        say("Stop everything with: py -3.12 scripts/demo/cfo_test_local.py --teardown")
     elif rc != 0:
         say(f"\nuvicorn log: {LOG_FILE}")
     return rc
