@@ -14,6 +14,11 @@
 > transaction, a refused refresh is classified against a 10 s grace window for
 > DETECTION only (nothing is revoked), and the BFF single-flight is a best-effort
 > optimisation, not a correctness boundary. No migration.**]**
+> **[Round 2b appended 2026-11-20, see section 9.1:** migration 0038 adds
+> `user_refresh_tokens.family_id`; a refresh-token replay PAST the grace window
+> now revokes the live rows of that token's own family (one login's lineage),
+> never another device's or another user's session. Within the window nothing
+> changes.**]**
 >
 > **How to read this file.** Every claim is marked:
 > - `[CODE-VERIFIED]` - read from `origin/main` @ `7604fa8`, cites `file:line`.
@@ -209,6 +214,7 @@ This build stays migration-free.
 
 Reuse detection would need a migration; per the owner's decision it is not part of
 this build. See section 7.0.
+[Updated 2026-11-20, see section 9.1: that migration is 0038, `family_id`.]
 
 "Log out everywhere" (`revoke all tokens for user_id`) is possible with the existing
 `idx_refresh_tokens_user`, but needs an authenticated route; it is out of scope here.
@@ -275,6 +281,15 @@ detection (section 7.0, needs a migration).
 
 `[OWNER-DECIDED 2026-10-14]` Out of scope for this build, which stays migration-free.
 Recorded here so it is not lost.
+
+**Status 2026-11-20: BUILT as #47b, see section 9.1** (`[CODE-VERIFIED]` on branch
+`feat/myday-lineage-revocation`). As proposed below: `family_id` (the first token's
+id, copied on every rotation), backfill `family_id = token_id`, and the family
+`UPDATE`. Differences: the column is `NOT NULL` only after the backfill and also
+carries a `gen_random_uuid()` default for app code from before the migration; the
+index is partial on live rows; and the revocation fires only for a replay PAST the
+10 s grace window of 9.0.2, which answers the "benign double-submit" concern in the
+last list below. Owner ruling R-B made it per-family, never user-wide.
 
 **What it is worth.** The atomic consume (2.0.1) stops two concurrent refreshes from
 both succeeding, but it cannot tell WHO won. If a thief replays a stolen refresh token
@@ -423,6 +438,10 @@ column.
 **What this does not supersede.** Section 7.0 stays true as written: reuse
 detection that REVOKES, per token family, is still deferred and still needs the
 `family_id` migration. It is a separate change (#47b, built on this branch).
+[Updated 2026-11-20: #47b is section 9.1; it replaces only the after-grace row of
+9.0.2. The code line numbers cited throughout 9.0 are those of
+`feat/myday-atomic-rotation`; on `feat/myday-lineage-revocation` several have
+moved, and 9.1 cites that branch's numbers.]
 
 ### 9.0.1 N1 - rotation is one transaction `[CODE-VERIFIED]`
 
@@ -452,6 +471,12 @@ detection that REVOKES, per token family, is still deferred and still needs the
   is refused by the same check. Login still stores through `_mint_pair` (`:335`).
 
 ### 9.0.2 Replay grace window - DETECTION ONLY `[CODE-VERIFIED]`
+
+[Superseded in part 2026-11-20, see section 9.1.3: the "replay after grace" row now
+revokes the presented token's family and logs `auth_refresh_reuse_family_revoked`;
+the `auth_refresh_replay_after_grace ... action=none` line below no longer exists.
+The classifier, the other two rows and the window itself are unchanged. Line
+numbers in this subsection are those of `feat/myday-atomic-rotation`.]
 
 When the rotation refuses a refresh, `_on_refused_refresh`
 (`src/skylize/app/auth/user_service.py:293`, called at `:290`) reads the presented
@@ -510,6 +535,11 @@ per-family revocation (#47b) is meant to replace only the after-grace branch of
 
 ### 9.0.4 Known limits
 
+[Updated 2026-11-20, see section 9.1.5: with per-family revocation the lost
+rotation response now ends that one device's session, the logout replay is bounded
+to the logged-out session's own family, and "No revocation on reuse yet" is
+resolved.]
+
 - **Two clocks.** The grace comparison uses the API host's clock
   (`self._clock`, `src/skylize/app/auth/user_service.py:111`, default UTC now)
   against `revoked_at`, which Postgres stamps with its own `now()` (transaction
@@ -533,6 +563,10 @@ per-family revocation (#47b) is meant to replace only the after-grace branch of
   the `family_id` migration of 7.0.
 
 ### 9.0.5 Tests
+
+[Updated 2026-11-20, see section 9.1.6: the two after-grace tests below were
+rewritten to the family semantics under new names; line numbers here are those of
+`feat/myday-atomic-rotation`.]
 
 `tests/unit/test_session_revocation.py` (memory backend, CI `unit` job):
 - N1: `test_a_failed_insert_during_rotation_leaves_the_old_token_usable` (`:165`),
@@ -575,3 +609,210 @@ into one `MyDayConfigError` (`website/src/lib/skylize/myday-config.ts:117-118`,
 thrown at `:180`). `MyDayConfigError.problems` (`:42`) lists one entry per failed
 check, naming variables only, never a value. A single problem keeps its original
 message. This extends 8.0.5; boot-time validation is still out of scope (T5).
+
+---
+
+## 9.1 - Round 2b: per-family revocation on reuse (#47b, 2026-11-20)
+
+`[CODE-VERIFIED]` against branch `feat/myday-lineage-revocation`, the second half
+(#47b) of the split of PR #47, stacked on `feat/myday-atomic-rotation` (#47a, 9.0).
+Appended, not rewritten (OD22): the passages this makes stale (header, 3.0, 7.0,
+9.0, 9.0.2, 9.0.4, 9.0.5) carry an inline bracketed note. Line numbers are those
+of this branch.
+
+**What changes, and what does not.** Only the after-grace row of the 9.0.2 table.
+A refused refresh whose token is owned by its `sub`, unexpired, and consumed 10 s
+ago or more now revokes the live rows of that token's FAMILY - one login's lineage
+- and logs one WARNING. "Not a replay", "within grace", the pure classifier
+`classify_refused_refresh`, the grace constant and the route contract of 8.0.2
+are unchanged. Owner ruling R-B: per family, never user-wide. Acceptance criterion
+R-C: reuse detection never affects sessions outside the presented token's family.
+
+### 9.1.1 Schema: migration 0038 `[CODE-VERIFIED]`
+
+`migrations/versions/0038_refresh_token_family.py` (revision `0038`, revises
+`0037`). Additive only; all five statements run in the migration's one
+transaction, and the `ADD COLUMN` takes the table's ACCESS EXCLUSIVE lock, so no
+row is written between them.
+
+| Line | Statement | Why |
+|---|---|---|
+| `:85` | `ALTER TABLE user_refresh_tokens ADD COLUMN family_id UUID` | nullable, no default: catalogue-only, no table rewrite |
+| `:88` | `UPDATE user_refresh_tokens SET family_id = token_id WHERE family_id IS NULL` | backfill: each pre-migration token becomes the root of its OWN family (`token_id` is the PK, so no two sessions merge), the same rule a login applies |
+| `:91` | `ALTER COLUMN family_id SET DEFAULT gen_random_uuid()` | rolling deploy: app code from before 0038 inserts `(token_id, user_id, expires_at)` without the column and gets a family of its own |
+| `:94` | `ALTER COLUMN family_id SET NOT NULL` | after the backfill and the default, no NULL family can exist |
+| `:97` | `CREATE INDEX idx_refresh_tokens_family_live ON user_refresh_tokens (family_id) WHERE revoked_at IS NULL` | serves `revoke_family`; partial because a family has at most one live row, while consumed rows accumulate (one per rotation, nothing deletes them) |
+
+**NULL handling.** Backfilled, then defaulted, then `NOT NULL`, so NULL is never a
+family the application has to interpret: there is no NULL-family rotation and no
+`revoke_family(NULL)`. Rejected: a nullable column (every reader would need a NULL
+rule, and a NULL in `WHERE family_id = $1` silently matches nothing), and a
+`BEFORE INSERT` trigger copying `token_id` (a new function object for what the
+default already guarantees). The default's one cost: a rotation done by OLD code
+during the deploy window starts a new family instead of continuing its parent's.
+That can only NARROW a later revocation (the old part of the lineage is revoked
+without the new part), never widen it.
+
+**Grants and RLS.** Unchanged. 0008 grants `SELECT, INSERT, UPDATE` on the TABLE to
+`skylize_app` (`migrations/versions/0008_users.py:70`); a table-level grant covers a
+column added later. The table has no RLS and 0038 adds none.
+
+**Deploy order and downgrade.** Migration first, then code (CI's integration job
+runs `alembic upgrade head` before the tests, `.github/workflows/ci.yml:157`). The
+reverse order fails closed: the new INSERT names a column that does not exist yet,
+so login and refresh error instead of minting family-less tokens. Downgrade
+(`:102-106`) drops the index and the column, nothing else; run it only after the
+app is back on code that does not write `family_id`. Rows keep every other column;
+a later re-upgrade backfills each row as its own family again.
+
+### 9.1.2 Propagation `[CODE-VERIFIED]`
+
+- `RefreshTokenRow.family_id: UUID` (`src/skylize/dal/ports.py:240`), never NULL.
+- **Login** starts a new family rooted at its own token id: `store_refresh_token`
+  (port `ports.py:275`; Postgres `src/skylize/dal/users.py:102`; memory
+  `src/skylize/dal/memory.py:386`).
+- **Rotation** keeps the family: the consume returns the consumed row's family
+  (`_CONSUME_SQL ... RETURNING token_id, family_id`, `users.py:198`) and the INSERT
+  of the new row writes exactly that value (`users.py:169`), inside the same
+  `conn.transaction()` as 9.0.1. There is no second read, so no window in which
+  another family could be picked up. Memory: `memory.py:441`, from the row being
+  consumed, with no `await`.
+- Nothing else writes `family_id`. A family is therefore one login's chain of
+  rotations, of ONE user: the consume requires `user_id` to own the row, and the
+  new row is inserted with that same `user_id`.
+
+### 9.1.3 The after-grace action `[CODE-VERIFIED]`
+
+- `revoke_family(family_id) -> int` (port `ports.py:326`). Postgres
+  `users.py:173`, one statement `_REVOKE_FAMILY_SQL` (`users.py:210`):
+  `UPDATE user_refresh_tokens SET revoked_at = now() WHERE family_id = $1 AND
+  revoked_at IS NULL AND expires_at > now() RETURNING token_id`; the number of
+  returned rows is the result. "Live" is the same test as the consume. Memory
+  `memory.py:445`.
+- `_on_refused_refresh` (`src/skylize/app/auth/user_service.py:296`): not a replay,
+  or a replay within grace, returns at `:316` with no log and no write, as in
+  #47a. Past grace it calls `revoke_family(row.family_id)` (`:318`) and logs ONE
+  WARNING (`:321`):
+  `auth_refresh_reuse_family_revoked user_id=<sub> token_id=<jti> family_id=<family> consumed_age_seconds=<n> grace_seconds=10 revoked_count=<k>`.
+  Ids and counts only, never a token or any part of one.
+- The caller still raises `InvalidCredentialsError` and the route answers the fixed
+  `401` of 8.0.2. A failure of the revocation write itself is not caught: it
+  surfaces as a 5xx, which the BFF treats as a failed refresh (8.0.3: `502` and a
+  cleared cookie), so it fails closed.
+- No user-wide revocation exists anywhere: PR #47's user-wide revocation method
+  (`src/skylize/dal/ports.py:314-320` @ `c850d00`) is not built, and no revoking
+  statement matches on `user_id` alone.
+
+### 9.1.4 Why this cannot cascade (the P1 of PR #47)
+
+PR #47's user-wide variant set `revoked_at` on every live row of the user. Each of
+those rows, presented later by its own device, classified as an after-grace replay
+and revoked every row minted since: a cascade with no bound, re-fed by every stale
+cookie and every re-login. Here:
+
+1. **Scope.** The only write is `WHERE family_id = F`, with F read from the presented
+   row. A row enters F only as the login that rooted it or by rotating a live row
+   of F (9.1.2). Another device is another login, hence another family; another
+   user cannot share a family.
+2. **Re-trigger.** A row R that `revoke_family(F)` revoked comes back later - the
+   exact P1 trigger. It classifies as after grace and calls
+   `revoke_family(R.family_id)`, i.e. `revoke_family(F)` again. F has no live row
+   left: a family has at most one (a rotation consumes one and inserts one, and
+   two concurrent rotations have a single winner, 9.0.1), and the first call
+   revoked it. F cannot gain one either: a rotation needs a live row of F, and a
+   login always starts a new family. So the call returns 0. The revocation's
+   output can only re-trigger a revocation of the same, already empty set: the
+   fixpoint is reached after one step, idempotently.
+3. **Later logins.** A login after the revocation is a new family; no replay of F's
+   tokens can reach it.
+
+Pinned end to end by gate G1.5, memory and Postgres (9.1.6): device A's stolen old
+token revokes A's live token only; device B keeps refreshing; the same old token
+replayed again, and A's own revoked token replayed, each log `revoked_count=0`; a
+new login afterwards is untouched.
+
+### 9.1.5 Known limits
+
+- **Two clocks** (as 9.0.4). The window compares the API host's clock with Postgres
+  `now()`; a skew of S seconds moves it to about 10 - S (or 10 + S) seconds. A skew
+  that shrinks the window can now turn a benign concurrent refresh into a family
+  revocation - of that one session - rather than a log line. Production skew is
+  UNVERIFIED.
+- **Lost rotation response.** A client that never received its rotated pair and
+  retries the old token 10 s or more later now ends THAT ONE DEVICE's session: its
+  family's new token is revoked and the user logs in again on that device. Other
+  devices are unaffected. Under 9.0 this was only a false-positive WARNING.
+- **Logout vs rotation** (as 9.0.4). `revoked_at` still does not say who consumed a
+  row. A logged-out token replayed past the window is treated as reuse, but its
+  family is the logged-out session's own, whose only live row logout consumed:
+  `revoked_count=0`, nothing written. The ambiguity is now bounded to one family.
+- **A rotation in flight during the revocation (Postgres only).** If a rotation of
+  F's live row has already locked it when `revoke_family(F)` starts, the revocation
+  waits, re-checks that row (now consumed) and skips it, and the rotation's new
+  row, committed after the revocation's snapshot, stays live. It is still inside F,
+  and the next after-grace replay of any F token revokes it. Scope never widens.
+  Reasoned from READ COMMITTED semantics, UNTESTED (it needs a controlled
+  two-connection interleaving).
+- **Old-code rotations during the deploy** start a new family (9.1.1): narrower, not
+  wider.
+- **Thief first** (7.0). If the thief rotates first, the victim's next refresh, with
+  the now consumed old token, is the after-grace replay that revokes the family:
+  thief and victim both lose that session, and the victim's next login is a family
+  the thief has no token for. A thief whose victim never refreshes again keeps the
+  session until it expires (14 days, `src/skylize/config.py:119`), as before.
+- **Reading the WARNING.** `revoked_count=1` ended a live session;
+  `revoked_count=0` is a replay inside a family that was already dead (a repeated
+  replay, a stale cookie, a logged-out token).
+
+### 9.1.6 Tests
+
+`tests/unit/test_session_revocation.py` (memory store, CI `unit` job):
+- Families: `test_store_refresh_token_roots_a_new_family_at_its_own_token_id`
+  (`:226`), `test_rotate_copies_the_consumed_rows_family_into_the_new_row` (`:236`),
+  `test_every_rotation_of_one_login_stays_in_its_family_and_two_logins_differ`
+  (`:253`), `test_revoke_family_revokes_only_that_familys_live_rows_and_is_idempotent`
+  (`:274`).
+- After grace: `test_a_replay_after_grace_revokes_its_own_family_and_logs_one_warning`
+  (`:371`, was `..._logs_one_warning_and_revokes_nothing`),
+  `test_a_logged_out_token_replayed_after_grace_revokes_nothing_outside_its_dead_family`
+  (`:434`, was `..._is_logged_but_revokes_nothing`).
+- Gate G1.5: `test_reuse_revokes_only_its_own_family_other_devices_unaffected`
+  (`:465`); `test_reuse_after_grace_never_touches_another_users_sessions` (`:543`);
+  `test_unknown_expired_or_foreign_tokens_never_revoke_a_family` (`:570`).
+- Unchanged in meaning: within grace
+  `test_a_replay_within_grace_logs_nothing_and_writes_nothing` (`:350`), G1.6
+  `test_two_concurrent_refreshes_of_one_token_never_revoke_anything` (`:660`).
+
+`tests/integration/test_refresh_revocation_pg.py` (real Postgres as `skylize_app`,
+CI `integration` job; skips without the database env vars):
+- `test_pg_rotation_keeps_the_family_and_each_login_starts_a_new_one` (`:427`).
+- Gate G1.5: `test_pg_reuse_revokes_only_its_own_family_other_devices_unaffected`
+  (`:515`); `test_pg_reuse_after_grace_never_touches_another_users_family`
+  (`:589`). Ageing is done by moving `revoked_at` back in SQL, not by sleeping.
+- G1.6 `test_pg_two_concurrent_refreshes_of_one_token_never_revoke_anything`
+  (`:251`) is unchanged in meaning; its no-WARNING check names the new event.
+
+`tests/integration/test_refresh_family_migration_pg.py` (real Postgres, CI
+`integration` job). Each test creates its own schema, migrates it to 0037, seeds
+rows in the 0037 shape, drives the migration itself and drops the schema; the
+shared `public` schema is never downgraded.
+- `test_pg_migration_0038_gives_every_existing_token_its_own_family_and_it_still_refreshes`
+  (`:209`): families = own token ids, old columns byte-identical, table ACL and RLS
+  unchanged, app-role column privileges, an old-code INSERT without the column
+  works, NULL is refused, the pre-migration tokens still rotate and continue their
+  family.
+- `test_pg_migration_0038_downgrade_drops_only_what_upgrade_added` (`:317`): column
+  and index gone, the column list and ACL equal to 0037's, every row kept, a
+  re-upgrade backfills again.
+
+PR #47's five N2 tests, which pinned the user-wide revocation, do not exist on
+#47a. Cited by location at PR #47's head `c850d00` (their names spell the removed
+behaviour); each is replaced here, none is skipped or left commented out:
+
+| PR #47 test @ `c850d00` | What it pinned | Replaced here by |
+|---|---|---|
+| `tests/unit/test_session_revocation.py:144` | after grace, every token of the user revoked | `test_a_replay_after_grace_revokes_its_own_family_and_logs_one_warning`, `test_reuse_revokes_only_its_own_family_other_devices_unaffected` |
+| `tests/unit/test_session_revocation.py:175` | another user's session untouched | `test_reuse_after_grace_never_touches_another_users_sessions` |
+| `tests/unit/test_session_revocation.py:206` | unknown or expired tokens revoke nothing | `test_unknown_expired_or_foreign_tokens_never_revoke_a_family` (adds the consumed-and-expired and the foreign-`sub` cases) |
+| `tests/unit/test_session_revocation.py:231` | a logged-out token replayed after grace revoked the user's other sessions | `test_a_logged_out_token_replayed_after_grace_revokes_nothing_outside_its_dead_family` (the opposite outcome) |
+| `tests/integration/test_refresh_revocation_pg.py:250` | Postgres: every live row of the user revoked | `test_pg_reuse_revokes_only_its_own_family_other_devices_unaffected`, `test_pg_reuse_after_grace_never_touches_another_users_family` |
