@@ -28,6 +28,8 @@ if TYPE_CHECKING:
     from .dal.org_autonomy_mode import OrgAutonomyModeDAL
     from .dal.org_policy_settings import OrgPolicySettingsDAL
     from .dal.org_spend_ceiling import OrgSpendCeilingDAL
+    from .dal.refund_limits import RefundLimitsReader
+    from .dal.stripe_accounts import StripeAccountRepository
     from .dal.workflow_runs import WorkflowRunsDAL
 
 from .adapters.llm.content_gate import GuardedLLMGateway, LLMContentGate
@@ -58,7 +60,7 @@ from .app.principal.provider import PrincipalAuthorityService, PrincipalReposito
 from .app.principal.spend import SpendLedger
 from .dal.spend_reservation import PostgresSpendRepository
 from .app.tenants.service import TenantService
-from .config import Settings, get_settings
+from .config import Settings, get_settings, stripe_config_problem
 from .contracts.registry import MVP_REGISTRY
 from .dal.credentials import CredentialRepository
 from .dal.oauth_credentials import OAuthCredentialRepository
@@ -293,6 +295,36 @@ def resolve_notion_config(settings: Settings) -> tuple[str, str] | None:
     return client_id, client_secret
 
 
+def resolve_stripe_config(settings: Settings) -> str | None:
+    """Return the platform Stripe TEST secret key when the Stripe refund tool
+    is enabled, or None when it is off.
+
+    Owner ruling OD8 (docs/decisions/2026-11-07_owner_rulings.md:58, "Stripe:
+    wire in test mode behind a flag, off in production", recorded status
+    LATER). Same opt-in shape as `resolve_google_drive_config`: flag off and no
+    key means the `stripe.refund` tool is never registered (byte-identical to a
+    deployment from before this wiring); a half-set pair is refused.
+
+    TEST MODE ONLY. "Off in production" is enforced as "live keys are refused":
+    Settings has no environment/production field to key on, so any key not
+    starting with `sk_test_` / `rk_test_` is refused here, and the composition
+    root wires the tool and the proxy with `stripe_livemode=False` hard-coded.
+
+    Re-checks what `Settings._require_stripe_test_mode` already checked, on
+    purpose: Settings has no `validate_assignment`, so a Settings mutated after
+    construction (or built with `model_construct`) bypasses the validator, and
+    the composition root must still refuse a live key. The message never
+    contains the key.
+    """
+    key = settings.stripe_secret_key.get_secret_value().strip()
+    problem = stripe_config_problem(enabled=settings.stripe_enabled, secret_key=key)
+    if problem is not None:
+        raise ConfigurationError(problem)
+    if not settings.stripe_enabled:
+        return None
+    return key
+
+
 async def verify_app_role_is_rls_subject(db: "Database") -> None:
     """Refuse to start when the runtime database role can bypass RLS.
 
@@ -471,6 +503,9 @@ async def build_container(settings: Settings | None = None) -> Container:
     # Same reasoning: fail before any pool opens rather than on the first HITL
     # escalation after a bad deploy.
     slack_notifier_config = resolve_slack_notifier_config(settings)
+    # Stripe test mode (OD8): a live key or a half-set pair fails here, before
+    # any pool opens. None = the refund tool is not registered at all.
+    stripe_secret_key = resolve_stripe_config(settings)
     # And again for the WIF issuer key. Resolved HERE, beside the other two
     # platform keys, for the same reason they are: a deployment that has turned
     # the issuer surface on but cannot sign must fail while it is still doing
@@ -925,10 +960,55 @@ async def build_container(settings: Settings | None = None) -> Container:
                 http_client_factory=_httpx.AsyncClient,
             )
 
+    # Stripe refunds, TEST MODE ONLY (owner ruling OD8). All three stay None
+    # unless `resolve_stripe_config` returned a test key, so with the flag off
+    # `build_stripe_refund_tool` returns [] and the proxy gets no Stripe store:
+    # exactly the pre-wiring container.
+    #
+    # Memory backend: the tool IS registered (mirroring the WIF repo, which is
+    # in-memory there too) but every call fails closed - the in-memory account
+    # store starts empty and nothing writes it (ToolStripeNotConnected), and
+    # `spend_ledger` above is None (ToolSpendUnavailable).
+    #
+    # `refund_limits` is wired wherever a pool exists. With no rows in
+    # org_refund_authority_limits / org_refund_review_thresholds the proxy's
+    # review rule (proxy.py `_check_refund_review_threshold`) defers EVERY
+    # refund to a human - the fail-closed direction. Leaving it unwired would
+    # silently skip that review rule (proxy.py `_authorize_stripe`).
+    stripe_repo: "StripeAccountRepository | None" = None
+    refund_limits: "RefundLimitsReader | None" = None
+    stripe_executor_factory = None
+    if stripe_secret_key is not None:
+        import httpx as _stripe_httpx
+
+        from .app.stripe.actions import StripeRefundExecutor
+        from .dal.stripe_accounts import (
+            InMemoryStripeAccountRepository,
+            PgStripeAccountRepository,
+        )
+
+        if db is not None:
+            from .dal.refund_limits import OrgRefundLimitsDAL
+
+            stripe_repo = PgStripeAccountRepository(db)
+            refund_limits = OrgRefundLimitsDAL(db)
+        else:
+            stripe_repo = InMemoryStripeAccountRepository()
+        platform_stripe_key = stripe_secret_key
+
+        def stripe_executor_factory() -> "StripeRefundExecutor":
+            return StripeRefundExecutor(
+                platform_secret_key=platform_stripe_key,
+                http_client_factory=_stripe_httpx.AsyncClient,
+            )
+
     tool_proxy = ToolProxy(
         registry=default_tool_registry(
             credential_vault=credential_vault, oauth_credentials=oauth_credentials,
             wif_repo=wif_repo, gcp_executor_factory=gcp_executor_factory,
+            stripe_repo=stripe_repo, stripe_executor_factory=stripe_executor_factory,
+            # HARD-CODED, never read from Settings: this process is test mode only.
+            stripe_livemode=False,
         ),
         audit=audit,
         public_key=authority.public_key,
@@ -937,6 +1017,10 @@ async def build_container(settings: Settings | None = None) -> Container:
         oauth_credentials=oauth_credentials,
         permission_gate=permission_gate,
         wif_repo=wif_repo,
+        stripe_repo=stripe_repo,
+        # HARD-CODED, never read from Settings: this process is test mode only.
+        stripe_livemode=False,
+        refund_limits=refund_limits,
     )
     # AgentExecutionService also carries the synchronous decision gate (owner
     # decisions D1/D3/D4/D5): the SAME pure evaluator the async engine uses

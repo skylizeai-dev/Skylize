@@ -10,11 +10,48 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import model_validator
+from pydantic import SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 #: Upper bound on `Settings.jwt_access_token_ttl_minutes` (owner ruling OD3-AMEND).
 _MAX_ACCESS_TOKEN_TTL_MINUTES = 15
+
+#: The only Stripe secret-key prefixes this process accepts (owner ruling OD8,
+#: docs/decisions/2026-11-07_owner_rulings.md:58: "Stripe: wire in test mode
+#: behind a flag, off in production"). `sk_test_` is a test-mode secret key,
+#: `rk_test_` a test-mode restricted key. Anything else - in particular the
+#: live-mode `sk_live_` / `rk_live_` - is refused at boot.
+STRIPE_TEST_KEY_PREFIXES: tuple[str, ...] = ("sk_test_", "rk_test_")
+
+
+def stripe_config_problem(*, enabled: bool, secret_key: str) -> str | None:
+    """Return WHY this Stripe configuration is refused, or None when acceptable.
+
+    Pure, and shared by `Settings._require_stripe_test_mode` and the
+    composition root's `resolve_stripe_config` (bootstrap.py), which re-checks
+    because a Settings mutated after construction bypasses the validator. The
+    message names the SKYLIZE_ variables and NEVER contains the key value.
+    """
+    key = secret_key.strip()
+    if key and not key.startswith(STRIPE_TEST_KEY_PREFIXES):
+        return (
+            "SKYLIZE_STRIPE_SECRET_KEY is not a Stripe TEST-mode key (it must start "
+            "with sk_test_ or rk_test_). Live keys are refused: Stripe is wired in "
+            "test mode only (owner ruling OD8)."
+        )
+    if enabled and not key:
+        return (
+            "SKYLIZE_STRIPE_ENABLED is true but SKYLIZE_STRIPE_SECRET_KEY is not "
+            "set. Both are required together to enable Stripe test mode, or "
+            "neither to leave it off."
+        )
+    if key and not enabled:
+        return (
+            "SKYLIZE_STRIPE_SECRET_KEY is set but SKYLIZE_STRIPE_ENABLED is not "
+            "true. Both are required together to enable Stripe test mode, or "
+            "neither to leave it off."
+        )
+    return None
 
 
 class Settings(BaseSettings):
@@ -26,6 +63,11 @@ class Settings(BaseSettings):
         # still win over .env values.
         env_file=".env",
         env_file_encoding="utf-8",
+        # Keep raw inputs out of ValidationError text. Without this, a refused
+        # value is echoed back as `input_value=...` in the boot traceback - for
+        # a refused SKYLIZE_STRIPE_SECRET_KEY that is (part of) a live secret
+        # key. Verified empirically: pydantic 2.13 printed the key's tail.
+        hide_input_in_errors=True,
     )
 
     backend: Literal["memory", "postgres"] = "memory"
@@ -164,6 +206,31 @@ class Settings(BaseSettings):
     # (bootstrap.py `resolve_notion_config`).
     notion_oauth_client_id: str = ""
     notion_oauth_client_secret: str = ""
+
+    # Stripe refunds, TEST MODE ONLY (owner ruling OD8,
+    # docs/decisions/2026-11-07_owner_rulings.md:58, recorded status LATER).
+    # Consumed by bootstrap.py `resolve_stripe_config`, which wires the existing
+    # `stripe.refund` tool with `stripe_livemode=False` HARD-CODED.
+    #
+    # The key is the PLATFORM secret key, sent with a `Stripe-Account: acct_...`
+    # header naming the connected account (app/stripe/actions.py:155-164) - not
+    # a per-tenant credential; nothing per-tenant is stored.
+    #
+    # "Off in production" is enforced as "live keys are refused": Settings has
+    # no environment/production field to key on, so `_require_stripe_test_mode`
+    # refuses any key that does not start with STRIPE_TEST_KEY_PREFIXES, with
+    # the flag on OR off.
+    #
+    # Both-or-neither, like the Slack / Google / Asana / Notion / GitHub pairs
+    # above: flag on without a key is refused, and a key with the flag off is
+    # refused too (a half-set feature). To turn Stripe off, clear BOTH.
+    #
+    # SecretStr, unlike the plain-str secrets in this class: those DO appear in
+    # repr(Settings) today (there is no SecretStr / repr=False elsewhere in
+    # src/skylize). This one deliberately does not. A deliberate deviation for
+    # this new field only, not a claim about the others.
+    stripe_enabled: bool = False
+    stripe_secret_key: SecretStr = SecretStr("")
 
     # ---- GCP Workload Identity Federation (docs/06_integrations/
     # gcp_wif_killswitch_design.md). Skylize acts as a public OIDC ISSUER for
@@ -458,6 +525,18 @@ class Settings(BaseSettings):
                 f"Got {self.llm_retry_max_attempts}, which would make zero "
                 "provider requests."
             )
+        return self
+
+    @model_validator(mode="after")
+    def _require_stripe_test_mode(self) -> "Settings":
+        # Fail closed at boot (owner ruling OD8). See the field comment above
+        # and `stripe_config_problem` for the four refused combinations.
+        problem = stripe_config_problem(
+            enabled=self.stripe_enabled,
+            secret_key=self.stripe_secret_key.get_secret_value(),
+        )
+        if problem is not None:
+            raise ValueError(problem)
         return self
 
 
