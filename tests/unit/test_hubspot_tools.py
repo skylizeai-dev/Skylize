@@ -7,7 +7,8 @@ a real instance backed by an in-memory fake repo so credential resolution
 OD4 (owner ruling): `create_contact` is a non-idempotent POST, so it must never
 retry a 5xx or a post-send timeout (the contact may already exist). It may retry
 only HTTP 429 (honoring a bounded Retry-After) and pre-send connect failures;
-every ambiguous outcome is surfaced as ToolExecutionError, never swallowed.
+every ambiguous outcome is surfaced as ToolOutcomeUnknownError (a
+ToolExecutionError subclass), never swallowed.
 Retry sleeps are patched out (see `_patched_sleep`) so no test really waits.
 """
 
@@ -24,7 +25,12 @@ import pytest
 from skylize.app.credentials.encryption import FernetEncryptor
 from skylize.app.credentials.vault import CredentialVault
 from skylize.dal.credentials import InMemoryCredentialRepository
-from skylize.tools.base import ToolContext, ToolError, ToolExecutionError
+from skylize.tools.base import (
+    ToolContext,
+    ToolError,
+    ToolExecutionError,
+    ToolOutcomeUnknownError,
+)
 from skylize.tools.builtin.hubspot_tools import (
     HubSpotClient,
     build_hubspot_create_contact_tool,
@@ -190,8 +196,10 @@ async def test_create_contact_api_error_propagates_as_tool_error() -> None:
 
     with patch("skylize.tools.builtin.hubspot_tools.httpx.AsyncClient", return_value=mock_client):
         inp = tool.input_schema.model_validate({"email": "a@example.com"})
-        with pytest.raises(ToolError):
+        with pytest.raises(ToolError) as exc_info:
             await tool.handler(inp, _ctx("org_a"))
+    # A definitive 4xx is not ambiguous.
+    assert not isinstance(exc_info.value, ToolOutcomeUnknownError)
 
 
 async def test_create_contact_retries_on_429_then_succeeds() -> None:
@@ -316,6 +324,8 @@ async def test_create_contact_5xx_sends_exactly_one_request_and_surfaces_outcome
             await tool.handler(inp, ctx)
 
     assert client.post.await_count == 1
+    # OD4 follow-up: the ambiguity is carried by the TYPE, not only the text.
+    assert isinstance(exc_info.value, ToolOutcomeUnknownError)
     msg = str(exc_info.value)
     for marker in _AMBIGUOUS:
         assert marker in msg
@@ -336,6 +346,7 @@ async def test_create_contact_read_timeout_sends_exactly_one_request() -> None:
             await tool.handler(inp, ctx)
 
     assert client.post.await_count == 1
+    assert isinstance(exc_info.value, ToolOutcomeUnknownError)
     for marker in _AMBIGUOUS:
         assert marker in str(exc_info.value)
     sleep.assert_not_awaited()
@@ -364,6 +375,7 @@ async def test_create_contact_post_send_transport_errors_are_not_retried(
             await tool.handler(inp, ctx)
 
     assert client.post.await_count == 1
+    assert isinstance(exc_info.value, ToolOutcomeUnknownError)
     for marker in _AMBIGUOUS:
         assert marker in str(exc_info.value)
     sleep.assert_not_awaited()
@@ -459,6 +471,8 @@ async def test_create_contact_connect_failure_exhausted_reports_not_sent() -> No
 
     assert client.post.await_count == 3
     assert "was NOT sent" in str(exc_info.value)
+    # Definitely not sent -> NOT an outcome-unknown; a retry later is safe.
+    assert not isinstance(exc_info.value, ToolOutcomeUnknownError)
 
 
 async def test_search_contacts_still_retries_5xx_read_only() -> None:

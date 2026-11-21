@@ -712,6 +712,18 @@ class ToolExecutionError(ToolError):
     """The tool's handler raised while executing."""
 
 
+class ToolOutcomeUnknownError(ToolExecutionError):
+    """The side effect MAY have happened; the tool cannot tell (owner ruling OD4).
+
+    Raised when a non-idempotent write was possibly delivered but no definitive
+    answer came back (a 5xx, or a transport error after the request may have
+    been sent). The caller must VERIFY the outcome before any retry, never
+    blindly re-run. Subclasses `ToolExecutionError` so every existing
+    `except ToolExecutionError` keeps catching it; `ToolProxy.invoke` preserves
+    the subclass so a caller can branch on the TYPE instead of the message.
+    """
+
+
 class ToolWifDenied(ToolPermissionDenied):
     """A WIF-dependent tool call was refused at the federation gate.
 
